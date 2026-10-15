@@ -27,6 +27,72 @@ Aturan penulisan yang dipakai di berkas ini:
 
 ## Riwayat
 
+## 2026-10-15 — PUSH PERTAMA BERHASIL: 288 berkas MesinPOS kini ter-backup di GitHub
+
+**Ruang lingkup:** permintaan eksplisit pemilik repo — “Push-kan commit 6ad97f2 ini ke GitHub sekarang dari
+sini”. Yang dijalankan: **satu** perintah `git push origin main` — tanpa commit baru, tanpa menyentuh berkas
+lain. Hasilnya commit `6ad97f2` sudah ada di `origin/main`, jadi seluruh kode (288 berkas) kini punya
+cadangan di GitHub. Ini menutup rangkaian temuan “belum ter-backup” dari entri-entri 2026-10-15 sebelumnya.
+
+**Berkas:** diubah: `worklog.md` (entri ini) · baru: tidak ada.
+
+**Verifikasi:**
+- `git push origin main` → `93f2655..6ad97f2  main -> main`, **exit 0**
+- `git status -sb` → `## main...origin/main` (tanpa `[ahead 1]`)
+- `git rev-parse HEAD` → `6ad97f27bfb6f0e434d32acd8837230d3635e16a`; `git ls-remote origin refs/heads/main` →
+  **hash yang sama** (`6ad97f2…`), exit 0
+- `git ls-tree -r --name-only origin/main | wc -l` → `288`; `grep -c '^isolate/'` → `0`
+- Berkas penting terbaca di `origin/main`: `src/pages/KdsPage.tsx`, `scripts/verify-fnb.mjs`,
+  `public/panduan/panduan-mesinpos.pdf`, `docs/panduan-backup-github.md`, `package.json`, `worklog.md`,
+  `README.md`
+- `git status --porcelain` → hanya ` M worklog.md` (entri worklog yang ditulis sesudah push; ikut commit
+  berikutnya)
+
+**Catatan / blocker:** tidak ada kode aplikasi yang berubah, jadi tidak ada uji tipe/build yang perlu
+dijalankan. Yang **belum** ter-backup ke GitHub dan memang di luar lingkup commit ini: `node_modules/`,
+`dist/`, `isolate/` (hasil build, bisa dibuat ulang), rahasia lokal (`.env.local`), dan data produksi Convex
+(deployment `mellow-narwhal-477`). Tabel **Status Phase 1–6** dan daftar **Blocker yang masih terbuka** tidak
+berubah.
+
+## 2026-10-15 — Diagnosa error autentikasi push: jalur kredensial Freebuff bekerja, commit `6ad97f2` siap dikirim
+
+**Ruang lingkup:** pemilik repo melaporkan keluaran error
+`Remote: Invalid username or token. Password authentication is not supported for Git operations.` +
+`fatal: Authentication failed for 'https://github.com/phansugi/saas-pos.git/'`. Yang dikerjakan: memeriksa
+keadaan repo dan menguji apakah jalur kredensial terkelola Freebuff bekerja dari workspace ini — bukan dari
+asumsi. Tidak ada berkas repo yang diubah selain entri ini.
+
+**Hasil:**
+
+1. Commit yang sudah dirapikan pemilik repo: `6ad97f2 "Backup awal: seluruh kode aplikasi MesinPOS"` —
+   **288 berkas**, `isolate/` sudah **0 berkas**, `.gitignore` di dalam commit sudah memuat `isolate`
+   (baris 4), dan tidak ada `.env.local`/`node_modules/`/`dist/` yang ikut. Pohon kerja bersih.
+2. Kredensial terkelola **bekerja dari workspace ini**: `git ls-remote origin refs/heads/main` → exit 0,
+   dan `git push --dry-run origin main` → exit 0 dengan `93f2655..6ad97f2  main -> main` (dry-run: tidak
+   ada byte yang benar-benar terkirim; `origin/main` masih `93f2655`).
+3. Kesimpulan: error itu muncul karena proses git tersebut **tidak menerima kredensial sama sekali** — git
+   lalu meminta username/kata sandi, dan GitHub menolak autentikasi kata sandi untuk operasi Git. Jadi
+   perintah yang gagal itu dijalankan di luar jalur terkelola Freebuff. Perbaikannya **bukan** memasang
+   PAT/kunci SSH/mengubah URL, melainkan menjalankan push dari konteks Freebuff (panel Changes atau
+   Terminal Freebuff); kalau error yang sama tetap muncul di sana, sambungkan ulang repo atau perbarui
+   izin Freebuff GitHub App.
+
+**Berkas:** diubah: `worklog.md` (entri ini) · baru: tidak ada.
+
+**Verifikasi:**
+- `git status -sb` → `## main...origin/main [ahead 1]`, pohon kerja bersih **saat pemeriksaan** (entri ini sendiri menambah satu perubahan `M worklog.md` setelahnya)
+- `git log --oneline -2` → `6ad97f2 Backup awal: seluruh kode aplikasi MesinPOS` di atas `93f2655`
+- `git ls-tree -r --name-only HEAD | wc -l` → `288`; `grep -c '^isolate/'` → `0`
+- `git show HEAD:.gitignore | rg -n isolate` → `4:isolate`
+- `git ls-tree -r --name-only HEAD | rg -i '[.]env|node_modules/|^dist/'` → tanpa hasil
+- `timeout 60 git ls-remote origin refs/heads/main` → `93f26551be840de713fe48b92590884779dad34e`, exit 0
+- `timeout 90 git push --dry-run origin main` → `93f2655..6ad97f2  main -> main`, exit 0 (dry-run, tidak mengirim)
+- `git config --get credential.helper` → kosong (normal: kredensial dipinjamkan per perintah, tidak disimpan)
+- Push sungguhan belum dijalankan (pemilik repo minta dipandu; commit/push milik panel Changes Freebuff)
+
+**Catatan / blocker:** backup di GitHub **belum ada** sampai push dijalankan — `origin/main` masih
+`93f2655`. Tabel **Status Phase 1–6** dan daftar **Blocker yang masih terbuka** tidak berubah.
+
 ## 2026-10-15 — Menyiapkan push pertama: `isolate/` dikecualikan, commit pengguna `46e0b0c` (299 berkas) belum di-push
 
 **Ruang lingkup:** permintaan pemilik repo — “Pandu saya untuk mem-push project ini ke github”. Saat
