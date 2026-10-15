@@ -91,7 +91,7 @@ store, backend, harness).
 ```bash
 bun scripts/verify-product-sku.mjs            # 39/39: format, kode kategori dari nama, nomor urut, recode saat kategori berganti (murni)
 bun scripts/verify-render.mjs                 # 738/738: tombol Buat otomatis, simpan dengan kolom SKU kosong & SKU ikut kategori (form + kartu edit) diklik di DOM tiruan
-VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 754/754: SKU otomatis & pindah kategori di server — counter naik, bentrok dilewati, SKU manual utuh
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 814/814: SKU otomatis & pindah kategori di server — counter naik, bentrok dilewati, SKU manual utuh
 ```
 
 ## Kategori produk: menambah, mengubah, menonaktifkan, menghapus (`category.manage`)
@@ -149,7 +149,7 @@ pemilih kategori di form produk dan tab POS dipakai semua peran yang bekerja den
 bun scripts/verify-categories.mjs              # 35/35: nama terlarang & kembar, kode SKU, kategori nonaktif, tab POS, dampak hapus (murni)
 bun scripts/verify-authz.mjs                    # 92/92: izin kategori ada di pemilik/manajer, bukan gudang/kasir/keuangan
 bun scripts/verify-render.mjs                   # 738/738: tambah/ubah/nonaktifkan/hapus kategori benar-benar diklik di DOM tiruan (+ tab POS & gerbang izin staf gudang)
-VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 754/754: CRUD kategori di server — izin ditolak untuk kasir/gudang, kategori nonaktif ditolak produk baru, hapus melepas produk tanpa mengubah SKU
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 814/814: CRUD kategori di server — izin ditolak untuk kasir/gudang, kategori nonaktif ditolak produk baru, hapus melepas produk tanpa mengubah SKU
 ```
 
 ## Produk tersimpan: ubah, aktif/nonaktifkan, hapus (`product.manage`)
@@ -190,7 +190,7 @@ store, backend, harness).
 ```bash
 bun scripts/verify-product-edit.mjs           # 36/36: batas nama, bentuk & kembarnya SKU, harga beli, kalimat aktif/nonaktif, pagar hapus (murni)
 bun scripts/verify-render.mjs                 # 738/738: ubah nama/SKU/harga beli, nonaktifkan/aktifkan, dialog hapus berpagar, dan gambar produk di kartu kasir & keranjang diklik di DOM tiruan
-VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 754/754: products.update/setActive/deletionCheck/remove di server — izin, SKU kembar, pagar hapus, produk nonaktif ditolak kasir
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 814/814: products.update/setActive/deletionCheck/remove di server — izin, SKU kembar, pagar hapus, produk nonaktif ditolak kasir
 ```
 
 ## Gambar produk (maksimal 8 per produk)
@@ -235,7 +235,7 @@ berlaku sama di kedua mode karena keduanya memakai `src/convex/lib/productImages
 bun scripts/verify-product-images.mjs          # 25/25: batas 8, tipe & ukuran berkas, label slot (murni)
 bun scripts/verify-product-sku.mjs             # 39/39: format SKU otomatis PBB-<KATEGORI>-<nomor urut> + recode saat kategori berganti (murni)
 bun scripts/verify-render.mjs                  # 738/738: unggah/hapus gambar, SKU otomatis & SKU ikut kategori diklik di DOM tiruan (kartu Produk baru & Atur harga), plus gambar produk di kartu kasir & baris keranjang
-VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 754/754: unggah sungguhan ke penyimpanan, batas 8 di server, berkas terhapus (404), SKU otomatis & pindah kategorinya
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 814/814: unggah sungguhan ke penyimpanan, batas 8 di server, berkas terhapus (404), SKU otomatis & pindah kategorinya
 ```
 
 ## PPN workspace: tarif bisa diatur & bisa dimatikan (`billing.manage`)
@@ -275,7 +275,7 @@ daripada membiarkannya seperti sebelumnya. Aturannya murni dan dipakai bersama d
 ```bash
 bun scripts/verify-tax.mjs                     # 71/71: tarif besar/kecil, pembacaan “11,5”, tenant lama tetap aktif, “aktif 0%” ditolak, kalimat & contoh perhitungan (murni)
 bun scripts/verify-render.mjs                  # 738/738: setelan PPN diklik di DOM tiruan — ubah tarif, aktif 0% ditolak, matikan PPN, lalu baris PPN di kasir & tagihan langganan mengikuti; 12% menghasilkan total 31.360 untuk belanja 28.000
-bun scripts/verify-backend.mjs                 # 754/754: tenants.updateTax di server — izin billing.manage, struk & tagihan langganan memakai tarif setelan, penolakan tidak menyentuh setelan tersimpan
+bun scripts/verify-backend.mjs                 # 814/814: tenants.updateTax di server — izin billing.manage, struk & tagihan langganan memakai tarif setelan, penolakan tidak menyentuh setelan tersimpan
 ```
 
 ## Pajak & pungutan F&B: PBJT, biaya layanan, dan kewajiban pusat (`billing.manage`)
@@ -342,7 +342,7 @@ harness).
 ```bash
 bun scripts/verify-fnb-tax.mjs                 # 126/126: PBJT menggantikan PPN, batas 10%, biaya layanan bukan pajak, bagian bebas Rp 500 juta & batas waktu 7/4/3 tahun, PPh 4(2), ringkasan setoran, laporan pajak per bulan (omzet/PBJT/PPN/biaya layanan, void dilewati, bulan nol, bulan berjalan)
 bun scripts/verify-render.mjs                  # 738/738: PBJT 10% + biaya layanan 7% diklik di DOM tiruan — tersimpan di workspace, struk kasir 28.000 → 32.760, “aktif 0%” ditolak, pengecualian usaha mikro & peringatan batas omzet, plus kartu laporan pajak F&B 12 bulan di halaman Laporan
-bun scripts/verify-backend.mjs                 # 754/754: tenants.updateFnbTax di server — izin billing.manage, struk mencatat taxKind/serviceCharge, PBJT menggantikan PPN, pengecualian mikro, dan reports.fnbTaxMonths dari penjualan tersimpan (void hilang dari laporan, bulan sebelumnya nol)
+bun scripts/verify-backend.mjs                 # 814/814: tenants.updateFnbTax di server — izin billing.manage, struk mencatat taxKind/serviceCharge, PBJT menggantikan PPN, pengecualian mikro, dan reports.fnbTaxMonths dari penjualan tersimpan (void hilang dari laporan, bulan sebelumnya nol)
 ```
 
 Panduan PDF (`/app/panduan`) masih memuat bagian PPN yang lama; bagian pajak F&B ada di README ini dan
@@ -513,7 +513,7 @@ bun scripts/verify-escpos.mjs                  # 58/58: urutan perintah (ESC @, 
 #   diam-diam beralih ke dialog cetak
 bun scripts/verify-struk.mjs                   # 111/111: katalog tiga printer (cara kerja/kelebihan/kekurangan/cocok untuk/contoh produk), kolom per lebar kertas, bawaan dibaca dari tenant lama, rangkap ditolak di thermal/portable, catatan kaki 2×40, baris pembeli (nama member / “Cash” saat kosong atau spasi, dipotong selebar kertas), baris kasir (dilewati kalau namanya kosong), logo (kotak tetap 110 px × 110 px di semua printer & kertas, masih muat di 58 mm, hitam putih lewat saringan grayscale, kosong/spasi = tanpa logo), tata letak baris (bungkus nama, nominal rata kanan, TOTAL, penanda ASLI/TEMBUSAN), kertas otomatis (yang tak didukung menyesuaikan ke **kertas terdekat**: 76 mm → 80 mm, 241 mm → 80 mm, dot matrix 80 mm → 76 mm, portable 80 mm → 58 mm; lebar tak terbaca jatuh ke kertas pertama), aturan cetak `receiptPrintCss` yang menulis ukuran kertasnya sendiri per lebar (80 mm margin 4 mm, portable 58 mm margin 2 mm, dot matrix 241 mm dua lembar) beserta pembulatan tinggi notanya, dan saran setelan dari modul workspace (`suggestReceiptSetting`: grosir tanpa F&B → dot matrix 76 mm dua rangkap beralasan tembusan, F&B → thermal 80 mm (kafe yang sekaligus grosir ikut jalur thermal, bukan jalur faktur), ritel/workspace kosong → thermal 80 mm satu lembar, catatan kaki bawaan tetap, plus pembanding pilihan mesin yang sengaja mengabaikan catatan kaki)
 bun scripts/verify-render.mjs                  # 738/738: kartu struk diklik di DOM tiruan — unggah/hapus logo (data URL di sesi, kotak 110 px × 110 px hitam putih di pratinjau & di setiap lembar struk kasir, tidak ikut melebar saat kertasnya 241 mm), logo yang sama sebagai penanda workspace di sidebar (ikon bawaan sebelum ada logo) & kartu identitas di halaman Panduan, pindah printer & kertas (pratinjau 48/40/80 kolom), rangkap 2 menampilkan lembar TEMBUSAN, catatan kaki tersimpan, thermal memangkas rangkap, kartu saran setelan otomatis (toko grosir disarankan dot matrix 76 mm dua rangkap — lencana dasarnya menyebut modulnya, alasannya terbaca, dan menekan “Pakai saran ini” memindahkan pilihan mesin tanpa menghapus catatan kaki yang sedang diketik, lalu tombolnya membaca “Sudah sesuai”), plus struk yang dicetak kasir memakai setelan yang sama, termasuk baris pembeli “Member : Cash” yang berganti jadi nama member begitu kasir memilihnya dan baris kasir “Kasir : Uji Struk”
-bun scripts/verify-backend.mjs                 # 754/754: tenants.updateReceipt & logo toko di server — izin billing.manage (kasir ditolak), rangkap ditolak di thermal, lebar tak didukung ditolak, catatan kaki >2 baris ditolak, berkas bukan gambar & >1 MB ditolak tanpa meninggalkan logo setengah jadi, logo sah tersimpan sebagai id berkas & dibaca kasir, ganti logo menunjuk berkas baru, hapus logo mengosongkan kolomnya
+bun scripts/verify-backend.mjs                 # 814/814: tenants.updateReceipt & logo toko di server — izin billing.manage (kasir ditolak), rangkap ditolak di thermal, lebar tak didukung ditolak, catatan kaki >2 baris ditolak, berkas bukan gambar & >1 MB ditolak tanpa meninggalkan logo setengah jadi, logo sah tersimpan sebagai id berkas & dibaca kasir, ganti logo menunjuk berkas baru, hapus logo mengosongkan kolomnya
 ```
 
 Di **browser sungguhan** (Chromium/Playwright, `PLAYWRIGHT_DIR` di luar repo) lebar pratinjau, logo, & aturan
@@ -802,7 +802,7 @@ bun scripts/verify-struk-pdf.mjs               # 59/59: berkas PDF diperiksa byt
 bun scripts/verify-render.mjs                  # 738/738: gerbang alur struknya diklik di DOM tiruan — keranjang yang belum dibayar belum menawarkan Cetak/Struk & kirim sama sekali, pembayaran lunas memunculkan keduanya beserta catatan nomor & total notanya, dan keranjang berikutnya tidak menggantikan struk yang dicetak; juga pembayaran lunas membuka dialog struk (bukan dialog cetak) — tiga pilihannya ada, cetakan masih 0 sampai Cetak ditekan,  nomor nota penjualan yang baru lunas disebut, Unduh PDF melaporkan nama berkas + ukurannya, tombol daftar PDF membuka berkas yang sudah dibuat (tautan `blob:`) lalu menutupnya kembali, **struk tanpa member (pembeli umum) diberi kolom nomor pembeli** yang menolak nomor belum lengkap, lalu nomor yang sah berhenti di ketiadaan kanvas (bukan ditolak soal penerimanya), member tanpa nomor WA diperingatkan lalu pengirimannya ditolak beserta sebabnya tetapi juga diberi kolom nomor, member yang punya nomor pun berhenti di titik yang sama (sebabnya disebut, bukan diklaim terkirim), dan menutup dialognya tidak menghapus notanya; plus **satu jalur bagikan**: dialognya menawarkan “Bagikan gambar struk” dan **tidak** lagi menawarkan tombol kedua, tanpa kanvas jawabannya mengarahkan ke Unduh PDF, dan walaupun `navigator.share`/`canShare` dipasang **tidak ada berkas kosong yang diserahkan** beserta tidak ada klaim “diserahkan” — gambar berlogonya sendiri diperiksa piksel per piksel di Chromium
 bunx convex env list --names-only            # kunci apa saja yang ada di deployment (tanpa nilainya)
 bunx convex run receiptWaData:channelStatus  # baca-saja: keadaan kanal WhatsApp di deployment — configured + nama kunci yang belum diisi
-VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 754/754: halaman data kirim struk di server — struk pembeli umum (tanpa `memberId`) diterima, nomornya boleh tidak ada/ belum sah dan ditolak beralasan dengan petunjuk mengisi kolom nomor pembeli, nomor yang tersimpan di data member tetap menang walau kasir mengetik nomor lain, member tanpa nomor ditolak beserta namanya, dan orang di luar workspace tidak bisa mengirim struk (semuanya dengan **gambar 0 byte**, jadi tidak ada satu pun permintaan yang keluar ke WhatsApp)
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 814/814: halaman data kirim struk di server — struk pembeli umum (tanpa `memberId`) diterima, nomornya boleh tidak ada/ belum sah dan ditolak beralasan dengan petunjuk mengisi kolom nomor pembeli, nomor yang tersimpan di data member tetap menang walau kasir mengetik nomor lain, member tanpa nomor ditolak beserta namanya, dan orang di luar workspace tidak bisa mengirim struk (semuanya dengan **gambar 0 byte**, jadi tidak ada satu pun permintaan yang keluar ke WhatsApp)
 # PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-struk-browser.mjs http://localhost:5173   # mode data apa pun
 #   → di Chromium sungguhan: dialog struk terbuka setelah pembayaran tunai tanpa satu pun panggilan
 #     `window.print`, **Unduh PDF menghasilkan unduhan sungguhan** yang byte-nya dibaca kembali di sini
@@ -2085,6 +2085,37 @@ tetapi **jalur masuk tenant belum dipindahkan** ke Convex Auth, jadi permukaan t
 (Convex Auth) dan itulah yang dipakai jalur backstage platform: di sana `ctx.auth.getUserIdentity()`
 terisi dan gerbangnya menuntut identitas terverifikasi.
 
+## Halaman Profil: identitas orangnya & identitas usahanya, di satu halaman (`/app/profil`)
+
+Dua profil yang berbeda pemiliknya diubah berdampingan di **satu halaman**, dan pembagian izinnya
+mengikuti siapa yang berhak — bukan selera tata letak:
+
+- **Profil saya** (`users.updateProfile`) — nama yang tercetak sebagai baris `Kasir` di struk dan tampil
+di daftar anggota Tim & Peran, beserta nomor WhatsApp pengguna aktif. **Semua peran** boleh
+memperbaikinya; server memeriksa bahwa yang diubah memang barisnya sendiri (`verifyActor`), jadi kasir
+tidak perlu izin tambahan hanya untuk membetulkan namanya. **Email tidak diubah dari sini**: ia identitas
+masuk (kode OTP dikirim ke sana), jadi menggantinya berarti masuk dengan email baru — kolomnya
+ditampilkan sebagai keterangan, bukan kolom.
+- **Profil usaha** (`tenants.updateProfile`) — nama usaha, alamat, email kontak, dan nomor WA. Izinnya
+`billing.manage`, sama dengan setelan workspace lain; peran tanpa izin itu tetap **membaca** isinya
+(mereka perlu tahu alamat & WA tokonya) tetapi kolomnya terkunci, alasannya disebut, dan server menolak
+kalau aksinya dipaksakan dari luar halaman. Perubahannya menulis jejak audit `tenant.profile`.
+- **Keluar** — mengakhiri sesi **di perangkat ini**; data workspace tidak ikut terhapus.
+
+Aturannya **satu sumber** (`src/convex/lib/profile.ts`, dipakai halaman, kedua store, dan server): nama
+2–60 karakter (spasi pinggir & ganda dirapikan), alamat maksimal 160, email memakai validator yang sama
+dengan pengiriman kode masuk, dan nomor WhatsApp memakai normalisasi yang sama dengan undangan tim
+(`08…`/`8…`/`+62…` → `62812…`, bentuk yang dibutuhkan `wa.me`). Kolom yang boleh kosong berarti
+**belum diisi** (bukan salah): lencana kartunya menyebut apa yang masih kurang (`Belum ada: nomor WA`),
+dan satu kolom yang tidak lolos membatalkan **seluruh** penyimpanan — setelan separuh tersimpan lebih
+membingungkan daripada tidak tersimpan sama sekali.
+
+```bash
+bun scripts/verify-profile.mjs   # 59/59: aturan murni (nama, alamat, email, nomor wa.me, batal-semua) + halaman aslinya diketik & disimpan di DOM tiruan — kedua kartu, notis, lencana, terkunci untuk kasir, dan keluar
+bun scripts/verify-menus.mjs     # 427/427: rute /app/profil tanpa gerbang izin terbuka untuk kelima peran, dan menunya ada di sidebar
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 814/814: kontrak deployment `users.updateProfile` (baris sendiri lewat `verifyActor`, tanpa izin peran) & `tenants.updateProfile` (izin `billing.manage`, nomor jadi `628…`, satu kolom salah = batal semua, anggota nonaktif & orang luar ditolak)
+```
+
 ## Satu akun = satu bisnis: workspace yang berdiri sendiri
 
 Setiap akun yang mendaftar mendapat **workspace-nya sendiri**, dan tidak ada dua akun yang berbagi
@@ -2292,7 +2323,7 @@ bun convex run members:remove '{"tenantId":"<tenantId>","actorId":"<userId pemil
 ```bash
 bun scripts/verify-team.mjs       # 47/47: aturan murni nomor WA, isi pesan wa.me, pagar ubah/nonaktif/hapus anggota, dan keputusan tombol undangan (`resolveTeamInviteForm`)
 bun scripts/verify-store-gate.mjs # 17/17: setiap query berizin di src/convex digerbang `has(<izin>)` dari roles.myAccess di store, wajib "skip", izin sesi dilarang, keanggotaan nonaktif dikenali
-bun scripts/verify-backend.mjs    # 754/754: dua bisnis bernama sama → dua workspace, isolasi baca & tulis, onboarding ulang memakai workspace sendiri, undangan tim + jejak kirim emailnya, undangan WhatsApp (nomor ternormalisasi + jejak buka tautan) & kelola anggota di server, plus izin kasir (ditolak `products.listAll`, `roles.myAccess` tanpa product.manage) & penanda `active:false` untuk keanggotaan nonaktif
+bun scripts/verify-backend.mjs    # 814/814: dua bisnis bernama sama → dua workspace, isolasi baca & tulis, onboarding ulang memakai workspace sendiri, undangan tim + jejak kirim emailnya, undangan WhatsApp (nomor ternormalisasi + jejak buka tautan) & kelola anggota di server, plus izin kasir (ditolak `products.listAll`, `roles.myAccess` tanpa product.manage) & penanda `active:false` untuk keanggotaan nonaktif
 bun scripts/verify-render.mjs     # 738/738: onboarding menahan formulir selama workspace dipulihkan, form anggota tim menambah anggota, kolom Undangan + Kirim ulang bekerja, tombol Kirim via WA membuka wa.me, Ubah/Nonaktifkan/Hapus anggota tersimpan, notis keanggotaan yang dinonaktifkan, serta tombol undangan yang mati selama workspace belum tersambung ke server
 bun scripts/verify-menus.mjs      # 406/406: sumber izin gerbang rute — sesi tanpa tenant tanpa izin, kasir tanpa product.manage, peran kustom menggantikan peran bawaan
 ```
@@ -2418,8 +2449,12 @@ Pemasangannya sendiri adalah PWA biasa tanpa plugin tambahan, jadi `vite.config.
   **selain itu lewat begitu saja** — `/src/…`, `/@vite/…`, permintaan tulis, serta seluruh permintaan
   lintas origin (Convex) tidak pernah dicache. Itu yang membuat service worker tidak membuat modul dev
   basi di preview maupun di pengembangan lokal;
-- ikon PNG dibuat ulang lewat `node scripts/gen-icons.mjs` (encoder PNG sendiri, tanpa dependensi),
-  dan bentuknya sama persis dengan `public/icon.svg`.
+- ikonnya adalah **mark brand aplikasi** — ikon `store` lucide yang sama dengan penanda di sidebar,
+  beranda, halaman masuk, dan onboarding — digambar hijau merek (`#20C589`) di atas bidang gelap
+  aplikasi (`#070A13`, sama dengan `background_color` manifest). PNG-nya dibuat ulang lewat
+  `node scripts/gen-icons.mjs` (encoder PNG sendiri, tanpa dependensi; jalur ikonnya salinan apa adanya
+  dari `lucide-react`, jadi ikonnya tidak bisa menyimpang dari mark di aplikasi), dan bentuknya sama
+  persis dengan `public/icon.svg` yang dipakai favicon.
 
 Ajakan pemasangan mengikuti aturan di `src/lib/pwa.ts` dan tampil **sekali** saja:
 
@@ -2434,7 +2469,7 @@ Ajakan pemasangan mengikuti aturan di `src/lib/pwa.ts` dan tampil **sekali** saj
 
 ```bash
 bun scripts/verify-theme.mjs    # 50/50: aturan tema, paritas palet CSS, permukaan sidebar (gelap, beda nyata dari latar, teks terang), bootstrap index.html dieksekusi, tombol di DOM
-bun scripts/verify-pwa.mjs      # 1492/1492: manifest fullscreen, ikon (dibaca sampai piksel), sw.js dieksekusi, ajakan 10 detik & tombol header
+bun scripts/verify-pwa.mjs      # 1493/1493: manifest fullscreen, ikon (dibaca sampai piksel — mark brand hijau di bidang gelap), sw.js dieksekusi, ajakan 10 detik & tombol header
 bun scripts/verify-version.mjs  # 44/44: ajakan “Versi baru tersedia — muat ulang” (aturan murni, DOM, jalur diam, shell /app/pos)
 # uji browser sungguhan (Chromium/Playwright, PLAYWRIGHT_DIR di luar repo) atas preview yang berjalan:
 # PLAYWRIGHT_DIR=/tmp/pw node scripts/verify-version-browser.mjs http://localhost:5173   # 7/7

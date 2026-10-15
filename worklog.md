@@ -27,6 +27,156 @@ Aturan penulisan yang dipakai di berkas ini:
 
 ## Riwayat
 
+## 2026-10-15 — Halaman Profil: identitas pengguna & identitas usaha di satu halaman
+
+**Ruang lingkup:** permintaan pemilik repo — “Isi Profil: Keduanya di satu halaman”. Yang dikerjakan:
+halaman **Profil** (`/app/profil`) yang memuat **dua** identitas berdampingan — profil orang yang sedang
+masuk (`users.updateProfile`) dan profil usahanya (`tenants.updateProfile`) — plus jalan keluar dari
+perangkat itu, dengan aturan murni **satu sumber** (`src/convex/lib/profile.ts`) yang dipakai halaman,
+kedua store, dan server. Putaran ini merapikan halaman yang sudah ada, memperbaiki tiga cacat yang
+ketemu saat menulis harnessnya, lalu menambah verifikasinya:
+
+1. **lencana “belum lengkap” kartu usaha selalu mengaku nomor WA belum diisi** — bentuk store
+   (`whatsapp`) diberikan apa adanya ke aturan murni yang menamai kolomnya `phone`, jadi kolom itu
+   terbaca kosong walau sudah tersimpan;
+2. **dua kalimat menyebut tempat yang salah** — halaman & komentar sesi/store menulis nama pengguna
+   “muncul di sidebar/header”, padahal shell aplikasi tidak pernah menampilkannya. Yang benar: nama itu
+   tercetak sebagai baris `Kasir` di struk dan tampil di daftar anggota Tim & Peran;
+3. **pesan “Nomor WhatsApp kosong.”** untuk isian yang jelas-jelas diisi tapi tidak punya satu digit pun
+   (mis. “abc”) — sebabnya sekarang disebut apa adanya.
+
+**Berkas:** baru: `src/pages/ProfilePage.tsx`, `src/lib/profile.ts`, `src/convex/lib/profile.ts`,
+`scripts/verify-profile.mjs` · diubah: `src/convex/users.ts` (`users.updateProfile` — tanpa izin peran,
+penjaganya `verifyActor`), `src/convex/tenants.ts` (`tenants.updateProfile` — izin `billing.manage` +
+jejak audit `tenant.profile`), `src/convex/schema.ts` (`tenants.address`/`email`/`phone`, opsional),
+`src/lib/session.tsx` (`setUserProfile`/`setTenantProfile`), `src/lib/store/types.ts`,
+`src/lib/store/demo.tsx`, `src/lib/store/convex.tsx` (`myProfile`/`setMyProfile`,
+`tenantProfile`/`setTenantProfile`), `src/App.tsx` (rute `profil` tanpa gerbang izin),
+`src/layouts/AppLayout.tsx` (menu Profil), `scripts/verify-menus.mjs` (rute & menu baru),
+`scripts/verify-backend.mjs` (60 check baru), `README.md` (bagian halaman Profil + angka `verify-backend`
+754 → 814 di seluruh berkas), `src/convex/_generated/api.d.ts` (hasil `convex dev --once`).
+
+**Verifikasi:**
+- `bun scripts/verify-profile.mjs` → **59/59**, exit 0. Isinya: aturan murni (nama 2–60 & perapian spasi,
+alamat ≤160, email memakai validator kode OTP, nomor `08…`/`8…`/`+62…` → `628…`, satu kolom salah =
+batal semua, lencana & kalimat notis, pembacaan baris tenant lama, satu sumber aturan di halaman/store/
+server) **plus halaman aslinya** dirender di DOM tiruan — kolom diketik, tombol simpan ditekan, lalu yang
+diperiksa adalah notis, lencana, header, tautan `wa.me`, dan sesi perangkat yang benar-benar tersimpan
+(termasuk: kasir boleh memperbaiki namanya sendiri, kolom identitas usaha terkunci untuknya, dan keluar
+benar-benar mengakhiri sesi perangkat itu).
+- `bun scripts/verify-menus.mjs` → **427/427**, exit 0 (menu ↔ rute ↔ izin untuk kelima peran;
+`/app/profil` satu-satunya rute tanpa gerbang izin dan memang terbuka untuk semuanya).
+- `bun scripts/verify-backend.mjs` (deployment dev, `VITE_CONVEX_URL` sudah ada di env) →
+**814/814**, exit 0. 60 check baru di dalamnya: `users.updateProfile` (kasir boleh menyimpan profilnya
+sendiri, nama dirapikan, nomor jadi `628…`, simpan-ulang = bukan perubahan, nama 1 karakter/nomor tanpa
+angka/nomor terlalu pendek ditolak tanpa mengubah barisnya, mengosongkan nomor = “belum diisi”) dan
+`tenants.updateProfile` (pemilik menyimpan nama/alamat/email/nomor, kalimatnya menyebut kelengkapan,
+kasir ditolak karena `billing.manage`, orang di luar workspace ditolak karena bukan anggota, alamat >160
+ditolak, dan satu kolom salah membatalkan seluruh penyimpanan).
+- `bun convex dev --once` → `✔ Convex functions ready! (4.67s)`.
+- `bun tsc -b --noEmit` → exit 0 tanpa keluaran.
+- `README.md` & `worklog.md` hanya markdown: tidak memengaruhi build/tipe, jadi tidak ada perintah build
+yang dijalankan untuknya.
+
+**Catatan / blocker:**
+- Jalur **Convex di peramban sungguhan** belum diuji untuk halaman ini (yang dijalankan: DOM tiruan mode
+demo + mutation langsung ke deployment). Kalau nanti ada laporan “halaman Profil gagal dimuat” di mode
+Convex, tersangka pertamanya adalah langganan query yang ditolak server, bukan halaman ini.
+- Identitas usaha (alamat, email, nomor WA) sekarang **tersimpan & terbaca** dari halaman Profil, tetapi
+belum dipakai dokumen lain: struk mencetak `tenants.name` saja. Jadi belum ada konsumen kedua — itu
+memang keputusan putaran ini, bukan lupa.
+- Halaman **Panduan** & PDF panduannya (18 bagian) belum menyebut langkah “isi profil”; pekerjaan itu
+tidak diminta di putaran ini.
+- Tabel **Status Phase 1–6** diperiksa: halaman Profil bukan klausa roadmap mana pun, jadi tidak ada
+status yang berubah. Daftar **Blocker** juga diperiksa dan **tidak diubah**: tidak ada butirnya yang
+tersentuh pekerjaan ini, dan butir #3 (jalur peramban sungguhan) cukup bertambah lingkupnya — halaman
+Profil di mode Convex belum pernah dibuka manusia/peramban, hanya DOM tiruan demo + mutation langsung.
+Catatan lama soal logo yang “belum bisa diatur dari halaman profil workspace” tetap apa adanya: yang
+dibuat sekarang adalah halaman Profil (identitas orang & usaha), bukan pengaturan logo.
+- Jumlah check yang tertulis di `README.md` bagian lain (`verify-backend` 754 → **814**) ikut
+diperbarui supaya angkanya tidak berbohong; entri worklog lama **tidak** ditulis ulang.
+
+## 2026-10-15 — Deploy ulang produksi: ikon PWA baru ikut terpasang
+
+**Ruang lingkup:** permintaan pemilik repo — “Deploy ulang supaya ikon PWA baru ikut terpasang di
+produksi”. Yang dikerjakan: memeriksa kesiapan deploy, menjalankan deploy ulang ke
+`mesinpos.freebuff.app`, lalu **membuktikan** ikon barunya benar-benar tersaji di produksi — bukan
+sekadar “deploy sudah dimulai”.
+
+**Berkas:** baru: tidak ada · diubah: `worklog.md` (entri ini + pembaruan butir Blocker #3). Tidak ada
+berkas aplikasi, skrip, atau aset yang disentuh — deploy mengirim berkas yang sudah ada.
+
+**Verifikasi:**
+- `freebuff-deploy check` → **exit 0**, `deployable: true`, `problems: []`,
+  install `bun install`, build `sh ./scripts/build-hosted.sh`
+- `freebuff-deploy start --json` → **exit 0**,
+  `{"message":"Redeploy of mesinpos.freebuff.app started. Poll freebuff-deploy status for progress…","started":true}`
+- `freebuff-deploy status` langsung sesudahnya → `state: "deploying"`
+  (“Installing dependencies and running build...”); beberapa puluh detik kemudian → `state: "active"`,
+  `fileCount: 11`, `unresolvedBuildErrorCount: 0`, `warnings: []`
+- Berkas produksi diunduh lalu **dibandingkan hash-nya** dengan berkas lokal (`sha256sum`, 16 digit
+  pertama) → semuanya **sama**: `icon.svg` `1b962397c1b1efae`, `icon-192.png` `db7ced365841a427`,
+  `icon-512.png` `a8deb5d0eea310c2`, `icon-maskable-512.png` `94919752c9e67c4b`,
+  `apple-touch-icon.png` `44839e34f55cc420`, `manifest.webmanifest` `63a2061b53452143` — keenamnya
+  dijawab **HTTP 200**
+- Mark di berkas produksi yang diunduh diperiksa isinya: `/icon.svg` memuat `#070A13` (2×) dan
+  `#20C589` (2×) — bidang gelap aplikasi + hijau merek, bukan warna lama (bidang hijau + bentuk putih)
+- Tidak ada TypeScript, skema, atau fungsi Convex yang berubah pada pekerjaan ini (kerja deploy +
+  markdown saja), jadi `bun tsc -b --noEmit` / `convex dev --once` tidak dijalankan
+
+**Catatan / blocker:** perangkat yang **sudah** memasang PWA-nya masih bisa melihat ikon lama sampai
+versi barunya diambil: `public/sw.js` menyimpan `/icon*` & `/apple-touch-icon*` dengan
+stale-while-revalidate (muatan pertama memakai salinan cache, muatan berikutnya baru menulis yang baru),
+dan ikon yang sudah tertanam di layar utama hanya benar-benar diganti saat pemasangan diulang. Ikon di
+layar utama HP sungguhan tetap **belum** pernah dilihat mata manusia — butir Blocker #3 sudah diperbarui
+untuk itu. Tabel **Status Phase 1–6** diperiksa: tidak ada klausa roadmap yang berubah karena ikon PWA
+bukan klausa fitur.
+
+## 2026-10-15 — Ikon PWA memakai mark brand aplikasi
+
+**Ruang lingkup:** permintaan pemilik repo — “ganti logo PWA dengan logo platform”. Karena repo ini tidak
+punya berkas “logo platform” tersendiri, saya tanyakan dulu mana yang dimaksud; pilihannya: **mark brand di
+dalam aplikasi**. Yang dikerjakan: seluruh ikon PWA (favicon `icon.svg`, `icon-192.png`, `icon-512.png`,
+`icon-maskable-512.png`, `apple-touch-icon.png`) kini memakai **mark yang sama dengan penanda di produk** —
+ikon `store` dari `lucide-react` (dipakai `AppLayout`, `LandingPage`, `AuthPage`, `OnboardingPage`) — digambar
+hijau merek `#20C589` di atas bidang gelap aplikasi `#070A13` (warna `theme_color` & `background_color`
+manifest). Sebelumnya ikonnya kebalikannya: bidang hijau merek dengan bentuk toko putih.
+
+Mark-nya tidak dikira-kira: `scripts/gen-icons.mjs` memuat **salinan apa adanya** tiga jalur ikon `store`
+dari `lucide-react` v1.55.0 (lisensi ISC), lalu menggambarnya sebagai garis tebal berujung bulat. Skrip itu
+sekarang punya pembaca jalur SVG kecil sendiri (M/L/H/V/A/Z termasuk busur elips dan pengulangan implisit),
+perabelahan kurva, goresan ber-anti-alias, dan encoder PNG tanpa dependensi yang sama seperti sebelumnya —
+jadi tetap bisa dijalankan dengan `node` polos.
+
+**Berkas:** baru: tidak ada · diubah: `scripts/gen-icons.mjs`, `public/icon.svg`, `public/icon-192.png`,
+`public/icon-512.png`, `public/icon-maskable-512.png`, `public/apple-touch-icon.png`,
+`scripts/verify-pwa.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+- Piksel ikon **sebelum** perubahan dibaca lebih dulu (decoder PNG, `pngjs` dari `node_modules`) untuk tahu
+  apa yang sebenarnya berubah: latar `#20C589` 24.630 piksel + bentuk putih 10.714 piksel di ikon 192
+- `node scripts/gen-icons.mjs` → **exit 0**; DIAG: `icon-192.png 3563 byte`, `icon-512.png 11446 byte`,
+  `icon-maskable-512.png 8684 byte`, `apple-touch-icon.png 2589 byte`, plus
+  `mark brand: ikon "store" lucide (3 jalur, tebal 2/24) · hijau merek #20c589 · bidang gelap #070a13`
+- Bentuk hasilnya dibaca ulang dari pikselnya (bukan dari kode generatornya): kanopi bergerigi + badan +
+  pintu tergambar di keempat ikon, warna marknya hijau `#20C589`, latarnya `#070A13`, sudut ikon 192/512
+  transparan, dan maskable/Apple terisi penuh sampai tepi
+- `bun scripts/verify-pwa.mjs` → **1493/1493 checks passed, exit 0** (sebelum perubahan: 1492/1492)
+- `public/icon.svg` diperiksa harness: memuat `#20C589`, bidang `#070A13`, kanvas `viewBox="0 0 512 512"`,
+  dan jalur pintu mark `store` yang sama dengan generatornya
+- Berkas non-kode/aset saja: tidak ada TypeScript, skema, atau fungsi Convex yang berubah, jadi
+  `bun tsc -b --noEmit` / `convex dev --once` tidak dijalankan pada pekerjaan ini
+
+**Catatan / blocker:** satu pemeriksaan di `scripts/verify-pwa.mjs` **diubah** dengan sengaja: dulu sudut
+ikon maskable harus berwarna `[32, 197, 137]` (hijau merek), sekarang harus **terisi penuh dengan bidang
+gelap aplikasi** `[7, 10, 19]` — sebab hijau bukan lagi warna latar ikon. Maksud aslinya tetap terjaga (sudut
+maskable tidak boleh kosong supaya tidak dipotong Android) dan diperkuat: ada pemeriksaan baru bahwa mark
+berwarna hijau merek benar-benar tergambar di **setiap** ikon (hitung piksel, bukan hanya satu titik).
+`dist/` dan `isolate/` tidak dibangun ulang (keduanya hasil build & di-gitignore) — ikon barunya masuk pada
+build/deploy berikutnya. Pemasangan sungguhan (ikon tampil di layar utama ponsel) tetap hanya bisa dibuktikan
+di browser/HP, sama seperti batasan yang sudah tercatat sebelumnya. Tabel **Status Phase 1–6** dan daftar
+**Blocker** tidak berubah karena tidak ada perilaku produk yang berubah.
+
 ## 2026-10-15 — Daftar nama kunci rahasia + tempatnya (`docs/daftar-kunci-rahasia.md`)
 
 **Ruang lingkup:** permintaan pemilik repo — “Catat daftar nama kunci rahasia yang dipakai proyek ini
@@ -9172,6 +9322,13 @@ kasir yang menunjuk tagihan yang sudah lunas tetap boleh disimpan), dan
    `verify-pwa.mjs` 1492/1492 (termasuk **mengeksekusi** `public/sw.js` dengan caches/fetch tiruan).
    Yang belum pernah dilihat mata manusia di browser: pemasangan PWA sungguhan (install prompt,
    ikon di layar utama, jendela layar penuh) pada build produksi.
+   **Pembaruan 2026-10-15 (ikon PWA = mark brand aplikasi, entri teratas).** `verify-pwa.mjs` kini
+   **1493/1493** (pemeriksaan baru: mark hijau merek di bidang gelap, dihitung dari piksel tiap ikon),
+   dan ikon barunya sudah **tersaji di produksi** — keenam berkas ikon/manifest diunduh dari
+   `https://mesinpos.freebuff.app/…` lalu hash-nya dibandingkan dengan berkas lokal, semuanya sama.
+   Yang **masih** berlaku: memasang PWA di HP sungguhan lalu melihat ikonnya di layar utama belum
+   pernah dilakukan; perangkat yang sudah terpasang sebelumnya juga bisa masih memakai ikon lama
+   sampai cache `sw.js`-nya diperbarui (`/icon*` disimpan lalu diperbarui di belakang).
    **Pembaruan 2026-10-13 (undangan kasir, entri teratas).** Jalur store Convex akhirnya dilihat di
    **browser sungguhan** (Chromium headless + Playwright, preview dijalankan sementara di mode Convex)
    untuk alur undangan kasir: masuk lewat halaman Masuk, onboarding, undangan di halaman Tim & Peran,
@@ -9459,13 +9616,14 @@ bun scripts/verify-struk-gambar.mjs           # gambar struk (PNG) untuk WhatsAp
 bun scripts/verify-struk-pdf.mjs              # berkas PDF struk (dibongkar byte per byte: xref, /Length, MediaBox, satu halaman per lembar, **objek gambar logo /DeviceGray + ukuran & isinya**, pita logo 29,11 mm, escape kurung, huruf luar Latin-1, pemotongan di kolom, determinisme) + nama berkas dari nomor nota + aturan kirim WhatsApp (kunci kanal, caption 1024 karakter, nomor dinormalkan & tersensor, **urutan nomor tujuan: nomor member menang atas nomor yang diketik kasir & asalnya ditandai, pembeli umum memakai nomor pemberiannya dan ditandai `umum`**, badan multipart & pesan dokumen Graph API, balasan tanpa id = gagal) + **isi struk sebagai teks pesan** (baris struk apa adanya, spasi ujung kanan dibuang & spasi penyejajar kolom dibiarkan, baris kosong ekor dibuang, blok monospace hanya kalau muat, pemotongan di 4096 karakter, pagar blok dilewati kalau isinya sudah memuatnya, tautan `wa.me` memuat item & nomor notanya) (murni, 59/59 — termasuk badan unggah **gambar** `type=image` + `Content-Type: image/png` dengan byte PNG utuh, pesan **gambar** berjenis `image` dengan `media_id` + caption & tanpa `filename`, jalur dokumen lama yang tetap `type=document`, dan batas unggah gambar 5 MB)
 # kanal WhatsApp (opsional): WHATSAPP_ACCESS_TOKEN + WHATSAPP_PHONE_NUMBER_ID di env DEPLOYMENT (versi Graph API lewat WHATSAPP_GRAPH_VERSION, bawaan v21.0)
 bunx convex run receiptWaData:channelStatus   # baca-saja: keadaan kanal WhatsApp di deployment (configured + nama kunci yang masih kurang)
-bun scripts/verify-menus.mjs                 # audit menu: 20 menu × 5 peran — peta menu↔rute↔izin, halaman terbuka/ditolak, gerbang modul, plus sumber izin gerbang rute (sesi tanpa tenant tanpa izin, kasir tanpa product.manage, peran kustom menggantikan) (406/406)
+bun scripts/verify-menus.mjs                 # audit menu: 21 menu × 5 peran — peta menu↔rute↔izin, halaman terbuka/ditolak, gerbang modul, plus sumber izin gerbang rute (sesi tanpa tenant tanpa izin, kasir tanpa product.manage, peran kustom menggantikan) (427/427)
+bun scripts/verify-profile.mjs               # halaman Profil (/app/profil): aturan murni identitas pengguna & usaha (nama, alamat, email, nomor wa.me, satu kolom salah = batal semua) + halaman aslinya diketik & disimpan di DOM tiruan — kedua kartu, notis, lencana, identitas usaha terkunci untuk kasir, dan keluar (59/59)
 bun scripts/gen-panduan-pdf.mjs              # bangun ulang public/panduan/panduan-mesinpos.pdf (18 bagian, 12 gambar, 33 halaman)
 bun scripts/verify-panduan.mjs               # berkas PDF dibongkar ulang: halaman, footer, daftar isi (18 bagian), langkah kunci (termasuk logo toko, printer & kertas struk, serta kirim struk ke WhatsApp pembeli), batas gambar 1–12, tautan halaman, plus panduan singkat kirim struk ke WhatsApp pembeli di sumber halamannya (14/14)
 bun scripts/verify-theme.mjs                 # tema terang/gelap: aturan, paritas palet CSS, permukaan sidebar (gelap, beda nyata dari latar, teks terang), bootstrap index.html dieksekusi, tombol di DOM (50/50)
-bun scripts/verify-pwa.mjs                   # PWA: manifest fullscreen, ikon (diperiksa sampai piksel), sw.js dieksekusi, ajakan install 10 detik + tombol header (1492/1492)
+bun scripts/verify-pwa.mjs                   # PWA: manifest fullscreen, ikon (diperiksa sampai piksel: mark brand hijau di bidang gelap), sw.js dieksekusi, ajakan install 10 detik + tombol header (1493/1493)
 bun scripts/verify-version.mjs               # bundel basi: ajakan “Versi baru tersedia — muat ulang” — aturan murni, perilaku DOM (jadwal, muat ulang, “Nanti” per tab), jalur diam (luring/galat/mode dev/tab tersembunyi), dan pemasangan di shell /app/pos sungguhan (44/44)
-node scripts/gen-icons.mjs                   # membuat ulang ikon PWA dari bentuk yang sama dengan public/icon.svg (tanpa dependensi)
+node scripts/gen-icons.mjs                   # membuat ulang ikon PWA = mark brand aplikasi (ikon "store" lucide, hijau merek di bidang gelap), bentuknya sama dengan public/icon.svg (tanpa dependensi)
 bun convex run otpEmail:domainHealth         # baca-saja: domain & catatan DNS di akun Resend (butuh kunci akses penuh; kunci kirim-saja dijawab 401 apa adanya)
 bun convex run otp:delivery '{"otpId":"…"}'   # keadaan kirim satu permintaan kode (id dari hasil otp:requestCode)
 bun convex env list --names-only               # kunci identitas Convex Auth ada di deployment (JWT_PRIVATE_KEY, JWKS, SITE_URL)

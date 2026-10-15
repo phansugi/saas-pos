@@ -52,6 +52,12 @@ export const TRIAL_DAYS = 14;
 export interface SessionUser {
   name: string;
   email: string;
+  /**
+   * Nomor WhatsApp pengguna (`users.phone`, digit + kode negara). Kosong = belum
+   * diisi, dan halaman Profil yang menawarkannya. Email sengaja **tidak** bisa
+   * diubah dari aplikasi: ia identitas masuk (kode OTP dikirim ke sana).
+   */
+  whatsapp?: string;
 }
 
 /** Peran kustom yang berlaku untuk pengguna aktif (`rbac.custom`, Phase 4). */
@@ -65,6 +71,15 @@ export interface SessionTenant {
   name: string;
   slug: string;
   storeName: string;
+  /**
+   * Identitas usaha dari kolom `tenants.address`/`email`/`phone` — diatur dari
+   * halaman Profil (`tenants.updateProfile`). Kosong = belum diisi (dibedakan
+   * dari “salah”, sama seperti kolomnya di server), dan itulah yang dibaca
+   * lencana “belum lengkap” di halaman itu.
+   */
+  address?: string;
+  email?: string;
+  whatsapp?: string;
   /** Modul utama pilihan saat onboarding (modul pertama yang aktif). */
   vertical: Vertical;
   /**
@@ -154,6 +169,10 @@ export interface AdoptWorkspaceInput {
   storeName?: string;
   createdAt?: string;
   trialEndsAt?: string;
+  /** Identitas usaha dari server (`tenants.address`/`email`/`phone`). */
+  address?: string;
+  email?: string;
+  whatsapp?: string;
 }
 
 interface SessionContextValue {
@@ -204,6 +223,25 @@ interface SessionContextValue {
    * pemanggilnya hanya store demo.
    */
   setLogoUrl: (url: string | null) => void;
+  /**
+   * Menyimpan profil pengguna (nama & nomor WhatsApp) hasil
+   * `users.updateProfile` di server. Nama itu yang tercetak sebagai baris
+   * `Kasir` di struk berikutnya, jadi sesi ikut diselaraskan — tanpa itu pemakai
+   * harus masuk ulang hanya untuk melihat namanya berubah.
+   */
+  setUserProfile: (profile: { name: string; whatsapp: string | null }) => void;
+  /**
+   * Menyimpan identitas usaha (nama, alamat, email, nomor WA) hasil
+   * `tenants.updateProfile` di server. Di mode demo inilah satu-satunya tempat
+   * identitas itu hidup; di mode Convex ia jembatan sampai query server
+   * menjawab lagi.
+   */
+  setTenantProfile: (profile: {
+    name: string;
+    address: string | null;
+    email: string | null;
+    whatsapp: string | null;
+  }) => void;
   /**
    * Menyelaraskan paket & modul sesi setelah pindah paket di server
    * (`billing.changePlan`). Tanpa ini, sidebar dan gerbang fitur tetap memakai
@@ -382,6 +420,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         name: input.name,
         slug: input.slug,
         storeName: input.storeName ?? previous?.storeName ?? "Toko Utama",
+        // Identitas usaha ikut dipulihkan di perangkat baru: alamat/email/WA
+        // yang sudah diisi di server tidak boleh tampak kosong hanya karena
+        // perangkat ini belum pernah membukanya. Yang tidak dikirim server
+        // (`undefined`) mempertahankan isi sesi — kolom itu memang opsional.
+        address: input.address ?? previous?.address,
+        email: input.email ?? previous?.email,
+        whatsapp: input.whatsapp ?? previous?.whatsapp,
         vertical: verticals[0],
         verticals,
         planKey: input.planKey ?? previous?.planKey ?? "starter",
@@ -402,6 +447,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         previous.planKey === next.planKey &&
         previous.role === next.role &&
         previous.createdAt === next.createdAt &&
+        previous.address === next.address &&
+        previous.email === next.email &&
+        previous.whatsapp === next.whatsapp &&
         previous.verticals.join(",") === next.verticals.join(",")
       ) {
         return current;
@@ -493,6 +541,58 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  /**
+   * Profil pengguna: nama **dan** nomor WA diperbarui bersama karena keduanya
+   * satu baris (`users`). Nama kosong diabaikan — profil tanpa nama tidak
+   * mungkin (server menolaknya lebih dulu), jadi sesi tidak perlu menangani
+   * keadaan “nama kosong” yang tidak pernah ada.
+   */
+  const setUserProfile = useCallback(
+    ({ name, whatsapp }: { name: string; whatsapp: string | null }) => {
+      setSession((current) => {
+        if (!current) return current;
+        const nextName = name.trim() === "" ? current.user.name : name.trim();
+        const nextWhatsapp = whatsapp ?? undefined;
+        if (current.user.name === nextName && current.user.whatsapp === nextWhatsapp) {
+          return current;
+        }
+        return { ...current, user: { ...current.user, name: nextName, whatsapp: nextWhatsapp } };
+      });
+    },
+    [],
+  );
+
+  /** Identitas usaha: nama, alamat, email, dan nomor WA — satu baris `tenants`. */
+  const setTenantProfile = useCallback(
+    (profile: {
+      name: string;
+      address: string | null;
+      email: string | null;
+      whatsapp: string | null;
+    }) => {
+      setSession((current) => {
+        if (!current?.tenant) return current;
+        const next = {
+          name: profile.name.trim() === "" ? current.tenant.name : profile.name.trim(),
+          address: profile.address ?? undefined,
+          email: profile.email ?? undefined,
+          whatsapp: profile.whatsapp ?? undefined,
+        };
+        const before = current.tenant;
+        if (
+          before.name === next.name &&
+          before.address === next.address &&
+          before.email === next.email &&
+          before.whatsapp === next.whatsapp
+        ) {
+          return current;
+        }
+        return { ...current, tenant: { ...before, ...next } };
+      });
+    },
+    [],
+  );
+
   const setCustomRole = useCallback((role: SessionCustomRole | null) => {
     setSession((current) => {
       if (!current?.tenant) return current;
@@ -543,6 +643,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setFnbTaxProfile,
       setReceiptSetting,
       setLogoUrl,
+      setUserProfile,
+      setTenantProfile,
       setCustomRole,
       signOut,
       setRole,
@@ -559,6 +661,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setFnbTaxProfile,
       setReceiptSetting,
       setLogoUrl,
+      setUserProfile,
+      setTenantProfile,
       setCustomRole,
       signOut,
       setRole,

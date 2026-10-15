@@ -134,6 +134,58 @@ export interface StoreLogo {
 }
 
 /**
+ * Profil **pengguna aktif** (halaman Profil → kartu “Profil saya”): nama yang
+ * tampil dan nomor WhatsApp-nya. Emailnya **tidak** ada di sini karena ia
+ * identitas masuk (kode OTP dikirim ke sana) dan tidak diubah dari aplikasi.
+ *
+ * Nomor WhatsAppnya tersimpan dalam bentuk digit + kode negara (`62812…`) —
+ * bentuk yang dituntut `wa.me` — jadi `null` berarti belum diisi.
+ */
+export interface StoreUserProfile {
+  name: string;
+  whatsapp: string | null;
+}
+
+/**
+ * Identitas **usaha** (halaman Profil → kartu “Profil usaha”): nama usaha beserta
+ * alamat, email kontak, dan nomor WA-nya.
+ *
+ * Ketiganya boleh kosong (`null` = belum diisi), dan itulah yang dibaca lencana
+ * “belum lengkap” di halaman itu. `name` selalu ada karena nama usaha sudah ada
+ * sejak workspace dibuat.
+ */
+export interface StoreTenantProfile {
+  name: string;
+  address: string | null;
+  email: string | null;
+  whatsapp: string | null;
+}
+
+/** Isian halaman Profil; kolom yang tidak dikirim berarti “jangan diubah”. */
+export interface UpdateUserProfileInput {
+  name?: string;
+  whatsapp?: string;
+}
+
+export interface UpdateTenantProfileInput {
+  name?: string;
+  address?: string;
+  email?: string;
+  whatsapp?: string;
+}
+
+/** Hasil penyimpanan profil: nilai final dari yang menyimpan + kalimatnya. */
+export interface UpdatedUserProfile extends StoreUserProfile {
+  changed: boolean;
+  sentence: string;
+}
+
+export interface UpdatedTenantProfile extends StoreTenantProfile {
+  changed: boolean;
+  sentence: string;
+}
+
+/**
  * Kategori produk (`category.manage`) — struktur katalog.
  *
  * Kategorinya sendiri hidup **terpisah** dari produk (beda dengan mode demo lama
@@ -1896,6 +1948,31 @@ export interface StoreApi {
   setLogo(file: Blob): Promise<void>;
   /** Melepas logo toko sekaligus menghapus berkasnya di mode Convex. */
   removeLogo(): Promise<void>;
+  /**
+   * Profil pengguna aktif (nama & nomor WA) — `users.name`/`users.phone` di
+   * server. Nama itu yang tercetak sebagai baris `Kasir` di struk dan yang
+   * tampil di daftar anggota Tim & Peran.
+   */
+  myProfile: StoreUserProfile;
+  /**
+   * Menyimpan profil pengguna lewat `users.updateProfile`: siapa saja boleh
+   * mengubah **profilnya sendiri** (server memeriksanya dengan `verifyActor`),
+   * jadi tidak ada izin peran yang dibutuhkan. Aturannya sama di kedua store
+   * (nama 2–60 karakter, nomor WA dinormalkan ke bentuk `wa.me`).
+   */
+  setMyProfile(input: UpdateUserProfileInput): Promise<UpdatedUserProfile>;
+  /**
+   * Identitas usaha (`tenants.name`/`address`/`email`/`phone`) yang diatur dari
+   * halaman Profil. Kosong = belum diisi, bukan salah.
+   */
+  tenantProfile: StoreTenantProfile;
+  /**
+   * Menyimpan identitas usaha lewat `tenants.updateProfile` — izinnya
+   * `billing.manage`, sama dengan setelan workspace lain. Peran tanpa izin itu
+   * tetap **melihat** isinya di halaman Profil; server menolak kalau aksinya
+   * dipaksakan dari luar halaman.
+   */
+  setTenantProfile(input: UpdateTenantProfileInput): Promise<UpdatedTenantProfile>;
   /**
    * Omzet tercatat per bulan (semua toko workspace ini), **tertua dulu**, 12
    * bulan terakhir termasuk bulan berjalan.

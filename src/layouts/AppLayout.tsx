@@ -22,6 +22,7 @@ import {
   ShoppingCart,
   Store,
   Truck,
+  UserRound,
   Wallet,
   Warehouse,
   X,
@@ -52,8 +53,14 @@ interface NavItem {
   label: string;
   icon: ComponentType<{ className?: string }>;
   end: boolean;
-  /** Same permission the matching route is gated on — one policy, two uses. */
-  permission: Permission;
+  /**
+   * Izin yang sama dengan gerbang rutenya — satu kebijakan, dua pemakaian.
+   * **Kosong** untuk halaman yang boleh dibuka semua anggota (Profil): isinya
+   * profil orang yang sedang masuk, jadi tidak ada izin peran yang bisa
+   * dipakai. Rutenya pun tanpa `RequirePermission`, dan harness menu
+   * membandingkan keduanya apa adanya.
+   */
+  permission?: Permission;
   /**
    * Fitur modul yang harus hidup (Phase 2). Halaman tetap memeriksa hal yang
    * sama, jadi menyembunyikan menu bukan pengganti gerbang.
@@ -200,6 +207,16 @@ const nav: NavItem[] = [
     permission: "billing.manage",
   },
   { to: "/app/subscription", label: "Langganan", icon: CreditCard, end: false, permission: "billing.manage" },
+  {
+    // Profil: nama & nomor WA pengguna, identitas usaha, dan tombol keluar.
+    // Tanpa izin — setiap peran berhak memperbaiki namanya sendiri. Kartu
+    // **profil usaha** di dalamnya yang dijaga `billing.manage` (ditawarkan
+    // klien, ditegakkan `tenants.updateProfile` di server).
+    to: "/app/profil",
+    label: "Profil",
+    icon: UserRound,
+    end: false,
+  },
 ];
 
 export function AppLayout() {
@@ -219,7 +236,9 @@ export function AppLayout() {
   const visibleNav = useMemo(
     () =>
       nav.filter((item) => {
-        if (!can(item.permission)) return false;
+        // Menu tanpa izin (Profil) tampil untuk semua anggota; sisanya mengikuti
+        // izin peran — halaman yang dibuka tetap memeriksa hal yang sama.
+        if (item.permission && !can(item.permission)) return false;
         if (!item.feature) return true;
         if (moduleFeatureEnabled(planKey, modules.activeVerticals, item.feature)) {
           return true;

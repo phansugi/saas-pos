@@ -113,6 +113,14 @@ import {
   type ReceiptSetting,
 } from "@/lib/struk";
 import {
+  applyTenantProfileDraft,
+  applyUserProfileDraft,
+  sameTenantProfile,
+  sameUserProfile,
+  tenantProfileSentence,
+  userProfileSentence,
+} from "@/lib/profile";
+import {
   computeTax,
   DEFAULT_TAX_RATE_PCT,
   entitlementFor,
@@ -507,6 +515,12 @@ import {
   type StoreGuestMenuResult,
   type StoreGuestOrderStatus,
   type StoreMejaOrder,
+  type StoreTenantProfile,
+  type StoreUserProfile,
+  type UpdateTenantProfileInput,
+  type UpdateUserProfileInput,
+  type UpdatedTenantProfile,
+  type UpdatedUserProfile,
 } from "./types";
 import type { MejaOrderStatus } from "@/lib/meja";
 
@@ -1313,6 +1327,8 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
     setFnbTaxProfile,
     setReceiptSetting,
     setLogoUrl,
+    setUserProfile,
+    setTenantProfile,
   } = useSession();
   const [products, setProducts] = useState<StoreProduct[]>(seedProducts);
   const [sales, setSales] = useState<StoreSale[]>(seedSales);
@@ -1837,6 +1853,107 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
   const removeLogo = useCallback(async (): Promise<void> => {
     setLogoUrl(null);
   }, [setLogoUrl]);
+
+  /**
+   * Profil pengguna aktif: nama & nomor WA di sesi perangkat. Di mode demo inilah
+   * satu-satunya tempat profil itu hidup (di mode Convex ia dibaca dari baris
+   * `users`), dan emailnya datang dari sesi karena loginnya memakai kode OTP ke
+   * email itu.
+   */
+  const myProfile = useMemo<StoreUserProfile>(
+    () => ({
+      name: session?.user.name ?? "",
+      whatsapp: session?.user.whatsapp ?? null,
+    }),
+    [session],
+  );
+
+  /**
+   * Menyimpan profil pengguna. Validasi & kalimatnya memakai aturan murni
+   * `@/lib/profile`, jadi pesan yang dilihat pemakai di mode demo sama persis
+   * dengan yang datang dari `users.updateProfile` di server.
+   */
+  const setMyProfile = useCallback(
+    async (input: UpdateUserProfileInput): Promise<UpdatedUserProfile> => {
+      // Bentuk aturan murni memakai nama kolomnya di server (`phone`), store
+      // memakai nama yang dibaca halaman (`whatsapp`); penerjemahannya di sini
+      // saja supaya aturannya tidak perlu tahu dua nama untuk satu kolom.
+      const before = { name: myProfile.name, phone: myProfile.whatsapp };
+      const decision = applyUserProfileDraft(before, {
+        name: input.name,
+        phone: input.whatsapp,
+      });
+      if (!decision.ok) throw new Error(decision.reason);
+
+      const after = decision.value;
+      const changed = !sameUserProfile(before, after);
+      if (changed) setUserProfile({ name: after.name, whatsapp: after.phone });
+
+      return { name: after.name, whatsapp: after.phone, changed, sentence: userProfileSentence(after) };
+    },
+    [myProfile, setUserProfile],
+  );
+
+  /**
+   * Identitas usaha: nama, alamat, email, dan nomor WA dari baris tenant di sesi.
+   * Kolom yang belum pernah diisi dibaca sebagai `null` — sama seperti kolomnya
+   * di server — jadi lencana “belum lengkap” di halaman Profil menghitung hal yang
+   * sama di kedua mode store.
+   */
+  const tenantProfile = useMemo<StoreTenantProfile>(
+    () => ({
+      name: session?.tenant?.name ?? "",
+      address: session?.tenant?.address ?? null,
+      email: session?.tenant?.email ?? null,
+      whatsapp: session?.tenant?.whatsapp ?? null,
+    }),
+    [session],
+  );
+
+  /**
+   * Menyimpan identitas usaha. Aturan murni yang sama dengan
+   * `tenants.updateProfile`: nama 2–60 karakter, alamat maksimal 160, email
+   * divalidasi seperti pengiriman kode, dan nomor WA dinormalkan ke bentuk
+   * `wa.me`. Yang kosong disimpan sebagai “belum diisi”, bukan string kosong.
+   */
+  const setTenantProfileValue = useCallback(
+    async (input: UpdateTenantProfileInput): Promise<UpdatedTenantProfile> => {
+      const before = {
+        name: tenantProfile.name,
+        address: tenantProfile.address,
+        email: tenantProfile.email,
+        phone: tenantProfile.whatsapp,
+      };
+      const decision = applyTenantProfileDraft(before, {
+        name: input.name,
+        address: input.address,
+        email: input.email,
+        phone: input.whatsapp,
+      });
+      if (!decision.ok) throw new Error(decision.reason);
+
+      const after = decision.value;
+      const changed = !sameTenantProfile(before, after);
+      if (changed) {
+        setTenantProfile({
+          name: after.name,
+          address: after.address,
+          email: after.email,
+          whatsapp: after.phone,
+        });
+      }
+
+      return {
+        name: after.name,
+        address: after.address,
+        email: after.email,
+        whatsapp: after.phone,
+        changed,
+        sentence: tenantProfileSentence(after),
+      };
+    },
+    [tenantProfile, setTenantProfile],
+  );
 
   /**
    * Laporan pajak & pungutan F&B per bulan (12 bulan terakhir, tertua dulu).
@@ -6537,6 +6654,10 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       logo,
       setLogo,
       removeLogo,
+      myProfile,
+      setMyProfile,
+      tenantProfile,
+      setTenantProfile: setTenantProfileValue,
       changePlan,
       createProduct,
       updateProduct,
@@ -6693,6 +6814,10 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       logo,
       setLogo,
       removeLogo,
+      myProfile,
+      setMyProfile,
+      tenantProfile,
+      setTenantProfileValue,
       changePlan,
       createProduct,
       updateProduct,

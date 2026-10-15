@@ -51,6 +51,7 @@ import type * as lib_platform from "../lib/platform.js";
 import type * as lib_productEdit from "../lib/productEdit.js";
 import type * as lib_productImages from "../lib/productImages.js";
 import type * as lib_productSku from "../lib/productSku.js";
+import type * as lib_profile from "../lib/profile.js";
 import type * as lib_purchasing from "../lib/purchasing.js";
 import type * as lib_rbac from "../lib/rbac.js";
 import type * as lib_realtimeSync from "../lib/realtimeSync.js";
@@ -139,6 +140,7 @@ declare const fullApi: ApiFromModules<{
   "lib/productEdit": typeof lib_productEdit;
   "lib/productImages": typeof lib_productImages;
   "lib/productSku": typeof lib_productSku;
+  "lib/profile": typeof lib_profile;
   "lib/purchasing": typeof lib_purchasing;
   "lib/rbac": typeof lib_rbac;
   "lib/realtimeSync": typeof lib_realtimeSync;

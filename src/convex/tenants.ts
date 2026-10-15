@@ -30,6 +30,12 @@ import {
   validateReceiptSetting,
 } from "./lib/struk";
 import { validateTenantLogo } from "./lib/tenantLogo";
+import {
+  applyTenantProfileDraft,
+  sameTenantProfile,
+  tenantProfileOf,
+  tenantProfileSentence,
+} from "./lib/profile";
 
 const MS_PER_DAY = 86_400_000;
 const TRIAL_DAYS = 14;
@@ -282,6 +288,73 @@ export const listMine = query({
     );
 
     return rows.filter((row): row is NonNullable<typeof row> => row !== null);
+  },
+});
+
+/**
+ * Profil usaha: nama usaha, alamat, email kontak, dan nomor WhatsApp.
+ *
+ * Izinnya `billing.manage` — sama dengan setelan workspace lain (PPN, pajak F&B,
+ * struk, langganan). Identitas bisnis bukan data yang boleh diubah siapa saja
+ * yang kebetulan bisa membuka halaman Profil: nama usaha muncul di header, di
+ * struk, dan di tagihan. Kasir & staf gudang tetap **melihat** isinya di halaman
+ * itu (mereka perlu tahu alamat/WA tokonya), tetapi server menolak aksinya kalau
+ * dipaksakan dari luar halaman.
+ *
+ * Seluruh kolom divalidasi lebih dulu oleh aturan murni `lib/profile.ts` — nama
+ * usaha 2–60 karakter, alamat maksimal 160, email memakai validator yang sama
+ * dengan pengiriman kode OTP, dan nomor WhatsApp dinormalkan ke bentuk `wa.me`.
+ * Satu kolom yang tidak lolos membatalkan **seluruh** penyimpanan (setelan
+ * separuh tersimpan lebih membingungkan daripada tidak tersimpan sama sekali),
+ * dan isian yang tidak mengubah apa pun tidak menulis jejak audit.
+ *
+ * Mengosongkan alamat/email/WA itu sah: kolomnya jadi `undefined` (bukan string
+ * kosong), sama seperti tenant yang belum pernah mengisinya.
+ */
+export const updateProfile = mutation({
+  args: {
+    tenantId: v.id("tenants"),
+    actorId: v.id("users"),
+    name: v.optional(v.string()),
+    address: v.optional(v.string()),
+    email: v.optional(v.string()),
+    phone: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    await requirePermission(ctx, args.tenantId, args.actorId, "billing.manage");
+
+    const tenant = await getTenantOrThrow(ctx, args.tenantId);
+    const before = tenantProfileOf(tenant);
+    const decision = applyTenantProfileDraft(before, {
+      name: args.name,
+      address: args.address,
+      email: args.email,
+      phone: args.phone,
+    });
+    if (!decision.ok) throw new Error(decision.reason);
+    const after = decision.value;
+
+    if (sameTenantProfile(before, after)) {
+      return { changed: false, ...after, sentence: tenantProfileSentence(after) };
+    }
+
+    await ctx.db.patch(args.tenantId, {
+      name: after.name,
+      address: after.address ?? undefined,
+      email: after.email ?? undefined,
+      phone: after.phone ?? undefined,
+    });
+
+    await writeAuditLog(ctx, {
+      tenantId: args.tenantId,
+      actorId: args.actorId,
+      action: "tenant.profile",
+      entity: "tenants",
+      entityId: args.tenantId,
+      meta: { before, after },
+    });
+
+    return { changed: true, ...after, sentence: tenantProfileSentence(after) };
   },
 });
 

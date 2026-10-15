@@ -1,6 +1,12 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { verifyActor } from "./lib/auth";
+import {
+  applyUserProfileDraft,
+  sameUserProfile,
+  userProfileOf,
+  userProfileSentence,
+} from "./lib/profile";
 
 /**
  * Minimal user records. Once Convex Auth is enabled these rows are created by
@@ -26,6 +32,52 @@ export const createOrGet = mutation({
       createdAt: Date.now(),
     });
     return { userId, created: true };
+  },
+});
+
+/**
+ * Profil pengguna: nama yang tampil di aplikasi dan nomor WhatsApp-nya.
+ *
+ * Siapa saja boleh mengubah **profilnya sendiri**; syaratnya `verifyActor(ctx,
+ * userId)` — sama dengan `get` di bawah. Tidak ada izin peran yang dibutuhkan
+ * karena yang diubah adalah identitas orangnya sendiri, bukan data workspace:
+ * kasir yang mengubah nomornya tidak boleh perlu persetujuan pemilik toko.
+ *
+ * Yang **tidak** diubah dari sini adalah email: email adalah identitas masuk
+ * (kode OTP dikirim ke sana). Menggantinya berarti mengganti akun, dan jalannya
+ * adalah masuk dengan email baru — bukan menambal baris ini dari halaman Profil.
+ *
+ * Aturannya murni (`lib/profile.ts`): nama 2–60 karakter, nomor WA dinormalkan
+ * ke bentuk `wa.me` (`08…` → `62…`), dan kolom kosong berarti `null`.
+ *
+ * Catatan: perubahan ini tidak menulis jejak audit tenant. `auditLogs` selalu
+ * milik satu tenant, sedangkan baris ini milik orangnya (ia bisa menjadi anggota
+ * beberapa workspace sekaligus) — mencatatnya di salah satu tenant justru
+ * menyesatkan pembaca jejaknya nanti.
+ */
+export const updateProfile = mutation({
+  args: {
+    userId: v.id("users"),
+    name: v.optional(v.string()),
+    phone: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    await verifyActor(ctx, args.userId);
+
+    const user = await ctx.db.get(args.userId);
+    if (!user) throw new Error("Akun tidak ditemukan.");
+
+    const before = userProfileOf(user);
+    const decision = applyUserProfileDraft(before, { name: args.name, phone: args.phone });
+    if (!decision.ok) throw new Error(decision.reason);
+    const after = decision.value;
+
+    if (sameUserProfile(before, after)) {
+      return { changed: false, ...after, sentence: userProfileSentence(after) };
+    }
+
+    await ctx.db.patch(args.userId, { name: after.name, phone: after.phone ?? undefined });
+    return { changed: true, ...after, sentence: userProfileSentence(after) };
   },
 });
 

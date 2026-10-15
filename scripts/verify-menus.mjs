@@ -91,6 +91,7 @@ const PAGE_MARKERS = {
   "/app/modules": "Modul plug-in",
   "/app/settings": "Setelan PPN",
   "/app/subscription": "Pemakaian kuota",
+  "/app/profil": "Profil saya",
 };
 
 /** Baca daftar menu dari sumber `AppLayout` — bukan dari salinan di harness. */
@@ -110,16 +111,25 @@ function parseNav(source) {
     }));
 }
 
-/** Baca peta rute anak `/app` dari sumber `App.tsx`. */
+/**
+ * Baca peta rute anak `/app` dari sumber `App.tsx`.
+ *
+ * Rute **tanpa** `RequirePermission` ikut dibaca dengan `permission: null` —
+ * memang ada satu (Profil: profil orangnya sendiri, boleh diperbaiki setiap
+ * peran), dan justru itulah yang harus dibuktikan harness ini: menu dan rutenya
+ * sama-sama tanpa izin, dan halamannya benar-benar terbuka untuk semua peran.
+ */
 function parseAppRoutes(source) {
   return source
     .split(/<Route\b/)
     .slice(1)
     .map((chunk) => {
-      const permission = /permission="([^"]+)"/.exec(chunk)?.[1];
-      if (!permission) return null;
+      const permission = /permission="([^"]+)"/.exec(chunk)?.[1] ?? null;
       const path = /path="([^"]+)"/.exec(chunk)?.[1];
       if (!path) return /\bindex\b/.test(chunk) ? { to: "/app", permission } : null;
+      // Rute tangkapan (`path="*"`) bukan halaman menu: ia hanya mengalihkan
+      // alamat asing ke beranda.
+      if (path === "*") return null;
       if (path.startsWith("/")) return null;
       return { to: `/app/${path}`, permission };
     })
@@ -150,9 +160,18 @@ try {
   // ── 1. Peta menu ↔ peta rute (statis, dari sumbernya) ─────────────────────
   check("menu sidebar terbaca dari sumbernya", menu.length > 0, `jumlah=${menu.length}`);
   check(
-    "setiap menu punya tujuan, label, dan izin",
-    menu.every((item) => item.to && item.label && item.permission),
-    JSON.stringify(menu.filter((item) => !item.to || !item.label || !item.permission)),
+    "setiap menu punya tujuan & label",
+    menu.every((item) => item.to && item.label),
+    JSON.stringify(menu.filter((item) => !item.to || !item.label)),
+  );
+  check(
+    "hanya satu menu tanpa izin, dan itu memang halaman semua peran (Profil)",
+    menu.filter((item) => !item.permission).length === 1 &&
+      menu.filter((item) => !item.permission)[0].to === "/app/profil",
+    menu
+      .filter((item) => !item.permission)
+      .map((item) => item.to)
+      .join(", "),
   );
   check(
     "jumlah menu sama dengan jumlah rute anak /app (satu menu satu rute)",
@@ -266,7 +285,8 @@ try {
     const permissions = effectivePermissions(role, null);
     return menu
       .filter((item) => {
-        if (!permissions.includes(item.permission)) return false;
+        // Menu tanpa izin (Profil) memang tampil untuk semua peran.
+        if (item.permission && !permissions.includes(item.permission)) return false;
         if (!item.feature) return true;
         return moduleFeatureEnabled(planKey, verticals, item.feature);
       })
@@ -316,7 +336,8 @@ try {
     const expected = menu
       .filter(
         (item) =>
-          effectivePermissions("cashier", custom.permissions).includes(item.permission) &&
+          (!item.permission ||
+            effectivePermissions("cashier", custom.permissions).includes(item.permission)) &&
           (!item.feature || moduleFeatureEnabled("enterprise", ALL_MODULES, item.feature)),
       )
       .map((item) => item.label);
@@ -333,7 +354,10 @@ try {
     const permissions = effectivePermissions(role, null);
     for (const item of menu) {
       const view = await renderApp(item.to, sessionOf(role));
-      const allowed = permissions.includes(item.permission);
+      // Menu tanpa izin (Profil) harus terbuka untuk **setiap** peran — itulah
+      // bedanya dengan menu lain, jadi pengecualiannya disebut di sini, bukan
+      // disembunyikan dengan memberi halaman itu izin pinjaman.
+      const allowed = item.permission ? permissions.includes(item.permission) : true;
 
       if (allowed) {
         check(

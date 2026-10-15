@@ -406,6 +406,20 @@ export default defineSchema({
     name: v.string(),
     slug: v.string(),
     ownerId: v.id("users"),
+    /**
+     * Identitas usaha yang diatur dari halaman Profil (`tenants.updateProfile`):
+     * alamat, email kontak, dan nomor WhatsApp (digit + kode negara, mis.
+     * `6281234567890` — bentuk yang dituntut `wa.me`).
+     *
+     * Ketiganya sengaja **opsional**, alasannya sama dengan `taxActive`: baris
+     * tenant yang dibuat sebelum kolom ini ada tetap sah dan dibaca sebagai
+     * “belum diisi” (`null`), bukan sebagai baris rusak. Nama usahanya sendiri
+     * sudah ada sejak awal (`tenants.name`) dan ikut diubah dari halaman yang
+     * sama.
+     */
+    address: v.optional(v.string()),
+    email: v.optional(v.string()),
+    phone: v.optional(v.string()),
     planKey: planKeyValidator,
     /** Plan catalog version the tenant is entitled to. */
     planVersion: v.number(),

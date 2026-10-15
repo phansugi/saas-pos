@@ -26,6 +26,7 @@ import { SyncPage } from "@/pages/SyncPage";
 import { ShiftPage } from "@/pages/ShiftPage";
 import { SubscriptionPage } from "@/pages/SubscriptionPage";
 import { PlatformPage } from "@/pages/PlatformPage";
+import { ProfilePage } from "@/pages/ProfilePage";
 import {
   RequireAuth,
   RequirePermission,
@@ -306,6 +307,20 @@ export function App() {
                   <RequirePermission permission="billing.manage">
                     <SubscriptionPage />
                   </RequirePermission>
+                }
+              />
+              <Route
+                path="profil"
+                element={
+                  /* Profil: **satu-satunya halaman tanpa gerbang izin** — isinya
+                     profil orang yang sedang masuk (nama & nomor WA), dan setiap
+                     peran berhak memperbaiki namanya sendiri; server memeriksa
+                     pemilik barisnya (`verifyActor`). Yang dijaga izin adalah
+                     kartu **profil usaha** di dalam halaman itu (`billing.manage`,
+                     ditawarkan atau dikunci klien dan ditegakkan lagi oleh
+                     `tenants.updateProfile`), bukan halamannya. Karena itu pula
+                     menu Profil tidak punya izin — lihat `AppLayout`. */
+                  <ProfilePage />
                 }
               />
             </Route>

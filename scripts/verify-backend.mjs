@@ -10640,6 +10640,238 @@ async function main() {
     );
   }
 
+  // ------------- halaman Profil: identitas orangnya & identitas usahanya ---
+  //
+  // Dua mutation, dua pemilik data: `users.updateProfile` (profil orangnya
+  // sendiri — setiap peran boleh, karena itu tidak ada izin peran yang
+  // dibutuhkan) dan `tenants.updateProfile` (identitas usaha — `billing.manage`,
+  // berjejak audit). Keduanya memakai aturan murni yang sama dengan halaman
+  // Profil & kedua store, jadi yang diperiksa di sini adalah kontrak servernya:
+  // siapa yang boleh, apa yang benar-benar tersimpan (`08…` → `628…`), dan apa
+  // yang ditolak tanpa mengubah apa pun.
+  {
+    const profilSuffix = `${runId}-profil`;
+    const { userId: profilOwnerId } = await client.mutation(api.users.createOrGet, {
+      email: `profil-owner+${profilSuffix}@mesinpos.test`,
+      name: "Pemilik Uji Profil",
+    });
+    const { tenantId: profilTenantId } = await client.mutation(api.tenants.create, {
+      ownerId: profilOwnerId,
+      name: "Toko Uji Profil",
+      slug: `verify-profil-${runId}`,
+      planKey: "starter",
+      storeName: "Cabang Profil",
+    });
+    const profilKasirEmail = `profil-kasir+${profilSuffix}@mesinpos.test`;
+    const { userId: profilKasirId } = await client.mutation(api.users.createOrGet, {
+      email: profilKasirEmail,
+      name: "Kasir Uji Profil",
+    });
+    await client.mutation(api.members.add, {
+      tenantId: profilTenantId,
+      actorId: profilOwnerId,
+      email: profilKasirEmail,
+      name: "Kasir Uji Profil",
+      role: "cashier",
+    });
+    const { userId: profilLuarId } = await client.mutation(api.users.createOrGet, {
+      email: `profil-luar+${profilSuffix}@mesinpos.test`,
+      name: "Orang Luar Profil",
+    });
+
+    // ── profil orangnya: kasir boleh memperbaiki namanya sendiri ──────────
+    const profilOrang = await client.mutation(api.users.updateProfile, {
+      userId: profilKasirId,
+      name: "  Kasir   Profil ",
+      phone: "0812-3456-7890",
+    });
+    check(
+      "kasir menyimpan profilnya sendiri tanpa izin peran (nama dirapikan, nomor jadi wa.me)",
+      profilOrang.changed === true &&
+        profilOrang.name === "Kasir Profil" &&
+        profilOrang.phone === "6281234567890",
+      JSON.stringify(profilOrang),
+    );
+    check(
+      "kalimat notisnya menyebut kelengkapannya",
+      profilOrang.sentence === "Profil Kasir Profil tersimpan lengkap.",
+      profilOrang.sentence,
+    );
+    const profilBaris = await client.query(api.users.get, { userId: profilKasirId });
+    check(
+      "yang tersimpan adalah baris pengguna itu sendiri",
+      profilBaris.name === "Kasir Profil" && profilBaris.phone === "6281234567890",
+      JSON.stringify({ name: profilBaris.name, phone: profilBaris.phone }),
+    );
+
+    const profilOrangSama = await client.mutation(api.users.updateProfile, {
+      userId: profilKasirId,
+      name: "Kasir Profil",
+      phone: "6281234567890",
+    });
+    check(
+      "menyimpan profil yang sama tidak dianggap perubahan",
+      profilOrangSama.changed === false && profilOrangSama.name === "Kasir Profil",
+      JSON.stringify(profilOrangSama),
+    );
+
+    for (const [label, args, harapan] of [
+      ["nama satu karakter ditolak", { name: "A" }, "minimal 2 karakter"],
+      ["nomor tanpa angka ditolak dengan sebabnya", { phone: "abc" }, "harus berisi angka"],
+      ["nomor terlalu pendek ditolak", { phone: "0812" }, "8–15 digit"],
+    ]) {
+      let pesan = "";
+      try {
+        await client.mutation(api.users.updateProfile, { userId: profilKasirId, ...args });
+      } catch (error) {
+        pesan = error?.message ?? String(error);
+      }
+      check(`profil orang: ${label}`, pesan.includes(harapan), pesan || "diterima server");
+    }
+    check(
+      "penolakan tidak menyentuh profil orang yang tersimpan",
+      (await client.query(api.users.get, { userId: profilKasirId })).name === "Kasir Profil",
+      "baris pengguna",
+    );
+
+    const profilOrangKosong = await client.mutation(api.users.updateProfile, {
+      userId: profilKasirId,
+      phone: "",
+    });
+    check(
+      "mengosongkan nomor WA jadi “belum diisi”, dan namanya tidak ikut berubah",
+      profilOrangKosong.changed === true &&
+        profilOrangKosong.phone === null &&
+        profilOrangKosong.name === "Kasir Profil" &&
+        profilOrangKosong.sentence === "Profil Kasir Profil tersimpan. Belum diisi: nomor WA.",
+      JSON.stringify(profilOrangKosong),
+    );
+
+    // ── profil usaha: pemilik boleh, kasir & orang luar ditolak ───────────
+    const profilUsaha = await client.mutation(api.tenants.updateProfile, {
+      tenantId: profilTenantId,
+      actorId: profilOwnerId,
+      name: "Toko Profil Jaya",
+      address: "Jl. Merdeka 10, Bandung",
+      email: "Halo@Profil.ID ",
+      phone: "0813-1111-2222",
+    });
+    check(
+      "pemilik menyimpan identitas usaha (nama, alamat, email, nomor wa.me)",
+      profilUsaha.changed === true &&
+        profilUsaha.name === "Toko Profil Jaya" &&
+        profilUsaha.address === "Jl. Merdeka 10, Bandung" &&
+        profilUsaha.email === "halo@profil.id" &&
+        profilUsaha.phone === "6281311112222",
+      JSON.stringify(profilUsaha),
+    );
+    check(
+      "kalimat notisnya menyebut nama usaha & kelengkapannya",
+      profilUsaha.sentence === "Profil usaha “Toko Profil Jaya” tersimpan lengkap.",
+      profilUsaha.sentence,
+    );
+    const profilTenant = await client.query(api.tenants.getMine, {
+      tenantId: profilTenantId,
+      actorId: profilOwnerId,
+    });
+    check(
+      "identitas usaha benar-benar tersimpan di baris tenant",
+      profilTenant.name === "Toko Profil Jaya" &&
+        profilTenant.address === "Jl. Merdeka 10, Bandung" &&
+        profilTenant.email === "halo@profil.id" &&
+        profilTenant.phone === "6281311112222",
+      JSON.stringify({
+        name: profilTenant.name,
+        address: profilTenant.address,
+        email: profilTenant.email,
+        phone: profilTenant.phone,
+      }),
+    );
+
+    // Dua penolakan yang berbeda sebabnya: anggota tanpa izin ditolak karena
+    // izinnya, orang di luar workspace ditolak lebih dulu karena bukan anggota.
+    for (const [label, actorId, harapan] of [
+      [
+        "kasir ditolak mengubah identitas usaha (izin billing.manage)",
+        profilKasirId,
+        "izin billing.manage",
+      ],
+      [
+        "orang di luar workspace ditolak mengubah identitas usaha",
+        profilLuarId,
+        "bukan anggota aktif",
+      ],
+    ]) {
+      let pesan = "";
+      try {
+        await client.mutation(api.tenants.updateProfile, {
+          tenantId: profilTenantId,
+          actorId,
+          name: "Toko Dibajak",
+        });
+      } catch (error) {
+        pesan = error?.message ?? String(error);
+      }
+      check(label, pesan.includes(harapan), pesan || "diterima server");
+    }
+
+    for (const [label, args, harapan] of [
+      ["nama usaha satu karakter ditolak", { name: "A" }, "minimal 2 karakter"],
+      ["email usaha tanpa titik ditolak", { email: "halo@toko" }, "titik"],
+      [
+        "alamat di atas batas ditolak",
+        { address: "x".repeat(161) },
+        "maksimal 160 karakter",
+      ],
+    ]) {
+      let pesan = "";
+      try {
+        await client.mutation(api.tenants.updateProfile, {
+          tenantId: profilTenantId,
+          actorId: profilOwnerId,
+          ...args,
+        });
+      } catch (error) {
+        pesan = error?.message ?? String(error);
+      }
+      check(`profil usaha: ${label}`, pesan.includes(harapan), pesan || "diterima server");
+    }
+    const profilTenantTolak = await client.query(api.tenants.getMine, {
+      tenantId: profilTenantId,
+      actorId: profilOwnerId,
+    });
+    check(
+      "satu kolom yang ditolak membatalkan seluruh penyimpanan",
+      profilTenantTolak.name === "Toko Profil Jaya" &&
+        profilTenantTolak.address === "Jl. Merdeka 10, Bandung" &&
+        profilTenantTolak.email === "halo@profil.id" &&
+        profilTenantTolak.phone === "6281311112222",
+      JSON.stringify({
+        name: profilTenantTolak.name,
+        email: profilTenantTolak.email,
+        address: profilTenantTolak.address,
+      }),
+    );
+
+    const profilUsahaKosong = await client.mutation(api.tenants.updateProfile, {
+      tenantId: profilTenantId,
+      actorId: profilOwnerId,
+      address: "",
+      email: "",
+      phone: "",
+    });
+    check(
+      "mengosongkan alamat/email/nomor itu sah (jadi belum diisi, bukan galat)",
+      profilUsahaKosong.changed === true &&
+        profilUsahaKosong.address === null &&
+        profilUsahaKosong.email === null &&
+        profilUsahaKosong.phone === null &&
+        profilUsahaKosong.sentence ===
+          "Profil usaha “Toko Profil Jaya” tersimpan. Belum diisi: alamat, email, nomor WA.",
+      JSON.stringify(profilUsahaKosong),
+    );
+  }
+
   // ------------------------------------------------------------ setelan PPN
   //
   // Tarif PPN bisa diatur besar/kecil dan bisa dimatikan — dan satu setelan itu

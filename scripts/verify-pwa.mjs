@@ -10,7 +10,8 @@
  *   1. aturan murni ajakan (jeda 10 detik, sekali tampil, tombol setelah itu),
  *   2. manifest: `display: fullscreen`, ikon 192/512 + maskable, warna yang sama
  *      dengan `src/lib/theme.ts`, dan setiap berkas ikonnya benar-benar ada,
- *   3. ikon PNG diperiksa sampai isinya (CRC chunk, jumlah baris, piksel sudut),
+ *   3. ikon PNG diperiksa sampai isinya (CRC chunk, jumlah baris, piksel sudut, dan
+ *      warna mark brand-nya: hijau merek di atas bidang gelap aplikasi),
  *   4. `public/sw.js` **dieksekusi** dengan `caches`/`fetch` tiruan — navigasi
  *      network-first, aset build tersimpan, `/src/…` & lintas origin & POST tidak
  *      pernah disentuh,
@@ -302,21 +303,49 @@ try {
     icon192.pixel(1, 1)[3] === 0 && icon512.pixel(1, 1)[3] === 0,
     `alpha=${icon192.pixel(1, 1)[3]}`,
   );
+  // Ikonnya adalah **mark brand aplikasi**: mark `store` (sumber yang sama dengan
+  // sidebar/beranda) digambar hijau merek di atas bidang gelap aplikasi. Keduanya
+  // diperiksa dari pikselnya, bukan dari komentar di generatornya.
+  const INK = [7, 10, 19];
+  const BRAND = [32, 197, 137];
+  const countPixels = (png, color) => {
+    let total = 0;
+    for (let y = 0; y < png.height; y += 1) {
+      for (let x = 0; x < png.width; x += 1) {
+        const pixel = png.pixel(x, y);
+        if (pixel[3] === 255 && pixel.slice(0, 3).join() === color.join()) total += 1;
+      }
+    }
+    return total;
+  };
+  const icons = [icon192, icon512, maskable, apple];
+  const markPixels = icons.map((png) => countPixels(png, BRAND));
   check(
-    "ikon maskable terisi penuh (tidak ada sudut kosong yang dipotong Android)",
+    "ikon maskable terisi penuh dengan bidang gelap aplikasi (tidak ada sudut kosong yang dipotong Android)",
     maskable.pixel(1, 1)[3] === 255 &&
-      maskable.pixel(1, 1).slice(0, 3).join() === [32, 197, 137].join(),
+      maskable.pixel(1, 1).slice(0, 3).join() === INK.join(),
     maskable.pixel(1, 1).join(),
   );
   check(
     "ikon Apple memakai latar penuh & ukuran 180",
-    apple.width === 180 && apple.pixel(1, 1)[3] === 255,
+    apple.width === 180 &&
+      apple.pixel(1, 1)[3] === 255 &&
+      apple.pixel(1, 1).slice(0, 3).join() === INK.join(),
     `${apple.width} ${apple.pixel(1, 1).join()}`,
   );
   check(
-    "ikon vektor memakai warna merek yang sama dengan manifest",
+    "mark brand tergambar hijau merek di setiap ikon (bukan bidang kosong)",
+    markPixels.every((total) => total > 0),
+    icons.map((png, index) => `${png.width}px:${markPixels[index]} piksel mark`).join(" · "),
+  );
+  check(
+    "ikon vektor memakai mark & warna merek yang sama, di kanvas 512",
     read("public/icon.svg").includes("#20C589") &&
-      read("public/icon.svg").includes('viewBox="0 0 512 512"'),
+      read("public/icon.svg").includes('viewBox="0 0 512 512"') &&
+      read("public/icon.svg").includes("#070A13") &&
+      // Jalur pintu mark `store` (lucide): bukti favicon-nya memakai mark yang
+      // sama dengan `scripts/gen-icons.mjs`, bukan bentuk lain.
+      read("public/icon.svg").includes("M15 21v-5a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v5"),
     "icon.svg",
   );
 

@@ -244,6 +244,12 @@ import {
   type UpdatedReceipt,
   type StoreFnbTaxMonth,
   type StoreFnbTaxMonthSummary,
+  type StoreUserProfile,
+  type StoreTenantProfile,
+  type UpdateUserProfileInput,
+  type UpdateTenantProfileInput,
+  type UpdatedUserProfile,
+  type UpdatedTenantProfile,
 } from "./types";
 
 /**
@@ -332,7 +338,15 @@ function toTransportError(error: unknown): Error {
 }
 
 export function ConvexStoreProvider({ children }: { children: ReactNode }) {
-  const { session, adoptWorkspace, setVerticals, setPlan, setCustomRole } = useSession();
+  const {
+    session,
+    adoptWorkspace,
+    setVerticals,
+    setPlan,
+    setCustomRole,
+    setUserProfile,
+    setTenantProfile: setSessionTenantProfile,
+  } = useSession();
   const tenant = session?.tenant ?? null;
   const slug = tenant?.slug ?? null;
   // Izin yang dipakai untuk memutuskan query mana yang boleh dilanggan dibaca
@@ -362,6 +376,13 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
     slug tidak boleh membuat satu akun masuk ke workspace milik bisnis lain.
   */
   const myWorkspaces = useQuery(api.tenants.listMine, userId ? { userId } : "skip");
+  /*
+    Profil pengguna aktif dibaca dari barisnya sendiri (`users.get` melayani
+    profil pemanggil saja — lihat `verifyActor`), bukan dari sesi perangkat:
+    nama itu milik akunnya, jadi masuk dari perangkat lain harus menampilkan nama
+    yang sama. Sesi tetap dipakai sebagai jembatan sebelum query menjawab.
+  */
+  const myProfileDoc = useQuery(api.users.get, userId ? { userId } : "skip");
 
   /**
    * Keanggotaan yang **aktif** — hanya itu yang boleh dipakai membuka langganan
@@ -734,6 +755,8 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
   const adjustStockMutation = useMutation(api.products.adjustStock);
   const setModulesMutation = useMutation(api.modules.setForTenant);
   const setTaxMutation = useMutation(api.tenants.updateTax);
+  const updateUserProfileMutation = useMutation(api.users.updateProfile);
+  const updateTenantProfileMutation = useMutation(api.tenants.updateProfile);
   const setFnbTaxMutation = useMutation(api.tenants.updateFnbTax);
   const setReceiptMutation = useMutation(api.tenants.updateReceipt);
   const setLogoMutation = useMutation(api.tenants.setLogo);
@@ -947,6 +970,11 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       planKey: row.planKey,
       verticals: row.verticals,
       storeName: serverStoreName,
+      // Identitas usaha ikut dipulihkan supaya perangkat baru tidak melihat
+      // alamat/email/WA kosong padahal pemiliknya sudah mengisinya.
+      address: row.address,
+      email: row.email,
+      whatsapp: row.phone,
       createdAt: new Date(row.createdAt).toISOString(),
       // Tenant lama (dibuat sebelum kolom jam trial ada) tidak punya nilainya;
       // sesi yang sudah dipegang perangkat ini tetap dipakai untuk kasus itu.
@@ -1442,6 +1470,101 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
     const url = workspace?.logoUrl ?? null;
     return url ? { id: "logo-toko", url } : null;
   }, [workspace]);
+
+  /**
+   * Profil pengguna aktif: nama & nomor WA-nya. Nomornya tersimpan di bentuk yang
+   * dituntut `wa.me` (`62812…`), sama seperti yang ditulis `users.updateProfile`.
+   */
+  const myProfile = useMemo<StoreUserProfile>(
+    () => ({
+      name: myProfileDoc?.name ?? session?.user.name ?? "",
+      whatsapp: myProfileDoc?.phone ?? session?.user.whatsapp ?? null,
+    }),
+    [myProfileDoc, session],
+  );
+
+  /**
+   * Menyimpan profil pengguna lewat `users.updateProfile`. Server mengembalikan
+   * nilai finalnya (nomor yang sudah dinormalkan, nama yang sudah dirapikan),
+   * dan itu juga yang ditulis ke sesi — supaya struk berikutnya langsung
+   * mencetak nama baru tanpa menunggu query berikutnya.
+   */
+  const setMyProfile = useCallback(
+    async (input: UpdateUserProfileInput): Promise<UpdatedUserProfile> => {
+      if (!userId) {
+        notReady();
+      }
+      const result = await updateUserProfileMutation({
+        userId,
+        name: input.name,
+        phone: input.whatsapp,
+      });
+      setUserProfile({ name: result.name, whatsapp: result.phone });
+      return {
+        name: result.name,
+        whatsapp: result.phone,
+        changed: result.changed,
+        sentence: result.sentence,
+      };
+    },
+    [userId, updateUserProfileMutation, setUserProfile],
+  );
+
+  /**
+   * Identitas usaha dibaca dari baris tenant yang sama dengan yang dibaca server
+   * (`tenants.listMine` sudah berlangganan), jadi setelah `tenants.updateProfile`
+   * tersimpan, header dan struk ikut memakai nama usaha yang baru tanpa memuat
+   * ulang. Kolom yang belum pernah diisi dibaca sebagai `null`.
+   */
+  const tenantProfile = useMemo<StoreTenantProfile>(
+    () => {
+      const row = workspace?.tenant;
+      return {
+        name: row?.name ?? tenant?.name ?? "",
+        address: row?.address ?? tenant?.address ?? null,
+        email: row?.email ?? tenant?.email ?? null,
+        whatsapp: row?.phone ?? tenant?.whatsapp ?? null,
+      };
+    },
+    [workspace, tenant],
+  );
+
+  /**
+   * Menyimpan identitas usaha lewat `tenants.updateProfile` (izin
+   * `billing.manage` — server yang memutuskan, halaman hanya menawarkan tombolnya
+   * kepada yang berhak). Sesi ikut diselaraskan dengan nilai dari server supaya
+   * nama bisnis di header tidak menunggu render berikutnya.
+   */
+  const setTenantProfile = useCallback(
+    async (input: UpdateTenantProfileInput): Promise<UpdatedTenantProfile> => {
+      if (!tenantId || !userId) {
+        notReady();
+      }
+      const result = await updateTenantProfileMutation({
+        tenantId,
+        actorId: userId,
+        name: input.name,
+        address: input.address,
+        email: input.email,
+        phone: input.whatsapp,
+      });
+      setSessionTenantProfile({
+        name: result.name,
+        address: result.address,
+        email: result.email,
+        whatsapp: result.phone,
+      });
+      return {
+        name: result.name,
+        address: result.address,
+        email: result.email,
+        whatsapp: result.phone,
+        changed: result.changed,
+        sentence: result.sentence,
+      };
+    },
+    [tenantId, userId, updateTenantProfileMutation, setSessionTenantProfile],
+  );
 
   /**
    * Memasang logo toko lewat pola tiga langkah Convex: minta URL unggah, kirim
@@ -3584,6 +3707,10 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       logo,
       setLogo,
       removeLogo,
+      myProfile,
+      setMyProfile,
+      tenantProfile,
+      setTenantProfile,
       changePlan,
       createProduct,
       updateProduct,
@@ -3739,6 +3866,10 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       logo,
       setLogo,
       removeLogo,
+      myProfile,
+      setMyProfile,
+      tenantProfile,
+      setTenantProfile,
       changePlan,
       createProduct,
       updateProduct,
