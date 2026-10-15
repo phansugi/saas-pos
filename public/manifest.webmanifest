@@ -1,0 +1,59 @@
+{
+  "id": "/",
+  "name": "MesinPOS — Enterprise POS & Inventory Cloud",
+  "short_name": "MesinPOS",
+  "description": "Kasir, stok, pembelian, pembayaran, dan laporan real-time untuk UMKM, retail, dan franchise — satu aplikasi yang terbuka layar penuh.",
+  "lang": "id",
+  "dir": "ltr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "fullscreen",
+  "display_override": ["fullscreen", "standalone"],
+  "orientation": "any",
+  "background_color": "#070A13",
+  "theme_color": "#20C589",
+  "categories": ["business", "finance", "productivity"],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-maskable-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Kasir (POS)",
+      "short_name": "Kasir",
+      "url": "/app/pos"
+    },
+    {
+      "name": "Dapur & Meja",
+      "short_name": "Dapur",
+      "url": "/app/kds"
+    },
+    {
+      "name": "Laporan",
+      "short_name": "Laporan",
+      "url": "/app/reports"
+    }
+  ]
+}

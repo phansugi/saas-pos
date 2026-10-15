@@ -1,0 +1,212 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --primary: 158 74% 34%;
+    --primary-foreground: 150 100% 97%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+    --accent: 38 92% 50%;
+    --accent-foreground: 20 90% 10%;
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 158 74% 34%;
+    /*
+      Permukaan sidebar backstage. Sengaja punya token sendiri, bukan memakai
+      `--secondary`/`--card`: sidebar ini **selalu permukaan gelap berwarna** di
+      kedua tema, sedangkan warna teks, batas, dan aksennya tetap ikut token ini
+      (bukan warna putih yang ditulis tetap).
+
+      Di tema terang ia benar-benar lebih gelap dari halaman (13% vs 100%). Di
+      tema gelap halaman sudah nyaris hitam (5%), jadi “lebih gelap lagi” tidak
+      bisa terlihat sama sekali — karena itu di sana sidebar dibuat sebagai
+      **panel gelap terpisah yang lebih terang dari latar** (10% vs 5%) dengan
+      rona teal, supaya tetap gelap tetapi jelas punya warna dan tidak menyatu
+      dengan halaman.
+    */
+    --sidebar: 176 45% 13%;
+    --sidebar-deep: 200 45% 7%;
+    --sidebar-foreground: 210 40% 98%;
+    --sidebar-muted: 195 25% 72%;
+    --sidebar-border: 180 30% 26%;
+    --sidebar-active: 158 72% 45%;
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 222 47% 5%;
+    --foreground: 210 40% 98%;
+    --card: 222 44% 8%;
+    --card-foreground: 210 40% 98%;
+    --primary: 158 72% 45%;
+    --primary-foreground: 160 100% 6%;
+    --secondary: 217 33% 15%;
+    --secondary-foreground: 210 40% 96%;
+    --muted: 217 33% 14%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 38 92% 52%;
+    --accent-foreground: 20 90% 8%;
+    --border: 217 33% 18%;
+    --input: 217 33% 18%;
+    --ring: 158 72% 45%;
+    --sidebar: 176 38% 10%;
+    --sidebar-deep: 200 45% 4%;
+    --sidebar-foreground: 210 40% 98%;
+    --sidebar-muted: 195 20% 68%;
+    --sidebar-border: 180 28% 20%;
+    --sidebar-active: 158 72% 45%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .bg-grid {
+    background-image:
+      linear-gradient(to right, hsl(var(--border) / 0.5) 1px, transparent 1px),
+      linear-gradient(to bottom, hsl(var(--border) / 0.5) 1px, transparent 1px);
+    background-size: 44px 44px;
+  }
+
+  .bg-radial-glow {
+    background-image: radial-gradient(
+      60% 55% at 50% 0%,
+      hsl(158 72% 45% / 0.18) 0%,
+      hsl(38 92% 52% / 0.06) 38%,
+      transparent 72%
+    );
+  }
+
+  .glass {
+    background-color: hsl(var(--card) / 0.7);
+    backdrop-filter: blur(12px);
+  }
+
+  /*
+    Tinggi shell backstage: setinggi layar yang **terlihat**. 100vh adalah
+    cadangan untuk browser lama, dan `100dvh` dipakai kalau didukung (tinggi yang
+    benar saat bilah alamat ponsel muncul/hilang — dengan 100vh, bagian bawah
+    shell tertutup bilah itu). Dua kelas Tailwind `h-screen h-dvh` tidak bisa
+    dipakai bersamaan: urutan CSS-nya membuat `h-screen` (100vh) yang menang.
+  */
+  .app-shell-height {
+    height: 100vh;
+  }
+
+  @supports (height: 100dvh) {
+    .app-shell-height {
+      height: 100dvh;
+    }
+  }
+
+  /*
+    Permukaan sidebar backstage: gradien dua nada dari token sidebar ditimpa
+    pendar hijau di sudut atas — supaya tidak terlihat sebagai kotak rata. Dipakai
+    satu tempat (sidebar `/app`), jadi slotnya satu kelas saja.
+  */
+  .sidebar-surface {
+    background-image:
+      radial-gradient(120% 60% at 0% 0%, hsl(var(--sidebar-active) / 0.24) 0%, transparent 60%),
+      linear-gradient(180deg, hsl(var(--sidebar) / 1) 0%, hsl(var(--sidebar-deep) / 1) 100%);
+  }
+
+  /*
+    Struk belanja yang dicetak tombol cetak di kasir. Di layar bagian ini tidak
+    perlu terlihat (yang dibaca kasir adalah keranjang di sebelahnya), sedangkan
+    saat mencetak hanya bagian ini yang boleh tampil.
+  */
+  .struk-cetak {
+    display: none;
+  }
+
+  /*
+    Kartu QR meja yang dicetak dari layar dapur. Sama seperti struk: di layar
+    tidak tampil, saat mencetak hanya bagian ini yang terlihat.
+  */
+  .meja-qr-cetak {
+    display: none;
+  }
+}
+
+/*
+  Cetak struk: sembunyikan seluruh aplikasi (sidebar, header, keranjang) lalu
+  tampilkan hanya area `.struk-cetak` dari sudut kiri atas kertas.
+
+  `visibility` dipakai, bukan `display`, supaya elemen yang punya tata letak
+  bawaan tidak menahan ruang kosong di halaman cetak; `.struk-cetak` sendiri
+  dikembalikan ke `display: block` karena di layar ia memang disembunyikan.
+
+  **`position: fixed`, bukan `absolute`** — dan itu bukan hiasan. Area cetak ini
+  hidup di dalam `<main>` yang setinggi layar & bisa digulir (shell backstage),
+  sehingga elemen `absolute` ikut tergeser oleh gulir itu: begitu kasir menggulir
+  halaman kasir (di ponsel itu biasa terjadi), bagian atas struk berada di atas
+  jendela gulir dan **terpotong saat dicetak** — yang keluar di kertas hanya
+  ekornya (TOTAL/Bayar/Kembali), tanpa logo, nama toko, alamat, maupun baris
+  kasir & pembeli. Pengukuran di Chromium (`scripts/diag-struk-cetak.mjs`, gulir
+  bawah 1156 px di 390×844) menunjukkannya apa adanya: `absolute` → kotak area
+  cetak di `top -1092` & berkas PDF 1.109 byte (halaman kosong), sedangkan
+  `fixed` → `top 0` & PDF 28.500 byte, sama persis dengan keadaan halaman yang
+  tidak tergulir.
+
+  `fixed` mengacu ke **kotak halaman cetak**, bukan ke wadah gulir, jadi letak
+  struknya tidak lagi bergantung pada posisi gulir. Syaratnya satu: tidak boleh
+  ada leluhur yang membuat containing block sendiri (`transform`, `filter`,
+  `backdrop-filter`, `perspective`, atau `contain`) — kalau ada, `fixed` kembali
+  terikat elemen itu dan bug ini muncul lagi. Harness
+  `scripts/verify-struk-browser.mjs` memeriksa keadaan itu juga (bagian ponsel),
+  jadi menambahkan pembungkus beranimasi di atas halaman kasir akan ketahuan.
+*/
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  .struk-cetak,
+  .struk-cetak *,
+  .meja-qr-cetak,
+  .meja-qr-cetak * {
+    visibility: visible;
+  }
+
+  .struk-cetak,
+  .meja-qr-cetak {
+    display: block;
+    position: fixed;
+    left: 0;
+    top: 0;
+  }
+
+  /*
+    Ukuran kertas & marginnya **tidak** ditulis di sini: keduanya ikut setelan
+    struk workspace (lebar 58/76/80/241 mm dan tinggi notanya), jadi ditulis
+    halaman kasir lewat `receiptPrintCss` (`<style data-testid="struk-kertas-css">`)
+    — satu sumber dengan angka yang dipakai menghitung tinggi barisnya. Dua
+    `@page` di tempat berbeda akan saling menimpa tanpa ada yang tahu mana yang
+    menang.
+  */
+}

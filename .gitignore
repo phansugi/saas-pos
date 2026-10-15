@@ -1,0 +1,12 @@
+node_modules
+dist
+dist-ssr
+isolate
+*.local
+.env
+.env.*
+!.env.example
+.convex
+node_modules/.tmp
+.DS_Store
+*.log

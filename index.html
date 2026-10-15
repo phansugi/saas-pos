@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="id" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="MesinPOS — Enterprise POS & Inventory SaaS multi-tenant untuk UMKM, retail, dan franchise."
+    />
+    <meta name="theme-color" content="#070A13" />
+
+    <!--
+      PWA: manifest menentukan `display: fullscreen`, jadi aplikasi yang dipasang
+      terbuka tanpa bilah browser. Ikon & meta Apple dipasang terpisah karena
+      iOS tidak membaca manifest untuk urusan layar penuh dan ikonnya.
+    -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="MesinPOS" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="application-name" content="MesinPOS" />
+
+    <!-- tema-bootstrap:mulai -->
+    <script>
+      // Tema disetel **sebelum React berjalan** supaya tidak ada kedipan tema.
+      // Salinan kecil dari aturan di `src/lib/theme.ts`: pilihan tersimpan
+      // menang, kalau belum pernah memilih ikuti preferensi sistem, dan
+      // bawaannya gelap. Harness membandingkan hasil script ini dengan
+      // `resolveTheme`, jadi keduanya tidak bisa menyimpang diam-diam.
+      (function () {
+        try {
+          var stored = window.localStorage.getItem("mesinpos.theme.v1");
+          var theme =
+            stored === "light" || stored === "dark"
+              ? stored
+              : window.matchMedia &&
+                  window.matchMedia("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark";
+          var root = document.documentElement;
+          if (theme === "dark") {
+            root.classList.add("dark");
+          } else {
+            root.classList.remove("dark");
+          }
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) {
+            meta.setAttribute("content", theme === "dark" ? "#070A13" : "#FFFFFF");
+          }
+        } catch (error) {
+          // Penyimpanan diblokir: tema tetap gelap seperti bawaan `<html>`.
+        }
+      })();
+    </script>
+    <!-- tema-bootstrap:selesai -->
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap"
+      rel="stylesheet"
+    />
+    <title>MesinPOS — Enterprise POS & Inventory Cloud</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
