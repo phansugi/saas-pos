@@ -5,7 +5,11 @@ Catatan pekerjaan ada di [`worklog.md`](./worklog.md) — setiap pekerjaan yang 
 menambah satu entri baru di bagian Riwayat berkas itu.
 
 Backup kode ke GitHub (memberi akses, mengecualikan `isolate/`, commit, push, lalu membuktikan
-isinya sama) ada di [`docs/panduan-backup-github.md`](./docs/panduan-backup-github.md).
+isinya sama) ada di [`docs/panduan-backup-github.md`](./docs/panduan-backup-github.md) — berkas itu juga
+menjelaskan cadangan **data** (tombol backup di dashboard Convex, atau satu perintah
+`bun run backup:data`, lihat `scripts/backup-data.mjs`) beserta kunci rahasia yang sengaja tidak masuk repo.
+Daftar **nama** kunci rahasia (env workspace, deployment Convex, produksi) beserta tempat menyimpan dan
+cara membuat ulangnya ada di [`docs/daftar-kunci-rahasia.md`](./docs/daftar-kunci-rahasia.md).
 
 ## Mengisi stok & panduan operasional
 

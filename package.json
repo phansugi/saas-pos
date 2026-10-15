@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
     "panduan:pdf": "bun scripts/gen-panduan-pdf.mjs",
-    "convex:dev": "convex dev"
+    "convex:dev": "convex dev",
+    "backup:data": "bun scripts/backup-data.mjs"
   },
   "dependencies": {
     "@auth/core": "0.41.1",

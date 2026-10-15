@@ -200,4 +200,51 @@ Terakhir, buka `https://github.com/phansugi/saas-pos` di peramban: seluruh folde
   menghapus pekerjaan yang belum di-commit.
 - GitHub adalah cadangan **kode** saja. Data produksi (database Convex di deployment
   `mellow-narwhal-477`, berkas unggahan, dan rahasia di Settings → Environment) **tidak** ikut
-  ter-backup oleh langkah di atas dan perlu dicadangkan terpisah.
+  ter-backup oleh langkah di atas dan perlu dicadangkan terpisah — lihat bagian berikutnya.
+
+## Selain kode: data, berkas, dan kunci rahasia
+
+GitHub menyimpan **kode**. Tiga hal ini tidak ikut dan punya caranya sendiri:
+
+| Yang perlu dicadangkan | Di mana hidupnya | Cara paling mudah |
+|---|---|---|
+| **Data + berkas unggahan** (produk, penjualan, gambar produk, logo toko) | deployment Convex `mellow-narwhal-477` | tombol **Backup Now** di dashboard Convex, atau satu perintah `bun run backup:data` |
+| **Kunci rahasia** (env lokal, env deployment Convex, Settings → Environment Freebuff) | di luar repo — sengaja | catat di pengelola kata sandi; nama kuncinya bisa dibaca dengan `bunx convex env list --names-only` |
+| **Akun pihak ketiga** (GitHub, Convex, Resend, WhatsApp Cloud) | situs masing-masing | pastikan email pemulihan & verifikasi dua langkah aktif, simpan kuncinya di pengelola kata sandi |
+
+Yang **tidak** perlu dicadangkan karena bisa dibuat ulang kapan saja: `node_modules/`, `dist/`,
+`isolate/`, `.convex/`, dan sesi/riwayat demo di peramban (localStorage perangkat).
+
+Daftar **nama** kunci rahasia proyek ini beserta tempat menyimpannya (env workspace, env deployment
+Convex, env produksi) dan cara membuat ulang tiap kunci ada di
+[`docs/daftar-kunci-rahasia.md`](./daftar-kunci-rahasia.md).
+
+### Cara 1 — tombol di dashboard Convex (tanpa terminal)
+
+1. Buka dashboard Convex → deployment `mellow-narwhal-477` → **Settings → Snapshots/Backups**
+   (tautan ini yang dicetak perintah ekspor:
+   <https://dashboard.convex.dev/d/mellow-narwhal-477/settings/snapshots>).
+2. Tekan tombol backup (**Backup Now** menurut dokumentasi Convex), tunggu selesai, lalu **Download**.
+3. Simpan berkasnya di luar workspace (drive awan atau perangkat lain).
+
+Catatan paket: backup manual tersedia di paket gratis, tetapi **maksimal dua backup per deployment**
+dan disimpan sekitar 7 hari; backup terjadwal otomatis butuh paket Pro
+(<https://docs.convex.dev/database/backup-restore>).
+
+### Cara 2 — satu perintah dari sini
+
+```bash
+bun run backup:data                 # deployment dev (yang dipakai aplikasi ini)
+bun run backup:data --prod          # kalau proyek punya deployment produksi terpisah
+```
+
+Hasilnya `backups/convex-<tanggal>.zip` (sekitar 4 MB) berisi dokumen semua tabel
+(`<tabel>/documents.jsonl`) **dan** berkas unggahan (`_storage/`). Folder `backups/` sudah diabaikan
+git, jadi berkas backup tidak akan ikut ter-commit — skripnya sendiri yang memeriksa itu dan memberi
+peringatan kalau belum.
+
+Setiap ekspor juga menambah satu **snapshot di server Convex** (karena itu batas dua snapshot di atas
+perlu diingat: tidak perlu mengekspor berkali-kali dalam sehari).
+
+Memulihkan salinan: `bunx convex import backups/convex-<tanggal>.zip`. Menurut dokumentasi CLI Convex,
+impor dari ZIP mempertahankan id dokumen dan waktu pembuatannya.

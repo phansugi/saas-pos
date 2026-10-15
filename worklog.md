@@ -27,6 +27,102 @@ Aturan penulisan yang dipakai di berkas ini:
 
 ## Riwayat
 
+## 2026-10-15 — Daftar nama kunci rahasia + tempatnya (`docs/daftar-kunci-rahasia.md`)
+
+**Ruang lingkup:** permintaan pemilik repo — “Catat daftar nama kunci rahasia yang dipakai proyek ini
+beserta tempat menyimpannya agar mudah dicatat ulang”. Yang dibuat: satu halaman baru
+`docs/daftar-kunci-rahasia.md` berisi **hanya nama** kunci (tanpa satu pun nilai), tempat penyimpanannya,
+dan cara membuat ulang tiap kunci kalau nilainya hilang. Penunjuknya ditambahkan di README dan di
+`docs/panduan-backup-github.md` (bagian “Selain kode”).
+
+Cara namanya dikumpulkan (semuanya nama, tidak ada nilai yang dibaca/ditulis):
+
+1. Dari kode: `process.env.*` (18 nama) dan `import.meta.env.VITE_*` (2 nama), termasuk pemetaan
+   **file mana membaca kunci mana** — mis. `RESEND_API_KEY`/`OTP_EMAIL_FROM` dibaca `src/convex/inviteEmail.ts`,
+   `WHATSAPP_*` dibaca `src/convex/receiptWa*.ts` + `lib/receiptWhatsapp.ts`, `ALLOW_UNVERIFIED_ACTOR`
+   dibaca `lib/auth.ts`/`lib/authz.ts`, `VITE_CONVEX_URL`/`VITE_DATA_SOURCE` dibaca
+   `src/lib/store/config.ts`.
+2. Dari platform (baca-saja, nama saja): `freebuff-env list` → env workspace **7** kunci; (untuk produksi)
+   `freebuff-deploy env list` → **3** kunci; `bunx convex env list --names-only` → env deployment **6** kunci.
+3. Dibandingkan dengan kode: kunci yang **dibaca kode tapi belum dipasang** juga dicatat
+   (`OTP_PEPPER`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_GRAPH_VERSION`,
+   `XENDIT_CALLBACK_TOKEN`, `GDCPAY_CALLBACK_TOKEN`, `ALLOW_UNVERIFIED_ACTOR`) berikut perilakunya kalau
+   kosong — termasuk bawaannya: `OTP_PEPPER` kosong = hash hanya terikat email, `WHATSAPP_GRAPH_VERSION`
+   kosong = `v21.0`, `ALLOW_UNVERIFIED_ACTOR` kosong = `true` (Blocker #1).
+4. Kunci yang hanya dipakai harness/skrip (18 nama: `PLAYWRIGHT_DIR`, `SKIP_PUSH`, `PROBE_AS_TOKEN`, …)
+   dipisahkan supaya tidak dikira rahasia produksi.
+
+**Berkas:** baru: `docs/daftar-kunci-rahasia.md` · diubah: `README.md`, `docs/panduan-backup-github.md`,
+`worklog.md`.
+
+**Verifikasi:**
+- `freebuff-env list` → `.env.local` memuat 7 kunci: `CONVEX_DEPLOYMENT`, `CONVEX_DEPLOY_KEY`,
+  `VITE_CONVEX_URL`, `VITE_CONVEX_SITE_URL`, `RESEND_API_KEY`, `OTP_EMAIL_FROM`, `VITE_DATA_SOURCE`; `blankKeys: []`
+- `freebuff-deploy env list` → 3 kunci: `CONVEX_DEPLOY_KEY`, `VITE_DATA_SOURCE`, `VITE_CONVEX_URL`
+- `bunx convex env list --names-only` → 6 kunci: `JWKS`, `JWT_PRIVATE_KEY`, `OTP_DEV_CODE`,
+  `OTP_EMAIL_FROM`, `RESEND_API_KEY`, `SITE_URL` (exit 0)
+- Pencarian kode: `rg -o 'process[.]env[.][A-Za-z0-9_]+' src scripts` → 18 nama, plus
+  `import[.]meta[.]env` → 2 nama; pemetaan file↔kunci diverifikasi per berkas
+- `sed -n '1,33p' src/lib/store/config.ts` → `VITE_DATA_SOURCE` hanya aktif kalau bernilai `convex` dan
+  `VITE_CONVEX_URL` ada (kalau tidak, jatuh ke data demo) — dasar kalimat di tabel
+- Berkas dokumentasi saja (markdown) — tidak ada kode, tipe, build, atau fungsi Convex yang tersentuh,
+  jadi tidak ada perintah uji yang perlu dijalankan ulang
+
+**Catatan / blocker:** halaman ini sengaja tidak memuat satu pun nilai kunci dan tidak bisa memuatnya
+(nilai memang tidak dapat dibaca kembali dari ketiga tempat itu). Tabel **Status Phase 1–6** dan daftar
+**Blocker yang masih terbuka** tidak berubah; yang perlu diketahui: `OTP_PEPPER`, `WHATSAPP_*`, `XENDIT_*`,
+`GDCPAY_*` masih **belum dipasang** di deployment — sama seperti yang sudah tercatat di Blocker #9 dan
+catatan webhook.
+
+## 2026-10-15 — Backup data jadi satu perintah: `bun run backup:data` (+ daftar yang masih perlu dicadangkan)
+
+**Ruang lingkup:** permintaan pemilik repo — “apalagi yg perlu di backup, buat jadi mudah aja dengan tekan
+tombol misalnya”. Yang dikerjakan:
+
+1. Menjawab daftar yang belum tercadangkan: **data + berkas unggahan** (deployment Convex
+   `mellow-narwhal-477`), **kunci rahasia** (env lokal, env deployment, Settings → Environment), dan
+   **akun pihak ketiga** (GitHub/Convex/Resend/WhatsApp). Yang **tidak** perlu: `node_modules/`, `dist/`,
+   `isolate/`, `.convex/`, dan sesi/riwayat demo di localStorage — semuanya bisa dibuat ulang.
+2. Membuat jalan pintasnya: skrip baru `scripts/backup-data.mjs` + entri `backup:data` di `package.json`,
+   jadi **satu perintah** `bun run backup:data` menghasilkan `backups/convex-<tanggal>.zip` (dokumen semua
+   tabel **+** berkas unggahan). `backups/` ditambahkan ke `.gitignore` supaya hasil backup tidak pernah
+   ikut ter-commit; skripnya sendiri yang memverifikasi hal itu lewat `git check-ignore`.
+3. Menuliskan keduanya di `docs/panduan-backup-github.md` (bagian baru “Selain kode: data, berkas, dan
+   kunci rahasia”) — termasuk cara tombol di dashboard Convex untuk yang tidak mau menyentuh terminal —
+   plus satu paragraf penunjuk di README.
+
+**Berkas:** baru: `scripts/backup-data.mjs` · diubah: `package.json`, `.gitignore`,
+`docs/panduan-backup-github.md`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+- `bun run backup:data` → `✔ Backup selesai: backups/convex-2026-10-15-0500.zip (4.0 MB)`, **exit 0**;
+  CLI juga melaporkan snapshot tersimpan di
+  `https://dashboard.convex.dev/d/mellow-narwhal-477/settings/snapshots`
+- `unzip -l backups/convex-2026-10-15-0500.zip` → memuat `_tables/documents.jsonl`, **47** berkas
+  `<tabel>/documents.jsonl`, dan `_storage/` (481 baris) — berkas unggahan benar-benar ikut
+- `git check-ignore -v backups/convex-2026-10-15-0500.zip` → `.gitignore:13:backups/`, exit 0 (backup tidak
+  akan ter-commit); `git status --porcelain` **tidak** menampilkan `backups/`
+- Uji jalur ekspor sebelum skrip ditulis: `bunx convex export --include-file-storage --path /tmp/mesinpos-export-test.zip`
+  → exit 0, berkas 4,1 MB
+- **Uji jalur gagal:** `bun run backup:data --deployment nope-nope-123` → **exit 1** dengan pesan
+  `GAGAL: ekspor berhenti dengan status 1 …`, dan `ls backups/` menunjukkan hanya ZIP yang berhasil
+  (tidak ada berkas setengah jadi) — jadi skrip tidak bisa diam-diam menganggap backup berhasil
+- Argumen diteruskan apa adanya oleh `bun run` (terbukti dari uji `--deployment` di atas); `--prod`
+  memakai jalur yang sama
+- `git status --porcelain` akhir → ` M .gitignore`, ` M README.md`, ` M docs/panduan-backup-github.md`,
+  ` M package.json`, `?? scripts/backup-data.mjs`
+- Tidak ada kode TypeScript/skema/fungsi Convex yang berubah (`scripts/backup-data.mjs` di luar `tsconfig`),
+  jadi `bun tsc -b --noEmit` maupun `convex dev --once` tidak dijalankan pada pekerjaan ini
+- Rujukan pihak ketiga diambil dari dokumentasi Convex: <https://docs.convex.dev/database/backup-restore> ·
+  <https://docs.convex.dev/cli/reference/export> (tombol backup dashboard, batas 2 backup di paket gratis,
+  retensi ~7 hari, impor ZIP mempertahankan id & waktu dokumen)
+
+**Catatan / blocker:** setiap kali skrip dijalankan ia juga membuat snapshot di **server** Convex (paket
+maksimal 2 snapshot per deployment), jadi tidak perlu diekspor berkali-kali sehari. Salinan ZIP-nya tidak
+diunggah ke mana pun — pemilik repo yang memindahkannya ke luar workspace. Kunci rahasia tetap tidak bisa
+tercadang otomatis (hanya namanya yang bisa dibaca: `bunx convex env list --names-only`). Tabel
+**Status Phase 1–6** dan daftar **Blocker yang masih terbuka** tidak berubah.
+
 ## 2026-10-15 — PUSH PERTAMA BERHASIL: 288 berkas MesinPOS kini ter-backup di GitHub
 
 **Ruang lingkup:** permintaan eksplisit pemilik repo — “Push-kan commit 6ad97f2 ini ke GitHub sekarang dari
