@@ -193,6 +193,8 @@ async function handleApi(ctx: HttpCtx, req: Request, resource: string): Promise<
   const url = new URL(req.url);
   const days = url.searchParams.get("days");
   const limit = url.searchParams.get("limit");
+  const since = url.searchParams.get("since");
+  const cursor = url.searchParams.get("cursor");
 
   const data = await ctx.runQuery(internal.apiAccess.readResource, {
     resource,
@@ -200,6 +202,8 @@ async function handleApi(ctx: HttpCtx, req: Request, resource: string): Promise<
     storeId: auth.storeId,
     days: days === null ? undefined : Number(days),
     limit: limit === null ? undefined : Number(limit),
+    since: since === null ? undefined : Number(since),
+    cursor: cursor === null ? undefined : cursor,
   });
 
   // Pemakaian kunci dicatat setelah data benar-benar terbaca.

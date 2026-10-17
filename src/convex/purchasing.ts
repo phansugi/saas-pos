@@ -6,9 +6,9 @@ import {
   nextSequence,
   requireFeature,
   requirePermission,
+  resolveMembershipPermissions,
   writeAuditLog,
 } from "./lib/access";
-import { can } from "./lib/authz";
 import {
   DEFAULT_WAREHOUSE_ID,
   defaultWarehouse,
@@ -39,6 +39,8 @@ import {
   type OrderStatus,
   type RequisitionStatus,
 } from "./lib/purchasing";
+import { enqueueWebhookEvent, scheduleWebhookDeliveryPass } from "./lib/webhookOutbox";
+import { purchaseReceivedEventData } from "./lib/webhookEvents";
 
 /**
  * Purchasing: PR · PO · GRN (`purchasing.basic`) — Phase 3.
@@ -182,8 +184,11 @@ export const list = query({
       "purchase.view",
     );
     // Posisi hutang hanya untuk peran yang memang boleh melihat uang; staf
-    // gudang memakai daftar supplier tanpa angka hutangnya.
-    const seesPayables = can(membership.role, "payable.view");
+    // gudang memakai daftar supplier tanpa angka hutangnya. Izinnya diambil dari
+    // izin **efektif**, supaya anggota yang memakai peran tambahan (tanpa peran
+    // bawaan) juga dinilai benar.
+    const { permissions } = await resolveMembershipPermissions(ctx, membership);
+    const seesPayables = permissions.includes("payable.view");
     const now = Date.now();
 
     const [suppliers, requisitions, orders, receipts, products, payables] = await Promise.all([
@@ -856,6 +861,36 @@ export const receive = mutation({
         createdAt: Date.now(),
       });
     }
+
+    // Penerimaan barang adalah kejadian yang mengubah stok dan harga beli di
+    // platform mitra. SKU diambil dari produknya (baris GRN hanya menyimpan id)
+    // supaya penerima tidak perlu mencocokkan id internal MesinPOS.
+    const skuById = new Map<string, string>();
+    for (const line of receipt.lines) {
+      const product = await ctx.db.get(line.productId as Id<"products">);
+      if (product) skuById.set(product._id as string, product.sku);
+    }
+    const enqueuedPurchase = await enqueueWebhookEvent(ctx, {
+      tenantId: args.tenantId,
+      storeId: order.storeId,
+      event: "purchase.received",
+      subject: number,
+      data: purchaseReceivedEventData({
+        number,
+        order: order.number,
+        supplier: supplier.name,
+        total: receipt.total,
+        lines: receipt.lines.map((line) => ({
+          sku: skuById.get(line.productId as string) ?? "",
+          name: line.name,
+          quantity: line.quantity,
+          unitCost: line.unitCost,
+        })),
+      }),
+    });
+    // Satu putaran untuk penerimaan ini; pergerakan stok yang ditulis di atas
+    // ikut terkirim dalam putaran yang sama.
+    await scheduleWebhookDeliveryPass(ctx, enqueuedPurchase);
 
     await writeAuditLog(ctx, {
       tenantId: args.tenantId,

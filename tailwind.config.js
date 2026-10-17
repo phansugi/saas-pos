@@ -31,6 +31,19 @@ export default {
           DEFAULT: "hsl(var(--accent))",
           foreground: "hsl(var(--accent-foreground))",
         },
+        /*
+          Warna “bahaya”: teks galat, batas peringatan keras, tombol hapus.
+          Kelasnya (`text-destructive`, `bg-destructive/10`, `border-destructive/40`)
+          dipakai di puluhan tempat, tetapi token ini **tidak ada** di palet —
+          jadi Tailwind tidak pernah membuat kelasnya dan semua peringatan galat
+          tampil sebagai teks biasa. Ditambahkan bersama `--destructive` di
+          `src/index.css` (terang & gelap) supaya peringatan yang memang urgent
+          benar-benar terlihat berbeda.
+        */
+        destructive: {
+          DEFAULT: "hsl(var(--destructive))",
+          foreground: "hsl(var(--destructive-foreground))",
+        },
         card: {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",

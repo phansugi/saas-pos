@@ -13,8 +13,11 @@ import { useMemo } from "react";
 import type { Permission, Role } from "@/lib/authz";
 import { actingPermissions, actingRole, useSession } from "@/lib/session";
 
-/** The acting role for the current tenant (peran bawaan, bukan peran kustom). */
-export function useRole(): Role {
+/**
+ * Peran **bawaan** pengguna aktif di tenant ini (bukan peran kustom); `null`
+ * kalau ia memakai peran tambahan yang berdiri sendiri.
+ */
+export function useRole(): Role | null {
   const { session } = useSession();
   return actingRole(session);
 }

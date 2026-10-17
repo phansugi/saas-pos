@@ -78,14 +78,25 @@ const nav: NavItem[] = [
   { to: "/app", label: "Dashboard", icon: LayoutGrid, end: true, permission: "report.view" },
   { to: "/app/pos", label: "Kasir (POS)", icon: ShoppingCart, end: false, permission: "pos.sell" },
   {
+    // Dapur punya izinnya sendiri (`kds.manage`): peran “dapur saja” tidak
+    // perlu bisa menjual, dan kasir yang memang bekerja di antrean tetap bisa.
     to: "/app/kds",
     label: "Dapur & Meja",
     icon: ChefHat,
     end: false,
-    permission: "pos.sell",
+    permission: "kds.manage",
     feature: "pos.kds",
   },
-  { to: "/app/shift", label: "Shift & Kas", icon: Wallet, end: false, permission: "pos.sell" },
+  {
+    // Shift & kas (`shift.manage`) juga berdiri sendiri. Perlu diketahui
+    // merchant: penjualan menuntut shift terbuka, jadi peran yang menjual harus
+    // memegang `pos.sell` + `shift.manage` (peran bawaan Kasir & Manajer sudah).
+    to: "/app/shift",
+    label: "Shift & Kas",
+    icon: Wallet,
+    end: false,
+    permission: "shift.manage",
+  },
   { to: "/app/products", label: "Produk & Stok", icon: Boxes, end: false, permission: "stock.adjust" },
   {
     // Gudang & Stok (Phase 3). Menu tampil selama perannya bekerja dengan stok;
@@ -433,13 +444,17 @@ export function AppLayout() {
             <label className="mt-3 flex items-center justify-between gap-2 text-xs text-sidebar-muted">
               Peran
               <select
-                value={tenant.role}
+                value={tenant.role ?? ""}
                 onChange={(e) => {
                   if (isRole(e.target.value)) setRole(e.target.value);
                 }}
                 aria-label="Ganti peran (demo)"
                 className="rounded border border-sidebar-border bg-sidebar-deep px-1.5 py-1 text-xs text-sidebar-foreground"
               >
+                {/* Anggota berperan tambahan tidak punya peran bawaan yang bisa dipilih. */}
+                {tenant.role === null && (
+                  <option value="">peran tambahan</option>
+                )}
                 {ROLES.map((role) => (
                   <option key={role} value={role}>
                     {ROLE_LABELS[role]}

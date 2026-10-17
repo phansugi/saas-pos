@@ -183,6 +183,13 @@ export interface AdvancedReport {
   busyHours: HourRow[];
   weekday: WeekdayRow[];
   comparison: PeriodComparison;
+  /**
+   * Proyeksi akhir periode dari laju hari-hari penuh (bagian enterprise: bukan
+   * hanya “berapa yang sudah masuk”, tetapi “berapa yang akan masuk”).
+   */
+  forecast: ForecastReport;
+  /** Analisis keranjang: ukuran keranjang & produk yang sering dibeli bersama. */
+  basket: BasketReport;
   insights: Insight[];
 }
 
@@ -514,6 +521,370 @@ export function comparePeriods(args: {
   };
 }
 
+/* --------------------------------------------------------------- proyeksi */
+
+/**
+ * Berapa hari penuh yang harus sudah lewat sebelum laju harian dipakai untuk
+ * memproyeksikan periode. Hari yang sedang berjalan sengaja **tidak** dihitung:
+ * pagi hari selalu terlihat seperti penurunan, dan proyeksi yang berubah-ubah
+ * mengikuti jam lebih buruk daripada proyeksi yang mengaku belum punya dasar.
+ */
+export const FORECAST_MIN_DAYS = 1;
+
+export interface ForecastReport {
+  /** Hari **penuh** yang sudah lewat di dalam periode (dasar laju). */
+  elapsedDays: number;
+  /**
+   * Hari ini masuk periode yang dibaca, dan bagiannya belum dihitung penuh.
+   * Periode laporan selalu berakhir di tengah malam nanti, jadi inilah satu-satunya
+   * bagian periode yang masih berjalan.
+   */
+  todayCounted: boolean;
+  completedNet: number;
+  completedProfit: number;
+  completedTransactions: number;
+  /** Omzet bersih hari ini — bagian hari yang belum selesai. */
+  todayNet: number;
+  todayProfit: number;
+  todayTransactions: number;
+  netRunRate: number;
+  profitRunRate: number;
+  transactionRunRate: number;
+  /**
+   * Perkiraan angka **akhir periode**: hari-hari penuh yang sudah tercatat + hari
+   * ini diperkirakan ditutup pada laju hariannya (tidak lebih kecil daripada yang
+   * sudah masuk hari ini).
+   */
+  projectedNet: number;
+  projectedProfit: number;
+  projectedTransactions: number;
+  /** Ada minimal satu hari penuh? Kalau tidak, proyeksinya belum layak dipercaya. */
+  hasBasis: boolean;
+  /**
+   * Jumlah hari yang dibandingkan pada periode sebelumnya: **sama dengan jumlah
+   * hari penuh** periode ini, sehingga hari yang sedang berjalan tidak ikut
+   * menyeret perbandingannya.
+   */
+  previousDays: number;
+  /** Omzet bersih periode sebelumnya pada jumlah hari yang sama. */
+  previousSamePaceNet: number;
+  previousSamePaceTransactions: number;
+  /** Laju periode ini vs periode sebelumnya pada rentang hari yang sama (%). */
+  paceDeltaPct: number | null;
+}
+
+/**
+ * Proyeksi akhir periode: dari laju hari-hari **penuh** yang sudah lewat, bukan
+ * dari rata-rata seluruh periode (hari yang sedang berjalan akan menyeretnya
+ * turun lalu naik lagi sepanjang hari — pagi hari selalu terlihat seperti
+ * penurunan).
+ *
+ * Ambang “hari penuh” memakai tengah malam lokal klien, sama seperti batas
+ * periode analitik — jadi “hari” di sini hari dinding toko, bukan hari server.
+ * Bagian periode yang masih berjalan itu hari ini, jadi proyeksinya = hari-hari
+ * penuh + hari ini pada lajunya; kalau periode yang dibaca sudah lewat
+ * sepenuhnya (tidak ada hari berjalan), proyeksinya sama dengan yang tercatat.
+ *
+ * Pembandingnya sengaja **bukan** periode sebelumnya penuh, melainkan periode
+ * sebelumnya pada **jumlah hari yang sama** — membandingkan 29 hari yang sudah
+ * lewat dengan 30 hari periode lalu membuat laju selalu terlihat turun.
+ */
+export function buildForecast(args: {
+  sales: readonly AnalyticsSaleInput[];
+  previousSales?: readonly AnalyticsSaleInput[];
+  range: AnalyticsRange;
+  now?: number;
+  timezoneOffsetMinutes?: number;
+}): ForecastReport {
+  const offset = args.timezoneOffsetMinutes ?? 0;
+  const now = args.now ?? args.range.to - DAY_MS;
+  const todayStart = Math.floor((now + offset * 60_000) / DAY_MS) * DAY_MS - offset * 60_000;
+  const cut = Math.min(todayStart, args.range.to);
+  const elapsedDays = Math.min(
+    args.range.days,
+    Math.max(0, Math.round((cut - args.range.from) / DAY_MS)),
+  );
+  const todayCounted = todayStart >= args.range.from && todayStart < args.range.to;
+
+  const completed: AnalyticsSaleInput[] = [];
+  const running: AnalyticsSaleInput[] = [];
+  for (const sale of args.sales) {
+    // Baris di luar periode diabaikan di sini juga, bukan cuma di pemanggil: fungsi
+    // ini sering dipanggil dengan daftar yang lebih lebar (periode + pembandingnya).
+    if (!inRange(sale, args.range)) continue;
+    (sale.createdAt < cut ? completed : running).push(sale);
+  }
+
+  const completedTotals = summariseSales(completed);
+  const runningTotals = summariseSales(running);
+  const completedProfit = marginOf(completed).grossProfit;
+  const todayProfit = marginOf(running).grossProfit;
+  const hasBasis = elapsedDays >= FORECAST_MIN_DAYS;
+
+  const netRunRate = hasBasis ? Math.round(completedTotals.netRevenue / elapsedDays) : 0;
+  const profitRunRate = hasBasis ? Math.round(completedProfit / elapsedDays) : 0;
+  const transactionRunRate = hasBasis
+    ? Math.round(completedTotals.transactions / elapsedDays)
+    : 0;
+
+  // Lajunya dibandingkan hari penuh dengan hari penuh: periode sebelumnya dipotong
+  // pada jumlah hari yang sama, bukan diadu dengan periode penuh yang lebih panjang.
+  const previousDays = elapsedDays;
+  const previousRangeDays = previousRange(args.range);
+  const previousCut = previousRangeDays.from + previousDays * DAY_MS;
+  let previousSamePaceNet = 0;
+  let previousSamePaceTransactions = 0;
+  for (const sale of args.previousSales ?? []) {
+    if (!inRange(sale, previousRangeDays)) continue;
+    if (sale.createdAt >= previousCut) continue;
+    previousSamePaceNet += netOf(sale);
+    previousSamePaceTransactions += 1;
+  }
+
+  const soFarNet = completedTotals.netRevenue + runningTotals.netRevenue;
+  const soFarProfit = completedProfit + todayProfit;
+  const soFarTransactions = completedTotals.transactions + runningTotals.transactions;
+  /** Proyeksi hanya masuk akal kalau ada laju **dan** bagian yang masih berjalan. */
+  const forecastable = hasBasis && todayCounted;
+
+  return {
+    elapsedDays,
+    todayCounted,
+    completedNet: completedTotals.netRevenue,
+    completedProfit,
+    completedTransactions: completedTotals.transactions,
+    todayNet: runningTotals.netRevenue,
+    todayProfit,
+    todayTransactions: runningTotals.transactions,
+    netRunRate,
+    profitRunRate,
+    transactionRunRate,
+    // Hari ini diperkirakan ditutup pada laju hariannya; kalau bagiannya yang
+    // sudah masuk justru lebih tinggi, angka itu yang dipakai (proyeksi tidak
+    // boleh meramalkan penurunan yang belum terjadi). Kalau tidak ada hari yang
+    // sedang berjalan — atau belum ada satu hari penuh pun — proyeksinya sama
+    // dengan yang tercatat, bukan angka tambahan.
+    projectedNet: forecastable
+      ? completedTotals.netRevenue + Math.max(runningTotals.netRevenue, netRunRate)
+      : soFarNet,
+    projectedProfit: forecastable
+      ? completedProfit + Math.max(todayProfit, profitRunRate)
+      : soFarProfit,
+    projectedTransactions: forecastable
+      ? completedTotals.transactions +
+        Math.max(runningTotals.transactions, transactionRunRate)
+      : soFarTransactions,
+    hasBasis,
+    previousDays,
+    previousSamePaceNet,
+    previousSamePaceTransactions,
+    paceDeltaPct: pctChange(completedTotals.netRevenue, previousSamePaceNet),
+  };
+}
+
+/* ---------------------------------------------------------------- keranjang */
+
+/** Berapa pasangan produk yang dilaporkan (paling sering dibeli bersama). */
+export const BASKET_PAIR_LIMIT = 8;
+
+/**
+ * Batas jumlah pasangan berbeda yang dipindai. Satu nota dengan 60 jenis barang
+ * sudah menghasilkan 1.770 pasangan; tanpa batas, satu nota raksasa bisa
+ * menghabiskan memori laporan. Kalau batasnya tersentuh, itu **dilaporkan**
+ * (`truncated`), bukan disembunyikan.
+ */
+export const BASKET_PAIR_SCAN_LIMIT = 20_000;
+
+export interface BasketSizeRow {
+  label: string;
+  minItems: number;
+  /** `null` = tanpa batas atas. */
+  maxItems: number | null;
+  receipts: number;
+  sharePct: number;
+  /** Omzet bersih nota-nota di rentang ukuran ini. */
+  revenue: number;
+}
+
+export interface BasketPairRow {
+  aId: string;
+  bId: string;
+  aName: string;
+  bName: string;
+  /** Nota yang memuat kedua produk itu. */
+  together: number;
+  /** Porsi nota yang memuat keduanya (%). */
+  supportPct: number;
+  /**
+   * Berapa kali lebih sering keduanya muncul bersama dibanding kalau keduanya
+   * saling bebas (1 = tidak ada hubungan, > 1 = saling menarik).
+   */
+  lift: number;
+  /** Omzet bersih kedua baris itu di nota-nota yang memuat keduanya. */
+  revenue: number;
+}
+
+export interface BasketReport {
+  /** Nota yang ikut dihitung (punya minimal satu barang). */
+  receipts: number;
+  /** Nota tanpa baris barang — dilewati, bukan dihitung sebagai keranjang kosong. */
+  skippedReceipts: number;
+  items: number;
+  /** Rata-rata barang per nota (dua angka di belakang koma). */
+  averageItems: number;
+  /** Nota dengan minimal dua **jenis** barang berbeda. */
+  multiItemReceipts: number;
+  multiItemSharePct: number;
+  sizes: BasketSizeRow[];
+  pairs: BasketPairRow[];
+  pairLimit: number;
+  /** Pemindaian pasangan dihentikan karena batas — angkanya sebagian. */
+  truncated: boolean;
+}
+
+/** Rentang ukuran keranjang yang dilaporkan; jumlah barang di luar ini masuk “6+”. */
+const BASKET_SIZES: Array<{ label: string; minItems: number; maxItems: number | null }> = [
+  { label: "1 barang", minItems: 1, maxItems: 1 },
+  { label: "2 barang", minItems: 2, maxItems: 2 },
+  { label: "3-5 barang", minItems: 3, maxItems: 5 },
+  { label: "6 barang atau lebih", minItems: 6, maxItems: null },
+];
+
+function basketSizeIndex(quantity: number): number {
+  if (quantity <= 1) return 0;
+  if (quantity === 2) return 1;
+  if (quantity <= 5) return 2;
+  return 3;
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+/**
+ * Analisis keranjang: berapa barang yang biasanya dibawa pulang satu pelanggan,
+ * dan **produk mana yang sering dibeli bersama** — dasar keputusan bundling & tata
+ * letak rak. Semua dari baris penjualan yang sudah ada, tanpa data baru.
+ *
+ * Satu produk dihitung **sekali per nota** (dua baris produk yang sama tidak
+ * membuat “pasangan” dengan dirinya sendiri), dan yang memisahkan kebiasaan dari
+ * kebetulan adalah `lift`: produk yang memang laris akan sering muncul di mana-mana,
+ * jadi pasangan yang sering tetapi tidak lebih sering daripada kebiasaannya bukan
+ * temuan.
+ */
+export function buildBasketReport(
+  sales: readonly AnalyticsSaleInput[],
+  limit = BASKET_PAIR_LIMIT,
+): BasketReport {
+  const sizeReceipts = BASKET_SIZES.map(() => 0);
+  const sizeRevenue = BASKET_SIZES.map(() => 0);
+  const productReceipts = new Map<string, number>();
+  const pairs = new Map<string, { aId: string; bId: string; aName: string; bName: string; together: number; revenue: number }>();
+
+  let receipts = 0;
+  let skippedReceipts = 0;
+  let items = 0;
+  let multiItemReceipts = 0;
+  let truncated = false;
+
+  for (const sale of sales) {
+    const distinct = new Map<string, { name: string; net: number }>();
+    let quantity = 0;
+    for (const item of sale.items) {
+      const qty = truncate(item.quantity);
+      quantity += qty;
+      items += qty;
+      const current = distinct.get(item.productId) ?? { name: item.name, net: 0 };
+      current.net += truncate(item.net);
+      distinct.set(item.productId, current);
+    }
+    if (distinct.size === 0) {
+      skippedReceipts += 1;
+      continue;
+    }
+
+    receipts += 1;
+    const bucket = basketSizeIndex(quantity);
+    sizeReceipts[bucket] += 1;
+    sizeRevenue[bucket] += netOf(sale);
+    if (distinct.size >= 2) multiItemReceipts += 1;
+
+    const entries = [...distinct.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    for (const [id] of entries) {
+      productReceipts.set(id, (productReceipts.get(id) ?? 0) + 1);
+    }
+
+    for (let i = 0; i < entries.length; i += 1) {
+      for (let j = i + 1; j < entries.length; j += 1) {
+        const [aId, a] = entries[i];
+        const [bId, b] = entries[j];
+        const key = `${aId}\u0000${bId}`;
+        const revenue = a.net + b.net;
+        const current = pairs.get(key);
+        if (current) {
+          current.together += 1;
+          current.revenue += revenue;
+          continue;
+        }
+        if (pairs.size >= BASKET_PAIR_SCAN_LIMIT) {
+          truncated = true;
+          continue;
+        }
+        pairs.set(key, {
+          aId,
+          bId,
+          aName: a.name,
+          bName: b.name,
+          together: 1,
+          revenue,
+        });
+      }
+    }
+  }
+
+  const list: BasketPairRow[] = [...pairs.values()].map((pair) => {
+    const countA = productReceipts.get(pair.aId) ?? 0;
+    const countB = productReceipts.get(pair.bId) ?? 0;
+    // Kebiasaan masing-masing produk: kalau keduanya saling bebas, porsi nota yang
+    // memuat keduanya adalah hasil kali keduanya. `lift` = seberapa jauh kenyataannya
+    // melampaui itu.
+    const independent =
+      receipts > 0 ? (countA / receipts) * (countB / receipts) * receipts : 0;
+    return {
+      ...pair,
+      supportPct: share(pair.together, receipts),
+      lift: independent > 0 ? round2(pair.together / independent) : 0,
+    };
+  });
+
+  list.sort(
+    (a, b) =>
+      b.together - a.together ||
+      b.lift - a.lift ||
+      b.revenue - a.revenue ||
+      a.aName.localeCompare(b.aName) ||
+      a.bName.localeCompare(b.bName),
+  );
+
+  return {
+    receipts,
+    skippedReceipts,
+    items,
+    averageItems: receipts > 0 ? round2(items / receipts) : 0,
+    multiItemReceipts,
+    multiItemSharePct: share(multiItemReceipts, receipts),
+    sizes: BASKET_SIZES.map((bucket, index) => ({
+      ...bucket,
+      receipts: sizeReceipts[index],
+      sharePct: share(sizeReceipts[index], receipts),
+      revenue: sizeRevenue[index],
+    })),
+    pairs: limit > 0 ? list.slice(0, limit) : list,
+    pairLimit: limit,
+    truncated,
+  };
+}
+
 /**
  * Kalimat temuan: satu bagian yang paling mudah dilewatkan orang — mengubah
  * angka menjadi keputusan. Urutannya penting (peringatan lebih dulu), karena
@@ -637,7 +1008,14 @@ export function buildAdvancedReport(args: {
   previousSales?: readonly AnalyticsSaleInput[];
   range: AnalyticsRange;
   timezoneOffsetMinutes?: number;
+  /**
+   * “Sekarang” menurut pemanggil (ms). Dipakai proyeksi untuk tahu hari mana yang
+   * sudah dihitung penuh; kalau kosong, hari terakhir periode dianggap baru mulai.
+   */
+  now?: number;
   topLimit?: number;
+  /** Batas pasangan produk yang dilaporkan di analisis keranjang. */
+  basketPairLimit?: number;
 }): AdvancedReport {
   const offset = args.timezoneOffsetMinutes ?? 0;
   const current = args.sales.filter((sale) => inRange(sale, args.range));
@@ -669,6 +1047,14 @@ export function buildAdvancedReport(args: {
       currentMargin: margin,
       previousMargin,
     }),
+    forecast: buildForecast({
+      sales: current,
+      previousSales: previous,
+      range: args.range,
+      now: args.now,
+      timezoneOffsetMinutes: offset,
+    }),
+    basket: buildBasketReport(current, args.basketPairLimit ?? BASKET_PAIR_LIMIT),
     insights: buildInsights({
       totals,
       margin,

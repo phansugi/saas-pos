@@ -628,13 +628,33 @@ export const CUSTOM_ROLES: DemoCustomRole[] = [
   },
 ];
 
-/** Anggota tim contoh; `customRoleId` kosong = memakai peran bawaan. */
+/**
+ * Penyesuaian **peran bawaan** contoh (`roleSettings`).
+ *
+ * Sengaja **kosong**: mode demo memulai dari peran bawaan apa adanya, sama seperti
+ * workspace baru. Perubahan yang dilakukan pengunjung demo hidup di memori sesi —
+ * itu cara mencobanya tanpa mengubah bantuan yang dilihat orang berikutnya.
+ */
+export interface DemoRoleSetting {
+  role: Role;
+  permissions?: Permission[];
+  active?: boolean;
+  removed?: boolean;
+}
+
+export const ROLE_SETTINGS: DemoRoleSetting[] = [];
+
+/**
+ * Anggota tim contoh. `role` = peran **bawaan**; `null` berarti anggota itu
+ * memakai peran tambahan (`customRoleId`) yang **berdiri sendiri** — tidak ada
+ * peran dasar yang menemani. Satu anggota selalu punya salah satu.
+ */
 export interface DemoTeamMember {
   membershipId: string;
   userId: string;
   name: string;
   email: string;
-  role: Role;
+  role: Role | null;
   customRoleId?: string | null;
   active: boolean;
   /**
@@ -673,7 +693,8 @@ export const TEAM_MEMBERS: DemoTeamMember[] = [
     userId: "u-sari",
     name: "Sari Wulandari",
     email: "sari@kopi-nusantara.id",
-    role: "cashier",
+    // Peran tambahan berdiri sendiri: tidak ada peran bawaan di belakangnya.
+    role: null,
     customRoleId: "role-malam",
     active: true,
     phone: "6281234567890",
@@ -713,7 +734,8 @@ export interface DemoApiKey {
   name: string;
   publicId: string;
   scopes: Permission[];
-  creatorRole: Role;
+  /** `null` = pembuatnya memakai peran tambahan (tanpa peran bawaan). */
+  creatorRole: Role | null;
   active: boolean;
   /** 0 = tanpa kedaluwarsa. */
   expiresInDays: number;

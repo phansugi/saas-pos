@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
+  AlarmClock,
   BadgeCheck,
+  BellRing,
   ImageUp,
   Minus,
   Percent,
@@ -54,6 +56,16 @@ import {
   scanBeepVolumeLabel,
 } from "@/lib/scanBeep";
 import { useSession } from "@/lib/session";
+import {
+  sameShiftSetting,
+  shiftHourLabel,
+  shiftOperatingLabel,
+  shiftOwnerAlertHint,
+  shiftSettingHint,
+  shiftSettingSentence,
+  validateShiftSetting,
+  type ShiftSetting,
+} from "@/lib/shift";
 import { useStore } from "@/lib/store";
 import {
   RECEIPT_FOOTER_LINE_MAX,
@@ -203,13 +215,15 @@ export function SettingsPage() {
     fnbTax,
     setFnbTax,
     fnbTaxMonth,
-    receipt,
-    setReceipt,
-    logo,
-    setLogo,
-    removeLogo,
-    modules,
-  } = useStore();
+  receipt,
+  setReceipt,
+  shift,
+  setShift,
+  logo,
+  setLogo,
+  removeLogo,
+  modules,
+} = useStore();
   const { session } = useSession();
   // Setelan bunyi bip kasir bersifat **per perangkat**, bukan per workspace:
   // pengeras suara yang berbeda itu perangkat, jadi tombol ini tidak menulis ke
@@ -529,6 +543,100 @@ export function SettingsPage() {
 
   function resetReceipt() {
     setReceiptDraft(receipt);
+    setError(null);
+    setNotice(null);
+  }
+
+  /*
+    Setelan pengingat tutup shift. Jam & ambangnya diketik sebagai teks dulu,
+    bukan angka langsung: kolom yang sedang kosong saat pemilik toko mengetik
+    harus bisa dibedakan dari angka yang salah, dan yang menentukan sah/tidaknya
+    tetap aturan murni `@/lib/shift` (jam 0–23, ambang 1–24 jam) — di halaman ini
+    **dan** di server.
+  */
+  const [shiftActiveDraft, setShiftActiveDraft] = useState(shift.active);
+  const [shiftHourText, setShiftHourText] = useState(String(shift.reminderHour));
+  const [shiftHoursText, setShiftHoursText] = useState(String(shift.longShiftHours));
+  /*
+    Jam operasional & saklar pemberitahuan ke pemilik toko. Jamnya juga diketik
+    sebagai teks dengan alasan yang sama seperti jam pengingat: kolom kosong harus
+    bisa dibedakan dari angka yang salah, dan yang memutuskan sah/tidaknya tetap
+    aturan murni `@/lib/shift` — di halaman ini maupun di server.
+  */
+  const [shiftOpenText, setShiftOpenText] = useState(String(shift.openHour));
+  const [shiftCloseText, setShiftCloseText] = useState(String(shift.closeHour));
+  const [shiftNotifyDraft, setShiftNotifyDraft] = useState(shift.notifyOwner);
+  const [shiftBusy, setShiftBusy] = useState(false);
+
+  useEffect(() => {
+    setShiftActiveDraft(shift.active);
+    setShiftHourText(String(shift.reminderHour));
+    setShiftHoursText(String(shift.longShiftHours));
+    setShiftOpenText(String(shift.openHour));
+    setShiftCloseText(String(shift.closeHour));
+    setShiftNotifyDraft(shift.notifyOwner);
+  }, [
+    shift.active,
+    shift.reminderHour,
+    shift.longShiftHours,
+    shift.openHour,
+    shift.closeHour,
+    shift.notifyOwner,
+  ]);
+
+  /** Kolom yang belum berisi angka sah menghasilkan `null` (bukan 0). */
+  function parseShiftNumber(text: string): number | null {
+    const trimmed = text.trim();
+    if (trimmed === "") return null;
+    const value = Number(trimmed);
+    return Number.isInteger(value) ? value : null;
+  }
+
+  const shiftCandidate: ShiftSetting = {
+    active: shiftActiveDraft,
+    reminderHour: parseShiftNumber(shiftHourText) ?? Number.NaN,
+    longShiftHours: parseShiftNumber(shiftHoursText) ?? Number.NaN,
+    openHour: parseShiftNumber(shiftOpenText) ?? Number.NaN,
+    closeHour: parseShiftNumber(shiftCloseText) ?? Number.NaN,
+    notifyOwner: shiftNotifyDraft,
+  };
+  const shiftDecision = validateShiftSetting(shiftCandidate);
+  const shiftDirty = !sameShiftSetting(shiftCandidate, shift);
+
+  function patchShift() {
+    setError(null);
+    setNotice(null);
+  }
+
+  async function saveShift() {
+    setError(null);
+    setNotice(null);
+    if (!shiftDecision.ok) {
+      setError(shiftDecision.reason);
+      return;
+    }
+    setShiftBusy(true);
+    try {
+      const result = await setShift(shiftDecision.value);
+      setNotice(
+        result.changed
+          ? result.sentence
+          : "Setelan pengingat tutup shift sudah seperti itu — tidak ada yang perlu diubah.",
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setShiftBusy(false);
+    }
+  }
+
+  function resetShift() {
+    setShiftActiveDraft(shift.active);
+    setShiftHourText(String(shift.reminderHour));
+    setShiftHoursText(String(shift.longShiftHours));
+    setShiftOpenText(String(shift.openHour));
+    setShiftCloseText(String(shift.closeHour));
+    setShiftNotifyDraft(shift.notifyOwner);
     setError(null);
     setNotice(null);
   }
@@ -1530,6 +1638,8 @@ export function SettingsPage() {
                 {receiptCopiesHint(receiptPreviewSetting)}
               </p>
             </div>
+            {/* Label rangkap menyempit di layar tersempit: dengan `w-40` tetap,
+                baris ini melewati lebar 320 px dan tombol “+” terpotong di tepi. */}
             <div className="flex items-center gap-2">
               <Button
                 type="button"
@@ -1547,7 +1657,7 @@ export function SettingsPage() {
               </Button>
               <span
                 data-testid="struk-rangkap"
-                className="w-40 text-center text-sm font-medium"
+                className="w-32 text-center text-sm font-medium sm:w-40"
               >
                 {receiptCopiesLabel(receiptCandidate)}
               </span>
@@ -1602,9 +1712,16 @@ export function SettingsPage() {
               className="flex flex-wrap items-start gap-4 rounded-lg border border-dashed border-border/70 bg-secondary/20 p-4"
             >
               {receiptPreviewDocument.sheets.map((sheet) => (
+                /*
+                  Lebar lembar mengikuti kertas sungguhan (58/80/241 mm) supaya
+                  pratinjaunya jujur. Di HP, kertas 80 mm (≈ 302 px) lebih lebar dari
+                  layar, jadi wadahnya yang diberi `max-w-full overflow-x-auto`:
+                  lembarnya tidak dipepetkan (kolom & barisnya tetap persis seperti
+                  yang tercetak), dan pemakainya cukup menggeser pratinjaunya.
+                */
                 <div
                   key={sheet.copyIndex}
-                  className="space-y-1"
+                  className="max-w-full space-y-1 overflow-x-auto"
                   style={{ width: `${receiptPreviewWidthMm}mm` }}
                 >
                   {sheet.copyLabel !== "" && (
@@ -1695,6 +1812,244 @@ export function SettingsPage() {
               </p>
             )}
           </div>
+        </CardContent>
+      </Card>
+
+      <Card id="pengingat-shift" data-testid="setelan-pengingat-shift">
+        <CardHeader>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <AlarmClock className="size-4 text-primary" />
+                Pengingat tutup shift
+              </CardTitle>
+              <CardDescription className="mt-1">
+                Kapan kasir diingatkan menutup shift di halaman kasir
+                (<code className="font-mono text-xs">/app/pos</code>) dan di halaman Shift & Kas.
+                Pengingatnya muncul saat jam yang dipilih di sini terlewat, saat shift sudah
+                berjalan lebih lama dari ambangnya, atau saat shift kemarin belum ditutup.
+              </CardDescription>
+            </div>
+            <Badge
+              data-testid="shift-lencana"
+              variant={shiftDirty ? "secondary" : "default"}
+              className="shrink-0 gap-1"
+            >
+              <AlarmClock className="size-3" />
+              {shift.active
+                ? `${shiftHourLabel(shift.reminderHour)} · ${shift.longShiftHours} jam`
+                : "Mati"}
+              {shift.notifyOwner ? ` · operasional ${shiftOperatingLabel(shift)}` : " · pemilik tidak dikabari"}
+            </Badge>
+          </div>
+        </CardHeader>
+
+        <CardContent className="space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/60 bg-secondary/20 px-4 py-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium">
+                {shiftActiveDraft
+                  ? "Kasir diingatkan kalau kasnya belum ditutup"
+                  : "Pengingat dimatikan"}
+              </div>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {shiftActiveDraft
+                  ? "Pengingatnya tampil di dalam aplikasi — bukan notifikasi ke ponsel, dan shift tetap ditutup manusia."
+                  : "Cocok untuk toko yang buka 24 jam: kas tetap bisa ditutup kapan saja, tanpa pengingat."}
+              </p>
+            </div>
+            <Button
+              type="button"
+              role="switch"
+              aria-checked={shiftActiveDraft}
+              aria-label="Pengingat tutup shift"
+              data-testid="shift-saklar"
+              variant={shiftActiveDraft ? "default" : "outline"}
+              className="shrink-0 gap-2"
+              onClick={() => {
+                setShiftActiveDraft((current) => !current);
+                patchShift();
+              }}
+            >
+              <Power className="size-4" />
+              {shiftActiveDraft ? "Aktif" : "Mati"}
+            </Button>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="shift-jam">Mulai diingatkan pukul</Label>
+              <Input
+                id="shift-jam"
+                data-testid="shift-jam"
+                inputMode="numeric"
+                value={shiftHourText}
+                onChange={(event) => {
+                  setShiftHourText(event.target.value.replace(/[^\d]/g, ""));
+                  patchShift();
+                }}
+              />
+              <p className="text-xs text-muted-foreground">
+                Jam 0–23 menurut waktu perangkat kasir yang membuka halaman. Bawaan 21:00 —
+                perkiraan jam toko/kafe tutup.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="shift-ambang">Peringatan keras setelah (jam)</Label>
+              <Input
+                id="shift-ambang"
+                data-testid="shift-ambang"
+                inputMode="numeric"
+                value={shiftHoursText}
+                onChange={(event) => {
+                  setShiftHoursText(event.target.value.replace(/[^\d]/g, ""));
+                  patchShift();
+                }}
+              />
+              <p className="text-xs text-muted-foreground">
+                Angka 1–24. Bawaan 14 jam: shift yang sudah berjalan selama itu pasti melewati
+                satu pergantian jam kerja.
+              </p>
+            </div>
+          </div>
+
+          {/*
+            Jam operasional & pemberitahuan ke pemilik toko. Pengingat kasir di atas
+            hanya berguna kalau ada orang di depan kasnya; dua keadaan ini justru
+            perlu sampai ke pemiliknya — kas yang belum dibuka padahal toko sudah
+            buka, dan shift yang belum ditutup padahal toko sudah tutup.
+          */}
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="shift-buka">Jam buka toko</Label>
+              <Input
+                id="shift-buka"
+                data-testid="shift-buka"
+                inputMode="numeric"
+                value={shiftOpenText}
+                onChange={(event) => {
+                  setShiftOpenText(event.target.value.replace(/[^\d]/g, ""));
+                  patchShift();
+                }}
+              />
+              <p className="text-xs text-muted-foreground">
+                Jam 0–23. Setengah jam setelah jam ini, pemilik toko dikabari kalau kasnya belum
+                dibuka.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="shift-tutup">Jam tutup toko</Label>
+              <Input
+                id="shift-tutup"
+                data-testid="shift-tutup"
+                inputMode="numeric"
+                value={shiftCloseText}
+                onChange={(event) => {
+                  setShiftCloseText(event.target.value.replace(/[^\d]/g, ""));
+                  patchShift();
+                }}
+              />
+              <p className="text-xs text-muted-foreground">
+                Jam 0–23 juga. Lebih kecil dari jam buka berarti toko buka lintas malam (mis.
+                20 → 2), dan dua jam yang sama berarti buka 24 jam.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/60 bg-secondary/20 px-4 py-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium">
+                {shiftNotifyDraft
+                  ? "Pemilik toko dikabari kalau kas belum dibuka atau shift belum ditutup"
+                  : "Pemberitahuan ke pemilik toko dimatikan"}
+              </div>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {shiftNotifyDraft
+                  ? "Kabarnya dikirim lewat email ke alamat pemilik workspace ini (dan ikut masuk ke endpoint webhook yang melanggan shift.alert), lalu tercatat di halaman Shift & Kas."
+                  : "Pengingat untuk kasir tetap berjalan; yang mati hanya kabar ke pemilik toko."}
+              </p>
+            </div>
+            <Button
+              type="button"
+              role="switch"
+              aria-checked={shiftNotifyDraft}
+              aria-label="Pemberitahuan ke pemilik toko"
+              data-testid="shift-pemberitahuan-saklar"
+              variant={shiftNotifyDraft ? "default" : "outline"}
+              className="shrink-0 gap-2"
+              onClick={() => {
+                setShiftNotifyDraft((current) => !current);
+                patchShift();
+              }}
+            >
+              <BellRing className="size-4" />
+              {shiftNotifyDraft ? "Aktif" : "Mati"}
+            </Button>
+          </div>
+
+          {shiftDecision.ok && (
+            <p
+              data-testid="shift-petunjuk-pemilik"
+              className="rounded-lg border border-border/60 bg-secondary/20 px-4 py-3 text-xs text-muted-foreground"
+            >
+              {shiftOwnerAlertHint(shiftDecision.value)}
+            </p>
+          )}
+
+          {shiftDecision.ok ? (
+            <p
+              data-testid="shift-petunjuk"
+              className="rounded-lg border border-border/60 bg-secondary/20 px-4 py-3 text-xs text-muted-foreground"
+            >
+              {shiftSettingHint(shiftDecision.value)}
+            </p>
+          ) : (
+            <p
+              role="alert"
+              data-testid="shift-petunjuk"
+              className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+            >
+              {shiftDecision.reason}
+            </p>
+          )}
+
+          <div className="flex flex-wrap items-center gap-3">
+            <Button
+              type="button"
+              className="gap-2"
+              data-testid="shift-simpan"
+              disabled={shiftBusy || !shiftDirty || !shiftDecision.ok}
+              onClick={() => void saveShift()}
+            >
+              <Save className="size-4" />
+              {shiftBusy ? "Menyimpan…" : "Simpan setelan pengingat"}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              className="gap-2"
+              data-testid="shift-ulangi"
+              disabled={shiftBusy || !shiftDirty}
+              onClick={resetShift}
+            >
+              <RefreshCw className="size-4" />
+              Batalkan perubahan
+            </Button>
+            {shiftDirty && shiftDecision.ok && (
+              <p className="text-xs text-muted-foreground">
+                Belum disimpan: {shiftSettingSentence(shiftDecision.value)}
+              </p>
+            )}
+          </div>
+
+          <p className="text-xs text-muted-foreground">
+            Berlaku untuk seluruh kasir di workspace ini; yang memutuskan jamnya tetap manusia.
+            Kasir yang ingin melihat rekap & menutup shiftnya membuka{" "}
+            <Link to="/app/shift" className="text-primary hover:underline">
+              halaman Shift & Kas
+            </Link>
+            .
+          </p>
         </CardContent>
       </Card>
 

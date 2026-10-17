@@ -18,6 +18,7 @@ import {
   QrCode,
   RefreshCw,
   Timer,
+  Wallet,
   Trash2,
   UtensilsCrossed,
   Volume2,
@@ -48,6 +49,7 @@ import {
   tableStates,
   ticketPaymentLabel,
   ticketSummary,
+  ticketTableHolders,
   type TableState,
 } from "@/lib/fnb";
 import { useSession } from "@/lib/session";
@@ -87,18 +89,30 @@ type TableDialog =
 /**
  * Dapur & Meja — alur F&B milik modul F&B (Phase 2).
  *
- * Dua panel yang memang satu alur: **antrean dapur** (pesanan tertahan, paling
- * lama menunggu di depan) dan **denah meja**. Status meja tidak disimpan di
- * mana pun — diturunkan dari pesanan yang terbuka lewat `@/lib/fnb`, jadi
- * menyelesaikan pesanan otomatis mengosongkan mejanya.
+ * Dua panel yang memang satu alur: **antrean dapur** (paling lama menunggu di
+ * depan) dan **denah meja**. Status meja tidak disimpan di mana pun — diturunkan
+ * dari pesanan yang terbuka lewat `@/lib/fnb`, jadi menyelesaikan pesanan
+ * otomatis mengosongkan mejanya.
  *
- * **Dapur hanya bekerja atas pesanan yang sudah lunas.** Pesanan QR meja baru
- * menjadi tiket di sini setelah tagihannya dilunasi (`meja.guestOrderPaid`),
- * jadi pesanan yang masih menunggu pembayaran tidak pernah tampil sebagai
- * antrean: layar ini hanya menghitungnya dan mengarahkan kasir ke halaman
- * Pembayaran untuk melunasi atau membatalkannya. Tiket yang datang dari QR meja
- * ditandai kanal & momen pelunasannya (`ticketPaymentLabel`), supaya terlihat
- * bahwa pesanannya memang diterima bersamaan dengan uangnya masuk.
+ * Antrean ini punya **dua sumber tiket**, dan keduanya pesanan yang memang harus
+ * disiapkan dapur (`isKitchenTicket`):
+ *
+ *  - **penjualan lunas** yang dikirim ke dapur pada momen pembayarannya — kasir
+ *    menagih uangnya (tunai, QRIS, atau VA), pesanannya berangkat ke dapur tanpa
+ *    tombol kedua, dan struknya ditawarkan di layar yang sama. Tiket begini
+ *    menunggu **sejak dikirim**, dan ditandai `settled`;
+ *  - **pesanan tertahan** yang dikirim kasir lebih dulu (`holdSale`), termasuk
+ *    pesanan QR meja yang tagihannya dilunasi tamunya (`meja.guestOrderPaid`).
+ *
+ * Bedanya hanya di tombol Selesai: tiket lunas ditandai beres (`kitchenDone`),
+ * sedangkan pesanan tertahan **diselesaikan** di situ — stok baru bergerak pada
+ * momen itu (`finalizeHeldSale`). Satu panggilan store untuk keduanya
+ * (`finishKitchenTicket`) supaya server yang memutuskan, bukan tombolnya.
+ *
+ * Pesanan QR yang **belum** lunas tetap bukan antrean: layar ini hanya
+ * menghitungnya dan mengarahkan kasir ke halaman Pembayaran. Tiket yang datang
+ * dari QR meja ditandai kanal & momen pelunasannya (`ticketPaymentLabel`),
+ * sedangkan tiket dari kasir ditandai metode bayarnya (`ticketPaidLabel`).
  *
  * Halaman ini bukan gerbangnya sendiri: server menolak `pos.kdsTickets` dan
  * `tables.*` saat modul F&B mati. Panel di bawah hanya menjelaskan keadaan itu.
@@ -107,6 +121,7 @@ export function KdsPage() {
   const {
     tables,
     kdsTickets,
+    finishKitchenTicket,
     createTable,
     updateTable,
     setTableActive,
@@ -116,7 +131,6 @@ export function KdsPage() {
     importTables,
     issueTableMenuQr,
     mejaOrders,
-    completeHeld,
     modules,
   } = useStore();
   const { session } = useSession();
@@ -213,20 +227,18 @@ export function KdsPage() {
    */
   const states = useMemo<TableState[]>(
     () =>
-      tableStates(
-        tables,
-        kdsTickets.map((ticket) => ({
-          id: ticket.saleId,
-          number: ticket.number,
-          createdAt: ticket.createdAt,
-          tableId: ticket.tableId,
-        })),
-      ),
+      // **Setiap** tiket dapur menahan mejanya, termasuk yang penjualannya sudah
+      // lunas: meja baru bebas setelah dapur menekan Selesai. Itu aturan yang sama
+      // dengan yang dipakai kasir (`ticketTableHolders`), jadi meja yang terkunci
+      // di kasir tidak mungkin tampak kosong di sini.
+      tableStates(tables, ticketTableHolders(kdsTickets)),
     [tables, kdsTickets],
   );
 
   const occupied = states.filter((state) => state.status === "occupied").length;
   const waitingItems = kdsTickets.reduce((sum, ticket) => sum + ticket.itemCount, 0);
+  /** Berapa tiket yang penjualannya sudah dibayar — dapur perlu tahu bedanya. */
+  const settledCount = kdsTickets.filter((ticket) => ticket.settled).length;
   /**
    * Pesanan QR yang sudah lunas, per penjualan — penanda "dibayar di meja"
    * beserta momen pelunasannya di kartu tiket dapur.
@@ -301,7 +313,9 @@ export function KdsPage() {
     setBusyId(saleId);
     setError(null);
     try {
-      await completeHeld(saleId);
+      // Satu panggilan untuk kedua jenis tiket: server menyelesaikan penjualan
+      // pesanan tertahan, dan hanya menandai beres tiket yang sudah lunas.
+      await finishKitchenTicket(saleId);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -465,7 +479,9 @@ export function KdsPage() {
           </h2>
           <p className="text-sm text-muted-foreground">
             {kdsOn
-              ? `${kdsTickets.length} pesanan menunggu · ${waitingItems} item · ${occupied} meja terisi`
+              ? `${kdsTickets.length} pesanan menunggu · ${waitingItems} item · ${occupied} meja terisi${
+                  settledCount > 0 ? ` · ${settledCount} sudah lunas` : ""
+                }`
               : (kdsUnavailable ?? "Layar dapur tidak aktif di workspace ini.")}
           </p>
         </div>
@@ -513,7 +529,10 @@ export function KdsPage() {
         </p>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
+      {/* `grid-cols-1` mencegah kolom implisit ber-ukuran `auto` melebar sampai
+          `max-content` isinya (daftar tiket bisa memuat catatan panjang) — penyebab
+          isi terpotong di tepi kanan layar HP. */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_360px]">
         <section className="min-w-0">
           {/*
             Penghitung tagihan QR yang belum masuk antrean duduk **di kartu
@@ -615,9 +634,12 @@ export function KdsPage() {
           </div>
           {kdsTickets.length === 0 ? (
             <p className="mt-2 rounded-lg border border-dashed border-border px-4 py-10 text-center text-sm text-muted-foreground">
-              Belum ada pesanan menunggu. Kirim pesanan dari kasir dengan tombol{" "}
-              <strong className="text-foreground">Kirim ke dapur</strong>. Pesanan
-              QR meja masuk ke antrean ini begitu tagihannya lunas.
+              Belum ada pesanan menunggu. Pesanan yang dibayar di kasir masuk ke
+              antrean ini <strong className="text-foreground">sendiri</strong> begitu
+              uangnya diterima (tunai, QRIS, atau VA). Pesanan QR meja masuk ke
+              antrean ini begitu tagihannya lunas. Meja yang tiketnya ada di sini
+              tetap terkunci untuk kasir sampai Anda menekan{" "}
+              <strong className="text-foreground">Selesai</strong>.
             </p>
           ) : (
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
@@ -639,6 +661,15 @@ export function KdsPage() {
                           ? `Meja ${ticket.tableName}`
                           : "Tanpa meja (bungkus)"}
                       </div>
+                      {ticket.settled && ticket.paidLabel ? (
+                        <div
+                          data-testid={`kds-lunas-kasir-${ticket.saleId}`}
+                          className="mt-0.5 inline-flex items-center gap-1 text-[11px] text-primary"
+                        >
+                          <Wallet className="size-3" />
+                          {ticket.paidLabel}
+                        </div>
+                      ) : null}
                       {ticketPaymentLabel(paidQrBySale.get(ticket.saleId)) ? (
                         <div
                           data-testid={`kds-lunas-meja-${ticket.saleId}`}
@@ -693,8 +724,14 @@ export function KdsPage() {
                   <Button
                     className="mt-4"
                     variant={ticket.late ? "default" : "outline"}
+                    data-testid={`kds-selesai-${ticket.saleId}`}
                     onClick={() => void finish(ticket.saleId)}
                     disabled={busyId === ticket.saleId}
+                    title={
+                      ticket.settled
+                        ? "Tandai tiket ini beres — penjualannya sudah lunas dan stoknya sudah bergerak, jadi tidak ada yang dicatat lagi selain status antreannya"
+                        : "Selesaikan pesanan tertahan: penjualannya menjadi selesai dan stoknya bergerak di sini"
+                    }
                   >
                     <Check className="size-4" />
                     {busyId === ticket.saleId ? "Menyimpan…" : "Selesai"}

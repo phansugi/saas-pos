@@ -1619,7 +1619,14 @@ export function ProductsPage() {
         </p>
       )}
 
-      <div className="overflow-hidden rounded-lg border border-border">
+      {/*
+        Tabel katalog ini punya sembilan kolom dan jauh lebih lebar dari layar HP
+        (916 px di layar 360 px). Wadahnya karena itu `overflow-x-auto`, bukan
+        `overflow-hidden`: sudut membulatnya tetap, tetapi kolom “Aksi” masih bisa
+        dicapai dengan menggeser tabelnya — sebelumnya kolom itu terpotong tanpa
+        jalan membacanya.
+      */}
+      <div className="overflow-x-auto rounded-lg border border-border">
         <table className="w-full text-sm">
           <thead className="bg-secondary/40 text-left text-xs uppercase tracking-wide text-muted-foreground">
             <tr>

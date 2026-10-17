@@ -68,12 +68,30 @@ import { paymentMethodValidator, permissionValidator } from "./schema";
 
 const DEFAULT_SALES_DAYS = 7;
 const MAX_SALES_DAYS = 30;
+const DEFAULT_PURCHASE_DAYS = 30;
+const MAX_PURCHASE_DAYS = 90;
+/** Batas `since` untuk sinkronisasi bertahap: paling lama satu tahun ke belakang. */
+const MAX_SINCE_DAYS = 366;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 
 function clampNumber(value: number | undefined, fallback: number, min: number, max: number): number {
   if (value === undefined || Number.isNaN(value)) return fallback;
   return Math.min(max, Math.max(min, Math.trunc(value)));
+}
+
+/**
+ * Menjepit `since` (milidetik epoch) ke jendela yang boleh dipindai.
+ *
+ * `null` = parameter tidak dikirim, jadi pemanggil memakai `days`. Nilai yang
+ * bukan angka, terlalu tua, atau di masa depan dijepit — bukan ditolak — supaya
+ * loop sinkronisasi yang jamnya sedikit meleset tidak berhenti total.
+ */
+function clampSince(value: number | undefined, maxDays: number): number | null {
+  if (value === undefined || !Number.isFinite(value)) return null;
+  const now = Date.now();
+  const floor = now - maxDays * 24 * 60 * 60 * 1000;
+  return Math.min(now, Math.max(floor, Math.trunc(value)));
 }
 
 /** Daftar kunci, endpoint, dan riwayat kiriman — satu bacaan untuk halaman. */
@@ -106,7 +124,7 @@ export const overview = query({
         mask: maskApiKey(key.publicId),
         publicId: key.publicId,
         scopes: sanitizeApiScopes(key.scopes) as string[],
-        creatorRole: key.creatorRole,
+        creatorRole: key.creatorRole ?? null,
         status: keyStatus(key, now),
         expiresAt: key.expiresAt ?? null,
         lastUsedAt: key.lastUsedAt ?? null,
@@ -203,7 +221,12 @@ export const createKey = mutation({
       publicId: minted.publicId,
       secretHash: minted.secretHash,
       scopes: draft.scopes,
-      creatorRole: membership.role,
+      /**
+       * Hanya peran bawaan yang dicatat; anggota berperan tambahan tidak punya
+       * peran dasar yang bisa ditulis. Verifikasi kunci tetap memakai izin
+       * efektif pembuatnya (`createdById`).
+       */
+      creatorRole: membership.role ?? undefined,
       active: true,
       expiresAt: draft.expiresAt ?? undefined,
       createdById: args.actorId,
@@ -866,6 +889,10 @@ export const readResource = internalQuery({
     storeId: v.union(v.null(), v.id("stores")),
     days: v.optional(v.number()),
     limit: v.optional(v.number()),
+    /** Hanya baris yang lebih baru dari ini (milidetik epoch); mengalahkan `days`. */
+    since: v.optional(v.number()),
+    /** SKU terakhir halaman sebelumnya, untuk melanjutkan katalog. */
+    cursor: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const limit = clampNumber(args.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
@@ -883,7 +910,10 @@ export const readResource = internalQuery({
     if (args.resource === "sales") {
       if (!args.storeId) return { sales: [], total: 0 };
       const days = clampNumber(args.days, DEFAULT_SALES_DAYS, 1, MAX_SALES_DAYS);
-      const from = Date.now() - days * 24 * 60 * 60 * 1000;
+      // `since` mengalahkan `days`: dipakai loop sinkronisasi yang menyimpan
+      // posisi terakhir, bukan jendela waktu yang bergeser sendiri.
+      const since = clampSince(args.since, MAX_SINCE_DAYS);
+      const from = since ?? Date.now() - days * 24 * 60 * 60 * 1000;
       const rows = await ctx.db
         .query("sales")
         .withIndex("by_tenant_store_created", (q) =>
@@ -904,25 +934,36 @@ export const readResource = internalQuery({
       return {
         sales,
         total: sales.length,
-        days,
+        // `days` hanya berarti kalau jendelanya memang dihitung dari `days`.
+        // Saat `since` dipakai, mengirim `days` justru menyesatkan pembaca.
+        ...(since === null ? { days } : {}),
+        from: new Date(from).toISOString(),
       };
     }
 
     if (args.resource === "products") {
-      const [products, levels] = await Promise.all([
-        ctx.db
-          .query("products")
-          .withIndex("by_tenant", (q) => q.eq("tenantId", args.tenantId))
-          .take(limit),
-        args.storeId
-          ? ctx.db
-              .query("stockLevels")
-              .withIndex("by_tenant_store", (q) =>
-                q.eq("tenantId", args.tenantId).eq("storeId", args.storeId as Id<"stores">),
-              )
-              .collect()
-          : Promise.resolve([]),
-      ]);
+      // Katalog dibaca berurutan menurut SKU dan bisa dilanjutkan lewat
+      // `cursor`. Tanpa itu, platform yang punya lebih dari `limit` produk hanya
+      // pernah menerima halaman pertama saat menyamakan katalognya.
+      const cursor = (args.cursor ?? "").trim();
+      const rows = await ctx.db
+        .query("products")
+        .withIndex("by_tenant_sku", (q) => {
+          const byTenant = q.eq("tenantId", args.tenantId);
+          return cursor.length > 0 ? byTenant.gt("sku", cursor) : byTenant;
+        })
+        .take(limit + 1);
+      const page = rows.slice(0, limit);
+      const nextCursor = rows.length > limit ? page[page.length - 1].sku : null;
+
+      const levels = args.storeId
+        ? await ctx.db
+            .query("stockLevels")
+            .withIndex("by_tenant_store", (q) =>
+              q.eq("tenantId", args.tenantId).eq("storeId", args.storeId as Id<"stores">),
+            )
+            .collect()
+        : [];
       // Hanya stok lokasi jual (`warehouseId` kosong) — angka yang dipakai kasir.
       const sellable = new Map<string, number>();
       for (const level of levels) {
@@ -931,15 +972,88 @@ export const readResource = internalQuery({
         sellable.set(id, (sellable.get(id) ?? 0) + level.quantity);
       }
       return {
-        products: products.map((product) => ({
+        products: page.map((product) => ({
           sku: product.sku,
           name: product.name,
           price: product.price,
           unit: product.unit ?? "PCS",
           active: product.active,
+          trackStock: product.trackStock,
           sellable: sellable.get(product._id as string) ?? 0,
         })),
-        total: products.length,
+        total: page.length,
+        nextCursor,
+      };
+    }
+
+    if (args.resource === "purchases") {
+      if (!args.storeId) return { purchases: [], total: 0 };
+      const days = clampNumber(args.days, DEFAULT_PURCHASE_DAYS, 1, MAX_PURCHASE_DAYS);
+      const since = clampSince(args.since, MAX_SINCE_DAYS);
+      const from = since ?? Date.now() - days * 24 * 60 * 60 * 1000;
+
+      const receipts = await ctx.db
+        .query("goodsReceipts")
+        .withIndex("by_tenant_store", (q) =>
+          q.eq("tenantId", args.tenantId).eq("storeId", args.storeId as Id<"stores">),
+        )
+        .collect();
+      const page = receipts
+        .filter((receipt) => receipt.createdAt >= from)
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, limit);
+
+      // Baris GRN menyimpan id produk & id PO; penerima perlu nomor PO, nama
+      // supplier, dan SKU — bukan id internal MesinPOS.
+      const orders = await Promise.all(page.map((receipt) => ctx.db.get(receipt.orderId)));
+      const supplierIds = [
+        ...new Set(
+          orders
+            .map((order) => (order ? (order.supplierId as string) : null))
+            .filter((id): id is string => id !== null),
+        ),
+      ];
+      const suppliers = await Promise.all(
+        supplierIds.map((id) => ctx.db.get(id as Id<"suppliers">)),
+      );
+      const supplierName = new Map(
+        suppliers.filter((row) => row !== null).map((row) => [row!._id as string, row!.name]),
+      );
+
+      const productIds = [
+        ...new Set(
+          page.flatMap((receipt) =>
+            receipt.lines.map((line) => line.productId as string),
+          ),
+        ),
+      ];
+      const products = await Promise.all(
+        productIds.map((id) => ctx.db.get(id as Id<"products">)),
+      );
+      const skuById = new Map(
+        products.filter((row) => row !== null).map((row) => [row!._id as string, row!.sku]),
+      );
+
+      return {
+        purchases: page.map((receipt, index) => {
+          const order = orders[index];
+          return {
+            number: receipt.number,
+            order: order?.number ?? null,
+            supplier: order ? supplierName.get(order.supplierId as string) ?? null : null,
+            total: receipt.total,
+            receivedAt: new Date(receipt.createdAt).toISOString(),
+            lines: receipt.lines.map((line) => ({
+              sku: skuById.get(line.productId as string) ?? null,
+              name: line.name,
+              quantity: line.quantity,
+              unitCost: line.unitCost,
+            })),
+          };
+        }),
+        total: page.length,
+        ...(since === null ? { days } : {}),
+        from: new Date(from).toISOString(),
       };
     }
 

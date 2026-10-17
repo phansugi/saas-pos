@@ -16,8 +16,12 @@
 import {
   ANALYTICS_PERIODS,
   analyticsRange,
+  BASKET_PAIR_LIMIT,
+  BASKET_PAIR_SCAN_LIMIT,
   buildAdvancedReport,
+  buildBasketReport,
   buildCategoryBreakdown,
+  buildForecast,
   buildHourlyBreakdown,
   buildInsights,
   buildMethodBreakdown,
@@ -29,6 +33,7 @@ import {
   dayKey,
   dayLabel,
   DEFAULT_ANALYTICS_DAYS,
+  FORECAST_MIN_DAYS,
   hourOf,
   LOW_MARGIN_PCT,
   marginOf,
@@ -724,6 +729,268 @@ check(
         timezoneOffsetMinutes: WIB,
       });
       return probe.totals.revenue === 10_000 && probe.comparison.previous.revenue === 999_000;
+    })(),
+  );
+}
+
+// ---------------------------------------- proyeksi akhir periode (enterprise)
+{
+  const range = analyticsRange({ days: 7, now: NOW, timezoneOffsetMinutes: WIB });
+  // Periode 5–11 Okt; NOW = 11 Okt 17:00 WIB → 6 hari penuh, hari ini berjalan.
+  const sales = [
+    sale("a", localAt(2026, 9, 5, 10), 100_000, 0, "cash", [
+      item("p1", "Kopi Susu", "Minuman", 1, 100_000, 40_000),
+    ]),
+    sale("b", localAt(2026, 9, 6, 10), 200_000, 0, "qris", [
+      item("p1", "Kopi Susu", "Minuman", 2, 200_000, 100_000),
+    ]),
+    sale("c", localAt(2026, 9, 11, 9), 50_000, 0, "cash", [
+      item("p1", "Kopi Susu", "Minuman", 1, 50_000, 20_000),
+    ]),
+  ];
+  // Periode pembanding 28 Sep–4 Okt; hanya hari pertama yang masuk “6 hari penuh
+  // pertama”, jadi angka kedua sengaja tidak boleh ikut terhitung.
+  const previous = [
+    sale("pa", localAt(2026, 8, 28, 10), 120_000, 0, "cash", [
+      item("p1", "Kopi Susu", "Minuman", 1, 120_000, 50_000),
+    ]),
+    sale("pb", localAt(2026, 9, 4, 10), 500_000, 0, "cash", [
+      item("p1", "Kopi Susu", "Minuman", 1, 500_000, 200_000),
+    ]),
+  ];
+  const forecast = buildForecast({
+    sales,
+    previousSales: previous,
+    range,
+    now: NOW,
+    timezoneOffsetMinutes: WIB,
+  });
+
+  check(
+    "proyeksi memisahkan hari penuh dari hari yang sedang berjalan",
+    forecast.elapsedDays === 6 &&
+      forecast.todayCounted === true &&
+      forecast.completedNet === 300_000 &&
+      forecast.todayNet === 50_000 &&
+      forecast.netRunRate === 50_000,
+    JSON.stringify({
+      hari: forecast.elapsedDays,
+      penuh: forecast.completedNet,
+      hariIni: forecast.todayNet,
+      laju: forecast.netRunRate,
+    }),
+  );
+  check(
+    "proyeksi akhir periode = hari penuh + hari ini pada laju hariannya",
+    forecast.projectedNet === 350_000 && forecast.projectedTransactions === 3,
+    JSON.stringify({ omzet: forecast.projectedNet, transaksi: forecast.projectedTransactions }),
+  );
+  check(
+    "proyeksi laba memakai laju laba, bukan laju omzet",
+    forecast.completedProfit === 160_000 &&
+      forecast.profitRunRate === 26_667 &&
+      forecast.projectedProfit === 190_000,
+    JSON.stringify({
+      laju: forecast.profitRunRate,
+      hariIni: forecast.todayProfit,
+      proyeksi: forecast.projectedProfit,
+    }),
+  );
+  check(
+    "hari yang sudah melampaui lajunya tidak diproyeksikan turun",
+    (() => {
+      const probe = buildForecast({
+        sales: [
+          sale("a", localAt(2026, 9, 5, 10), 100_000, 0, "cash", []),
+          sale("c", localAt(2026, 9, 11, 9), 400_000, 0, "cash", []),
+        ],
+        range,
+        now: NOW,
+        timezoneOffsetMinutes: WIB,
+      });
+      return (
+        probe.netRunRate === 16_667 &&
+        probe.todayNet === 400_000 &&
+        probe.projectedNet === 500_000
+      );
+    })(),
+  );
+  check(
+    "pembanding laju memakai jumlah hari penuh yang sama, bukan periode penuh",
+    forecast.previousDays === 6 &&
+      forecast.previousSamePaceNet === 120_000 &&
+      forecast.paceDeltaPct === 150,
+    JSON.stringify({
+      hari: forecast.previousDays,
+      pembanding: forecast.previousSamePaceNet,
+      delta: forecast.paceDeltaPct,
+    }),
+  );
+
+  const noFullDay = buildForecast({
+    sales,
+    range: analyticsRange({ days: 1, now: NOW, timezoneOffsetMinutes: WIB }),
+    now: NOW,
+    timezoneOffsetMinutes: WIB,
+  });
+  check(
+    "tanpa satu hari penuh pun, proyeksinya mengaku belum punya dasar",
+    FORECAST_MIN_DAYS === 1 &&
+      noFullDay.elapsedDays === 0 &&
+      noFullDay.hasBasis === false &&
+      noFullDay.netRunRate === 0 &&
+      noFullDay.projectedNet === noFullDay.todayNet,
+    JSON.stringify({ hari: noFullDay.elapsedDays, proyeksi: noFullDay.projectedNet }),
+  );
+
+  const pastPeriod = buildForecast({
+    sales,
+    range,
+    now: localAt(2026, 9, 12, 10),
+    timezoneOffsetMinutes: WIB,
+  });
+  check(
+    "periode yang sudah lewat tidak lagi punya hari berjalan",
+    pastPeriod.elapsedDays === 7 &&
+      pastPeriod.todayCounted === false &&
+      pastPeriod.completedNet === 350_000 &&
+      pastPeriod.todayNet === 0 &&
+      pastPeriod.projectedNet === 350_000,
+    JSON.stringify({
+      hari: pastPeriod.elapsedDays,
+      penuh: pastPeriod.completedNet,
+      proyeksi: pastPeriod.projectedNet,
+    }),
+  );
+}
+
+// ---------------------------------------- analisis keranjang (enterprise)
+{
+  const basket = buildBasketReport([
+    sale("k1", NOW, 90_000, 0, "cash", [
+      item("p1", "Kopi Susu", "Minuman", 1, 30_000, 10_000),
+      item("p2", "Roti Bakar", "Makanan", 1, 40_000, 20_000),
+      item("p3", "Air Mineral", "Minuman", 1, 20_000, 5_000),
+    ]),
+    sale("k2", NOW, 70_000, 0, "qris", [
+      item("p1", "Kopi Susu", "Minuman", 2, 40_000, 12_000),
+      item("p2", "Roti Bakar", "Makanan", 1, 30_000, 15_000),
+    ]),
+    sale("k3", NOW, 30_000, 0, "cash", [
+      item("p1", "Kopi Susu", "Minuman", 1, 30_000, 10_000),
+    ]),
+    sale("k4", NOW, 0, 0, "cash", []),
+  ]);
+
+  check(
+    "keranjang: nota tanpa baris barang dilewati, bukan dihitung kosong",
+    basket.receipts === 3 && basket.skippedReceipts === 1 && basket.items === 7,
+    JSON.stringify({ nota: basket.receipts, dilewati: basket.skippedReceipts, barang: basket.items }),
+  );
+  check(
+    "keranjang: rata-rata barang per nota & porsi nota berisi beberapa jenis",
+    basket.averageItems === 2.33 &&
+      basket.multiItemReceipts === 2 &&
+      basket.multiItemSharePct === 67,
+    JSON.stringify({
+      rata: basket.averageItems,
+      notaBanyak: basket.multiItemReceipts,
+      porsi: basket.multiItemSharePct,
+    }),
+  );
+  check(
+    "keranjang: ukuran keranjang dipecah empat rentang & menjumlah ke seluruh nota",
+    basket.sizes.length === 4 &&
+      basket.sizes[0].label === "1 barang" &&
+      basket.sizes[0].receipts === 1 &&
+      basket.sizes[1].receipts === 0 &&
+      basket.sizes[2].receipts === 2 &&
+      basket.sizes.reduce((sum, row) => sum + row.receipts, 0) === basket.receipts &&
+      basket.sizes.reduce((sum, row) => sum + row.sharePct, 0) === 100,
+    JSON.stringify(basket.sizes.map((row) => [row.label, row.receipts, row.sharePct])),
+  );
+  check(
+    "keranjang: pasangan dihitung sekali per nota & paling sering bersama di atas",
+    basket.pairs.length === 3 &&
+      basket.pairs[0].aId === "p1" &&
+      basket.pairs[0].bId === "p2" &&
+      basket.pairs[0].together === 2 &&
+      basket.pairs[0].supportPct === 67 &&
+      basket.pairs[0].lift === 1,
+    JSON.stringify(basket.pairs.map((row) => [row.aName, row.bName, row.together, row.lift])),
+  );
+  check(
+    "keranjang: lift memisahkan kebiasaan dari kebetulan (Air Mineral tidak laris sendiri)",
+    basket.pairs[1].aId === "p2" &&
+      basket.pairs[1].bId === "p3" &&
+      basket.pairs[1].together === 1 &&
+      basket.pairs[1].lift === 1.5 &&
+      basket.pairs[2].lift === 1,
+    JSON.stringify(basket.pairs.map((row) => [`${row.aId}+${row.bId}`, row.lift])),
+  );
+  check(
+    "keranjang: omzet pasangan diambil dari kedua barisnya",
+    basket.pairs[0].revenue === 140_000 &&
+      basket.pairs[1].revenue === 60_000 &&
+      basket.pairs[2].revenue === 50_000,
+    JSON.stringify(basket.pairs.map((row) => [row.aName, row.revenue])),
+  );
+  check(
+    "keranjang: batas pasangan membuat laporannya sebagian, bukan mengklaim lengkap",
+    (() => {
+      const banyak = [
+        sale(
+          "kr",
+          NOW,
+          0,
+          0,
+          "cash",
+          Array.from({ length: 210 }, (_, index) =>
+            item(`r${index}`, `Barang ${index}`, "Lain", 1, 1_000, 500),
+          ),
+        ),
+      ];
+      const laporan = buildBasketReport(banyak);
+      const dipotong = buildBasketReport(banyak, 1);
+      return (
+        BASKET_PAIR_SCAN_LIMIT === 20_000 &&
+        BASKET_PAIR_LIMIT === 8 &&
+        laporan.truncated === true &&
+        laporan.pairs.length === BASKET_PAIR_LIMIT &&
+        dipotong.pairs.length === 1
+      );
+    })(),
+  );
+  check(
+    "keranjang: laporan kosong tetap berbentuk sah, bukan angka karangan",
+    (() => {
+      const kosong = buildBasketReport([]);
+      return (
+        kosong.receipts === 0 && kosong.averageItems === 0 && kosong.pairs.length === 0 &&
+        kosong.truncated === false && kosong.sizes.length === 4
+      );
+    })(),
+  );
+  check(
+    "laporan analitik membawa proyeksi & keranjang bersama angka lamanya",
+    (() => {
+      const laporan = buildAdvancedReport({
+        sales: [
+          sale("z", localAt(2026, 9, 6, 10), 100_000, 0, "cash", [
+            item("p1", "Kopi Susu", "Minuman", 2, 100_000, 40_000),
+          ]),
+        ],
+        range: analyticsRange({ days: 7, now: NOW, timezoneOffsetMinutes: WIB }),
+        now: NOW,
+        timezoneOffsetMinutes: WIB,
+      });
+      return (
+        laporan.forecast.elapsedDays === 6 &&
+        laporan.forecast.hasBasis === true &&
+        laporan.basket.receipts === 1 &&
+        laporan.basket.items === 2 &&
+        laporan.totals.netRevenue === 100_000
+      );
     })(),
   );
 }

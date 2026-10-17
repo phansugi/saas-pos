@@ -14,8 +14,11 @@ import {
 import { allowUnverifiedActors, verifyActor } from "./auth";
 import { impersonationStatus } from "./impersonation";
 import { decidePlatformAccess } from "./platform";
-import { effectivePermissions } from "./rbac";
+import { sanitizePermissions } from "./rbac";
+import { rolePermissions } from "./roleSettings";
 import { type Permission } from "./authz";
+import { enqueueWebhookEvent } from "./webhookOutbox";
+import { stockChangedEventData } from "./webhookEvents";
 
 /**
  * Convex enforces no row-level security, so EVERY tenant-scoped function must
@@ -168,23 +171,78 @@ export async function requireImpersonation(
 export interface ResolvedPermissions {
   permissions: Permission[];
   customRole: Doc<"customRoles"> | null;
+  /**
+   * Izin yang berlaku untuk **peran bawaan** anggota ini, sudah termasuk
+   * penyesuaian workspace (`roleSettings`) — dipakai sesi klien supaya menu & rute
+   * tidak menebak dari peran bawaan mentah. Kosong kalau anggota itu memakai
+   * peran tambahan: tidak ada peran bawaan yang menemaninya.
+   */
+  rolePermissions: Permission[];
+  /**
+   * Keadaan peran keanggotaan ini: `bawaan` (memakai `memberships.role`),
+   * `tambahan` (peran tambahan yang sah), atau `tanpa-peran` (peran tambahannya
+   * hilang/nonaktif dan tidak ada peran dasar yang menggantikannya — orangnya
+   * tidak punya izin sampai pemilik menugaskan peran lagi).
+   */
+  state: "bawaan" | "tambahan" | "tanpa-peran";
+}
+
+/**
+ * Baris penyesuaian peran bawaan satu workspace (`roleSettings`).
+ *
+ * Ini satu-satunya cara izin peran bawaan dibaca backend: setiap gate izin
+ * melewati `resolveMembershipPermissions`, jadi penyesuaian yang disimpan di sini
+ * berlaku untuk seluruh permukaan tenant tanpa perlu dijaga satu per satu.
+ */
+export async function roleSettingFor(
+  ctx: Ctx,
+  tenantId: Id<"tenants">,
+  role: Doc<"memberships">["role"] | null | undefined,
+): Promise<Doc<"roleSettings"> | null> {
+  // Tanpa peran bawaan tidak ada penyesuaian yang bisa dibaca — anggota itu
+  // memakai peran tambahan, yang berdiri sendiri.
+  if (!role) return null;
+  return ctx.db
+    .query("roleSettings")
+    .withIndex("by_tenant_role", (q) =>
+      q.eq("tenantId", tenantId).eq("role", role),
+    )
+    .unique();
 }
 
 /**
  * Resolusi izin efektif untuk satu keanggotaan (`rbac.custom`, Phase 4).
  *
- * Peran kustom yang sudah **hilang/nonaktif/milik tenant lain** tidak boleh
- * mengunci anggota: kalau barisnya tidak sah, peran bawaan `memberships.role`
- * yang berlaku — persis seperti janji di lib/rbac.ts. Tanpa jalan keluar ini,
- * satu baris yang rusak akan membuat orang tidak bisa bekerja sama sekali.
+ * Satu keanggotaan memakai **salah satu**:
+ *
+ *  1. **peran bawaan** `memberships.role`, dengan izin yang sudah disesuaikan
+ *     workspace kalau ada (`roleSettings`); atau
+ *  2. **peran tambahan** (`customRoleId`) yang **berdiri sendiri** — tidak ada
+ *     peran dasar di baliknya, jadi izinnya persis daftar izin peran itu.
+ *
+ * Peran tambahan yang sudah **hilang/nonaktif/milik tenant lain** tidak dijatuhkan
+ * ke peran bawaan mana pun: anggotanya `tanpa-peran` (tidak punya izin) sampai
+ * pemilik menugaskan peran lagi. Itu harga dari peran yang berdiri sendiri, dan
+ * halaman Tim & Peran menyebut keadaan itu apa adanya di kolom Peran.
  */
 export async function resolveMembershipPermissions(
   ctx: Ctx,
   membership: Doc<"memberships">,
 ): Promise<ResolvedPermissions> {
+  const role = membership.role ?? null;
+  const setting = await roleSettingFor(ctx, membership.tenantId, role);
+  const base = role ? rolePermissions(role, setting) : [];
+
   const customRoleId = membership.customRoleId;
   if (!customRoleId) {
-    return { permissions: effectivePermissions(membership.role), customRole: null };
+    return {
+      // Tanpa peran tambahan, yang berlaku adalah izin peran bawaan **setelah**
+      // penyesuaian workspace (`base`) — bukan izin bawaannya yang mentah.
+      permissions: base,
+      customRole: null,
+      rolePermissions: base,
+      state: role ? "bawaan" : "tanpa-peran",
+    };
   }
 
   const customRole = await ctx.db.get(customRoleId);
@@ -193,12 +251,36 @@ export async function resolveMembershipPermissions(
     !customRole.active ||
     customRole.tenantId !== membership.tenantId
   ) {
-    return { permissions: effectivePermissions(membership.role), customRole: null };
+    /*
+      Peran tambahan yang hilang/nonaktif **tidak** dijatuhkan ke peran bawaan
+      mana pun untuk baris yang memang hanya memakai peran tambahan: anggotanya
+      tanpa izin sampai pemilik menugaskan peran lagi. Cabang `base` di bawah
+      hanya tersisa untuk baris lama (sebelum 2026-10-17) yang lolos dari
+      pembersihan `members.cleanupLegacyRoles` — mis. deployment yang datanya
+      dipulihkan dari cadangan lama. Baris seperti itu tidak dicabut aksesnya
+      diam-diam di sini; ia memakai peran tersimpan apa adanya sampai pembersihan
+      dijalankan lagi.
+    */
+    return {
+      permissions: base,
+      customRole: null,
+      rolePermissions: base,
+      state: role ? "bawaan" : "tanpa-peran",
+    };
   }
 
+  /*
+    Peran tambahan **menggantikan**: izinnya yang berlaku, persis daftar izinnya,
+    tanpa ditambah izin peran bawaan mana pun. Daftar yang rusak/kosong tidak
+    menjatuhkan anggota ke peran bawaan (`base` adalah peran yang tersimpan), dan
+    itu hanya terjadi pada data yang salah bentuk — penulisan peran menolaknya.
+  */
+  const custom = sanitizePermissions(customRole.permissions);
   return {
-    permissions: effectivePermissions(membership.role, customRole.permissions),
+    permissions: custom.length > 0 ? custom : base,
     customRole,
+    rolePermissions: base,
+    state: "tambahan",
   };
 }
 
@@ -222,7 +304,9 @@ export async function requirePermission(
   if (!permissions.includes(permission)) {
     const actor = customRole
       ? `peran kustom "${customRole.name}"`
-      : `peran ${membership.role}`;
+      : membership.role
+        ? `peran ${membership.role}`
+        : "anggota tanpa peran";
     throw new Error(`Akses ditolak: ${actor} tidak memiliki izin ${permission}.`);
   }
   return membership;
@@ -443,6 +527,35 @@ export async function applyStockChange(
     actorId: args.actorId,
     createdAt: Date.now(),
   });
+
+  // Setiap pergerakan stok adalah kejadian yang harus terlihat oleh platform
+  // mitra (`stock.changed`), bukan hanya saldo akhirnya. Diletakkan di sini —
+  // bukan di tiap pemanggil — supaya penjualan, pembelian, opname, penyesuaian,
+  // dan perpindahan gudang memakai bentuk kiriman yang sama persis.
+  //
+  // Penjadwalan pekerja **tidak** dilakukan di sini: satu mutasi bisa
+  // mencatat puluhan baris, dan menjadwalkan satu putaran per baris justru
+  // membuat putaran-putaran itu berebut baris antrean yang sama. Pemanggil yang
+  // sudah punya beberapa event (penjualan, penerimaan barang) menjadwalkan satu
+  // putaran; sisanya diambil pekerja cron dalam ≤ 1 menit.
+  const product = await ctx.db.get(args.productId);
+  if (product) {
+    await enqueueWebhookEvent(ctx, {
+      tenantId: args.tenantId,
+      storeId: args.storeId,
+      event: "stock.changed",
+      subject: product.sku,
+      data: stockChangedEventData({
+        sku: product.sku,
+        name: product.name,
+        delta: args.delta,
+        balance: next,
+        reason: args.reason,
+        refType: args.refType,
+        refId: args.refId,
+      }),
+    });
+  }
 
   return next;
 }

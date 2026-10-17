@@ -22,6 +22,13 @@ import {
 } from "../src/convex/lib/authz.ts";
 import { allowUnverifiedActors, decideActor } from "../src/convex/lib/auth.ts";
 import {
+  CANCEL_HAS_WORKSPACE_REASON,
+  CANCEL_NOT_FOUND_REASON,
+  CANCEL_PLATFORM_REASON,
+  cancelRegistrationRefusal,
+  cancelledRegistrationSentence,
+} from "../src/convex/lib/account.ts";
+import {
   decidePlatformAccess,
   describePlatformAccount,
   isPlatformMembershipRefusal,
@@ -62,6 +69,19 @@ check("kasir TIDAK boleh kelola produk", !can("cashier", "product.manage"));
 check("kasir TIDAK boleh ubah stok", !can("cashier", "stock.adjust"));
 check("kasir TIDAK boleh kelola langganan", !can("cashier", "billing.manage"));
 check("kasir boleh lihat laporan", can("cashier", "report.view"));
+
+// Dapur & kas punya izinnya sendiri sejak dipisah dari `pos.sell` (2026-10-17):
+// kasir & manajer memegang keduanya supaya tidak ada kemampuan yang hilang,
+// sedangkan staf gudang dan keuangan tidak — keduanya bukan pekerja dapur
+// maupun pemegang kas fisik.
+check("kasir boleh bekerja di layar dapur", can("cashier", "kds.manage"));
+check("kasir boleh membuka & menutup shift kas", can("cashier", "shift.manage"));
+check("manajer boleh bekerja di layar dapur", can("manager", "kds.manage"));
+check("manajer boleh membuka & menutup shift kas", can("manager", "shift.manage"));
+check("gudang TIDAK boleh bekerja di layar dapur", !can("inventory", "kds.manage"));
+check("gudang TIDAK boleh membuka & menutup shift kas", !can("inventory", "shift.manage"));
+check("keuangan TIDAK boleh bekerja di layar dapur", !can("finance", "kds.manage"));
+check("keuangan TIDAK boleh membuka & menutup shift kas", !can("finance", "shift.manage"));
 
 check("gudang boleh ubah stok", can("inventory", "stock.adjust"));
 check("gudang TIDAK boleh menjual", !can("inventory", "pos.sell"));
@@ -306,6 +326,47 @@ check(
   "ringkasan akun platform tidak menyembunyikan perannya",
   describePlatformAccount({ name: "Dev", email: "dev@mesinpos.id", platformRole: "developer" }).includes("Pengembang platform") &&
     describePlatformAccount({ name: "Budi", email: "budi@toko.id", platformRole: null }) === "Budi <budi@toko.id>",
+);
+
+// ------------------------------------------------ pembatalan pendaftaran
+// Hanya pendaftaran yang **belum menjadi bisnis** yang boleh dihapus. Kalau
+// pagar ini longgar, tautan “Batalkan” di onboarding bisa meninggalkan workspace
+// tanpa pemilik — jadi aturannya diuji langsung, bukan hanya dipakai.
+check(
+  "pendaftaran baru tanpa workspace boleh dibatalkan",
+  cancelRegistrationRefusal({ hasMemberships: false }) === null &&
+    cancelRegistrationRefusal({ hasMemberships: false, platformRole: null }) === null,
+  String(cancelRegistrationRefusal({ hasMemberships: false })),
+);
+check(
+  "akun yang sudah punya workspace tidak boleh dibatalkan",
+  cancelRegistrationRefusal({ hasMemberships: true }) === CANCEL_HAS_WORKSPACE_REASON &&
+    CANCEL_HAS_WORKSPACE_REASON.includes("sudah punya workspace") &&
+    CANCEL_HAS_WORKSPACE_REASON.includes("dukungan"),
+  String(cancelRegistrationRefusal({ hasMemberships: true })),
+);
+check(
+  "akun platform ditolak lebih dulu, walau belum punya workspace",
+  cancelRegistrationRefusal({ hasMemberships: false, platformRole: "developer" }) ===
+    CANCEL_PLATFORM_REASON &&
+    cancelRegistrationRefusal({ hasMemberships: true, platformRole: "developer" }) ===
+      CANCEL_PLATFORM_REASON &&
+    CANCEL_PLATFORM_REASON.includes("akses deployment"),
+  String(cancelRegistrationRefusal({ hasMemberships: false, platformRole: "developer" })),
+);
+check(
+  "penolakan akun yang sudah hilang punya kalimatnya sendiri",
+  CANCEL_NOT_FOUND_REASON.includes("sudah tidak ada") &&
+    CANCEL_NOT_FOUND_REASON.includes("masuk lagi"),
+  CANCEL_NOT_FOUND_REASON,
+);
+check(
+  "kalimat pembatalan menyebut email yang benar-benar dihapus",
+  cancelledRegistrationSentence("baru@toko.id").includes("baru@toko.id") &&
+    cancelledRegistrationSentence("baru@toko.id").includes("dihapus") &&
+    cancelledRegistrationSentence("baru@toko.id").includes("mendaftar lagi") &&
+    !cancelledRegistrationSentence("a@b.id").includes("baru@toko.id"),
+  cancelledRegistrationSentence("baru@toko.id"),
 );
 
 console.log(`${results.length}/${results.length} checks passed`);

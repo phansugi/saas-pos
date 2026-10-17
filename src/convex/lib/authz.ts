@@ -14,6 +14,10 @@ export type Role = "owner" | "manager" | "cashier" | "inventory" | "finance";
 export type Permission =
   | "pos.sell"
   | "pos.void"
+  /** Bekerja di layar dapur (KDS): membaca antrean & menandai tiket selesai. */
+  | "kds.manage"
+  /** Membuka & menutup shift kas (kas awal, setoran, Z-report) dan kabarnya. */
+  | "shift.manage"
   | "product.manage"
   /** Mengelola kategori produk: struktur katalog, bukan isi rak. */
   | "category.manage"
@@ -71,6 +75,8 @@ export const ROLE_LABELS: Record<Role, string> = {
 export const PERMISSION_LABELS: Record<Permission, string> = {
   "pos.sell": "Melakukan penjualan",
   "pos.void": "Membatalkan transaksi",
+  "kds.manage": "Bekerja di layar dapur (KDS)",
+  "shift.manage": "Membuka & menutup shift kas",
   "product.manage": "Mengelola produk",
   "category.manage": "Mengelola kategori produk",
   "stock.adjust": "Menyesuaikan stok",
@@ -101,6 +107,8 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
 const ALL_PERMISSIONS: Permission[] = [
   "pos.sell",
   "pos.void",
+  "kds.manage",
+  "shift.manage",
   "product.manage",
   "category.manage",
   "stock.adjust",
@@ -176,12 +184,23 @@ const ALL_PERMISSIONS: Permission[] = [
  *    bank adalah pekerjaannya. Yang menjaga uang bukan izinnya, melainkan aturan
  *    transisi: tagihan yang **sudah lunas atau kedaluwarsa tidak bisa dibatalkan**
  *    atau dibalik oleh satu tombol di halaman.
+ *  - dapur (KDS) dan shift kas punya izinnya sendiri, tidak lagi menumpang
+ *    `pos.sell`: yang bekerja di antrean dapur adalah `kds.manage`, dan yang
+ *    membuka/menutup kas adalah `shift.manage`. Dua hal yang perlu diketahui
+ *    merchant: (a) dapur tidak perlu bisa menjual untuk bekerja — peran “dapur
+ *    saja” cukup `kds.manage`; (b) **penjualan menuntut shift terbuka**, jadi
+ *    siapa pun yang menjual (kasir) harus memegang keduanya — itulah mengapa
+ *    peran bawaan Kasir & Manajer memuat `pos.sell` + `shift.manage`. Yang tetap
+ *    **tidak** ikut: staf gudang dan keuangan (keduanya memang tidak melihat
+ *    antrean dapur maupun memegang kas fisik).
  */
 export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   owner: [...ALL_PERMISSIONS],
   manager: [
     "pos.sell",
     "pos.void",
+    "kds.manage",
+    "shift.manage",
     "product.manage",
     "category.manage",
     "stock.adjust",
@@ -209,6 +228,12 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   ],
   cashier: [
     "pos.sell",
+    // Antrean dapur & kas meja memang pekerjaan kasir di toko kecil: dapur
+    // perlu bisa ditandai selesai, dan kasnya dipegang kasir sendiri. Peran
+    // “dapur saja” atau “kas saja” dibuat lewat peran kustom bila toko
+    // memisahkannya.
+    "kds.manage",
+    "shift.manage",
     "report.view",
     "ar.view",
     "member.view",

@@ -141,6 +141,22 @@ async function renderInteractive(element) {
         input.dispatchEvent(new window.Event("input", { bubbles: true }));
       });
     },
+    /**
+     * Memilih satu nilai pada `<select>` seperti pengguna memilihnya. React
+     * memantau peristiwa `change` untuk select, jadi nilai barunya diset lewat
+     * setter aslinya lalu diikuti peristiwa itu — bukan `element.value = …`.
+     */
+    select: async (selector, value) => {
+      const element = container.querySelector(selector);
+      if (!element) throw new Error(`select \"${selector}\" tidak ada di DOM`);
+      const prototype = window.HTMLSelectElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+      await React.act(async () => {
+        if (setter) setter.call(element, value);
+        else element.value = value;
+        element.dispatchEvent(new window.Event("change", { bubbles: true }));
+      });
+    },
     /** Mengirim form yang sedang tampil (tombol submit dipakai jalur yang sama). */
     submit: async () => {
       const form = container.querySelector("form");
@@ -248,6 +264,8 @@ try {
       text.includes("tren omzet") &&
         text.includes("margin kotor") &&
         text.includes("temuan otomatis") &&
+        text.includes("proyeksi akhir periode dari laju hari penuh") &&
+        text.includes("produk yang sering dibeli bersama") &&
         text.includes("peran kustom") &&
         text.includes("API & webhook") &&
         text.includes("kunci API") &&
@@ -1186,6 +1204,144 @@ try {
       siap.newErrors.length === 0,
       siap.newErrors.join(" | ").slice(0, 200),
     );
+
+    // Tautan “Batalkan”: pendaftaran yang belum jadi **dihapus**, bukan hanya
+    // ditinggalkan. Yang diuji di sini bukan tulisannya saja — tombolnya benar-
+    // benar ditekan, store dipanggil, sesi perangkat dilepas, dan pengguna
+    // mendarat kembali di beranda.
+    check(
+      "onboarding menawarkan tautan “Batalkan” beserta email yang dipakai",
+      siap.text.includes("Batalkan") &&
+        siap.text.includes("baru@mesinpos.test") &&
+        siap.text.includes("dihapus dari sistem"),
+      siap.text.slice(-320),
+    );
+    {
+      let cancelled = 0;
+      const storeDenganPelacak = {
+        ...captured,
+        cancelRegistration: async () => {
+          cancelled += 1;
+          return {
+            email: "baru@mesinpos.test",
+            sentence:
+              "Pendaftaran dengan baru@mesinpos.test dibatalkan: email itu sudah dihapus dan bisa dipakai mendaftar lagi kapan saja.",
+          };
+        },
+      };
+      const halaman = await renderInteractive(
+        React.createElement(
+          MemoryRouter,
+          { initialEntries: ["/onboarding"] },
+          React.createElement(
+            SessionProvider,
+            null,
+            React.createElement(
+              StoreContext.Provider,
+              { value: storeDenganPelacak },
+              React.createElement(
+                Routes,
+                null,
+                React.createElement(Route, {
+                  path: "/onboarding",
+                  element: React.createElement(OnboardingPage, null),
+                }),
+                React.createElement(Route, {
+                  path: "/",
+                  element: React.createElement("div", null, "BERANDA PEMASARAN"),
+                }),
+                React.createElement(Route, {
+                  path: "/auth",
+                  element: React.createElement("div", null, "HALAMAN MASUK"),
+                }),
+              ),
+            ),
+          ),
+        ),
+      );
+      await halaman.clickOn('[data-testid="batalkan-pendaftaran"]');
+      // Penghapusan akun berjalan asinkron (server dihubungi lebih dulu), jadi
+      // janjinya diberi kesempatan selesai **di dalam act** — tanpa itu React
+      // belum memasang hasil perpindahan halaman saat teksnya dibaca.
+      await React.act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      check(
+        "menekan “Batalkan” meminta server menghapus email pendaftaran",
+        cancelled === 1,
+        `cancelled=${cancelled}`,
+      );
+      check(
+        "“Batalkan” mengembalikan pengguna ke beranda",
+        halaman.text().includes("BERANDA PEMASARAN") &&
+          !halaman.text().includes("Siapkan bisnis Anda"),
+        halaman.text().slice(0, 200),
+      );
+      check(
+        "sesi perangkat dilepas setelah pendaftaran dibatalkan",
+        window.localStorage.getItem("mesinpos.session.v1") === null,
+        String(window.localStorage.getItem("mesinpos.session.v1")).slice(0, 120),
+      );
+      check(
+        "alur “Batalkan” tanpa error konsol",
+        halaman.newErrors().length === 0,
+        halaman.newErrors().join(" | ").slice(0, 200),
+      );
+      await halaman.unmount();
+    }
+
+    // Penolakan server (mis. akun ternyata sudah punya workspace) harus terbaca
+    // sebagai pesan, dan sesinya **tidak** dilepas: pengguna masih bisa
+    // melanjutkan pendaftaran, bukan terlempar ke halaman masuk tanpa penjelasan.
+    {
+      window.localStorage.setItem(
+        "mesinpos.session.v1",
+        JSON.stringify({
+          user: { name: "Pemilik Baru", email: "baru@mesinpos.test" },
+          tenant: null,
+        }),
+      );
+      const pesanTolak =
+        "Akun ini sudah punya workspace, jadi pendaftarannya tidak bisa dibatalkan.";
+      const storeMenolak = {
+        ...captured,
+        cancelRegistration: async () => {
+          throw new Error(pesanTolak);
+        },
+      };
+      const ditolak = await renderInteractive(
+        React.createElement(
+          MemoryRouter,
+          { initialEntries: ["/onboarding"] },
+          React.createElement(
+            SessionProvider,
+            null,
+            React.createElement(
+              StoreContext.Provider,
+              { value: storeMenolak },
+              React.createElement(OnboardingPage, null),
+            ),
+          ),
+        ),
+      );
+      await ditolak.clickOn('[data-testid="batalkan-pendaftaran"]');
+      await React.act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      check(
+        "penolakan pembatalan ditampilkan apa adanya, bukan ditelan",
+        ditolak.text().includes("sudah punya workspace") &&
+          ditolak.query('[data-testid="batalkan-galat"]') !== null,
+        ditolak.text().slice(-240),
+      );
+      check(
+        "pendaftaran tetap bisa dilanjutkan saat pembatalan ditolak",
+        ditolak.text().includes("Siapkan bisnis Anda") &&
+          window.localStorage.getItem("mesinpos.session.v1") !== null,
+        ditolak.text().slice(0, 160),
+      );
+      await ditolak.unmount();
+    }
     withoutSession();
   }
 
@@ -1301,6 +1457,14 @@ try {
       verticals: ["fnb"],
       planKey: "professional",
       role: "owner",
+      /*
+        Pengingat tutup shift dimatikan di sesi uji umum: blok yang memakainya
+        menjalankan alur kasir yang tidak sedang menguji pengingatnya, dan
+        hasilnya tidak boleh berubah tergantung jam berapa harness dijalankan
+        (pengingat jam tutup menyala setelah pukul 21:00). Blok yang memang
+        menguji pengingat menyalakannya sendiri lewat `withShiftReminderOn()`.
+      */
+      shift: { active: false, reminderHour: 21, longShiftHours: 14 },
       createdAt: new Date().toISOString(),
       trialEndsAt: new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString(),
     },
@@ -1308,10 +1472,56 @@ try {
 
   function withFnbSession() {
     window.localStorage.setItem("mesinpos.session.v1", JSON.stringify(FNB_SESSION));
+    withOpenShift();
   }
 
   function withoutSession() {
     window.localStorage.removeItem("mesinpos.session.v1");
+  }
+
+  /**
+   * Gerbang kasir: halaman Kasir hanya bisa menjual kalau ada shift yang terbuka
+   * (`posShiftGate` di `@/lib/shift`) — jadi sesi uji yang menekan tombol kasir
+   * membuka shiftnya lebih dulu, persis seperti kasir sungguhan yang membukanya
+   * di halaman Shift & Kas. Blok yang justru menguji gerbangnya (3d) menghapus
+   * atau mengganti isi kunci ini sendiri.
+   */
+  function withOpenShift() {
+    window.localStorage.setItem(
+      "mesinpos.shifts.v1",
+      JSON.stringify({
+        current: {
+          id: "shift-uji-umum",
+          openedAt: new Date().toISOString(),
+          openingCash: 300000,
+          cashSales: 0,
+          totalSales: 0,
+          saleCount: 0,
+          closedAt: null,
+          countedCash: null,
+          expectedCash: null,
+          variance: null,
+        },
+        history: [],
+      }),
+    );
+  }
+
+  /** Menyalakan kembali pengingat tutup shift untuk blok yang mengujinya. */
+  function withShiftReminderOn() {
+    const raw = window.localStorage.getItem("mesinpos.session.v1");
+    if (!raw) return;
+    const sesi = JSON.parse(raw);
+    window.localStorage.setItem(
+      "mesinpos.session.v1",
+      JSON.stringify({
+        ...sesi,
+        tenant: {
+          ...sesi.tenant,
+          shift: { active: true, reminderHour: 21, longShiftHours: 14 },
+        },
+      }),
+    );
   }
 
   const { KdsPage } = await server.ssrLoadModule("/src/pages/KdsPage.tsx");
@@ -1364,7 +1574,11 @@ try {
     const { text } = await renderTree(
       providers(React.createElement(PosPage, null)),
     );
-    check("POS menampilkan tombol Kirim ke dapur", text.includes("Ke dapur"), text.slice(0, 160));
+    check(
+      "POS menampilkan tombol Hold (bukan lagi Ke dapur)",
+      text.includes("Hold") && !text.includes("Ke dapur"),
+      text.slice(0, 200),
+    );
     check(
       "POS menampilkan pemilih meja",
       text.includes("Tanpa meja") && text.includes("A1"),
@@ -1376,6 +1590,627 @@ try {
       text.includes("grup pilihan"),
       text.slice(0, 240),
     );
+  }
+
+  // 3d. Gerbang kasir & pengingat tutup shift di halaman Kasir. Shift hidup di
+  //     **perangkat** (`mesinpos.shifts.v1`, ditulis halaman Shift & Kas), jadi
+  //     harness menyemai isinya sendiri — persis data yang dihasilkan halaman itu.
+  //     Gerbangnya (`posShiftGate`) berarti: tanpa shift yang terbuka, pekerjaan
+  //     menjual mati dan kasir diarahkan membuka shiftnya lebih dulu.
+  {
+    const SHIFT_KEY = "mesinpos.shifts.v1";
+    const shiftTerbuka = {
+      id: "shift-uji",
+      // 26 jam lalu: pasti jatuh di hari kalender sebelumnya, kapan pun tesnya jalan.
+      openedAt: new Date(Date.now() - 26 * 3600 * 1000).toISOString(),
+      openingCash: 300000,
+      cashSales: 1250000,
+      totalSales: 1500000,
+      saleCount: 24,
+      closedAt: null,
+      countedCash: null,
+      expectedCash: null,
+      variance: null,
+    };
+    const seedShift = (current) =>
+      window.localStorage.setItem(
+        SHIFT_KEY,
+        JSON.stringify({ current, history: current ? [] : [shiftTerbuka] }),
+      );
+
+    // a) Kas belum pernah dibuka: keadaannya dikatakan apa adanya — badge
+    //    “Shift terbuka · Kasir: Rani · buka 08:00” yang dulu selalu tampil itu
+    //    tulisan tetap, bukan keadaan kas yang sebenarnya — dan seluruh
+    //    pekerjaan menjualnya terkunci.
+    withFnbSession();
+    withShiftReminderOn();
+    window.localStorage.removeItem(SHIFT_KEY);
+    const kosong = await renderInteractive(providers(React.createElement(PosPage, null)));
+    check(
+      "kasir tanpa shift menyebut kasnya belum dibuka, bukan mengklaim shift terbuka",
+      kosong.text().includes("Kas belum dibuka") && !kosong.text().includes("Shift terbuka"),
+      kosong.text().slice(0, 320),
+    );
+    check(
+      "kasir tanpa shift mengarahkan kasir membuka shift di halaman Shift & Kas",
+      kosong.text().includes("Buka shift di halaman Shift & Kas"),
+      kosong.text().slice(0, 320),
+    );
+    const gerbang = kosong.query('[data-testid="pos-gerbang-shift"]');
+    check(
+      "kasir terkunci saat shift belum dibuka, dan pesannya menyuruh membukanya dulu",
+      gerbang !== null &&
+        (gerbang.textContent ?? "").includes("Kasir terkunci") &&
+        (gerbang.textContent ?? "").includes("Buka shift (kas) terlebih dahulu") &&
+        (gerbang.textContent ?? "").includes("shift (kas) belum dibuka"),
+      gerbang?.textContent ?? "(tidak ada gerbang)",
+    );
+    check(
+      "gerbangnya menawarkan jalan keluarnya: tautan ke halaman Shift & Kas",
+      gerbang?.querySelector("a")?.getAttribute("href") === "/app/shift",
+      gerbang?.querySelector("a")?.getAttribute("href") ?? "(tidak ada tautan)",
+    );
+    check(
+      "kasir terkunci benar-benar mati: produk & Bayar nonaktif, dan catatannya ikut tampil",
+      (() => {
+        const produk = kosong
+          .queryAll("button")
+          .filter((tombol) => /stok \d+|Habis/.test(tombol.textContent ?? ""));
+        const bayar = kosong.query('[data-testid="pos-bayar"]');
+        const catatan = kosong.query('[data-testid="pos-gerbang-shift-catatan"]');
+        return (
+          produk.length > 0 &&
+          produk.every((tombol) => tombol.disabled) &&
+          bayar?.disabled === true &&
+          catatan !== null
+        );
+      })(),
+      `produk_nonaktif=${kosong.queryAll("button").filter((t) => /stok \d+|Habis/.test(t.textContent ?? "")).filter((t) => t.disabled).length} bayar.disabled=${kosong.query('[data-testid="pos-bayar"]')?.disabled}`,
+    );
+    check(
+      "menekan kartu produk yang mati tidak memasukkan apa pun ke keranjang",
+      await (async () => {
+        const tombol = kosong
+          .queryAll("button")
+          .find((t) => /stok \d+/.test(t.textContent ?? ""));
+        if (!tombol) return false;
+        await React.act(async () => {
+          tombol.click();
+        });
+        const jumlah = kosong.query('[data-testid="keranjang-jumlah-item"]')?.textContent ?? "";
+        return jumlah.includes("0 item");
+      })(),
+      `jumlah=${kosong.query('[data-testid="keranjang-jumlah-item"]')?.textContent}`,
+    );
+    check(
+      "kasir tanpa shift tidak menampilkan peringatan tutup shift",
+      kosong.query('[data-testid="kasir-ingat-tutup-shift"]') === null,
+      kosong.text().slice(0, 320),
+    );
+    check(
+      "kasir tanpa shift tidak mengejutkan kasir dengan error konsol",
+      kosong.newErrors().length === 0,
+      kosong.newErrors().join(" | ").slice(0, 200),
+    );
+    await kosong.unmount();
+
+    // b) Shift kemarin belum ditutup: kasir diberi tahu, beserta jalan menutupnya.
+    seedShift(shiftTerbuka);
+    const kemarin = await renderInteractive(providers(React.createElement(PosPage, null)));
+    const banner = kemarin.query('[data-testid="kasir-ingat-tutup-shift"]');
+    check(
+      "kasir menampilkan badge shift terbuka dari keadaan perangkat yang sebenarnya",
+      kemarin.text().includes("Shift terbuka") && kemarin.text().includes("kemarin"),
+      kemarin.text().slice(0, 320),
+    );
+    check(
+      "kasir memperingatkan shift kemarin belum ditutup",
+      (banner?.textContent ?? "").includes("Shift kemarin belum ditutup"),
+      banner?.textContent ?? "(tidak ada banner)",
+    );
+    check(
+      "peringatan diberi levelnya (bukan warna tanpa arti) dan menyebut akibatnya",
+      banner?.getAttribute("data-level") === "late" &&
+        (banner?.textContent ?? "").includes("uang fisik") &&
+        (banner?.textContent ?? "").includes("Z-report"),
+      `${banner?.getAttribute("data-level")} · ${banner?.textContent ?? "(tidak ada banner)"}`,
+    );
+    const tautanShift = kemarin.query('[data-testid="kasir-ingat-tutup-shift"] a');
+    check(
+      "peringatan menautkan kasir ke halaman Shift & Kas",
+      tautanShift?.getAttribute("href") === "/app/shift",
+      tautanShift?.getAttribute("href") ?? "(tidak ada tautan)",
+    );
+    // Shift yang terbuka membuka gerbangnya lagi: produk bisa masuk keranjang dan
+    // tombol Bayar hidup — peringatan tutup shift bukan pengganti gerbangnya.
+    const produkSiapJual = kemarin
+      .queryAll("button")
+      .find(
+        (tombol) =>
+          /stok \d+/.test(tombol.textContent ?? "") &&
+          !(tombol.textContent ?? "").includes("grup pilihan"),
+      );
+    check(
+      "ada produk tanpa modifier untuk membuktikan gerbangnya benar-benar terbuka",
+      produkSiapJual !== undefined,
+      kemarin.text().slice(0, 200),
+    );
+    await React.act(async () => {
+      produkSiapJual.click();
+    });
+    check(
+      "shift yang terbuka membuka gerbang kasir: produk masuk keranjang & Bayar hidup",
+      kemarin.query('[data-testid="pos-gerbang-shift"]') === null &&
+        (kemarin.query('[data-testid="keranjang-jumlah-item"]')?.textContent ?? "").includes("1 item") &&
+        kemarin.query('[data-testid="pos-bayar"]')?.disabled === false,
+      `jumlah=${kemarin.query('[data-testid="keranjang-jumlah-item"]')?.textContent} bayar.disabled=${kemarin.query('[data-testid="pos-bayar"]')?.disabled}`,
+    );
+    check(
+      "kasir dengan shift kemarin tidak menghasilkan error konsol",
+      kemarin.newErrors().length === 0,
+      kemarin.newErrors().join(" | ").slice(0, 200),
+    );
+    await kemarin.unmount();
+
+    // c) Shift sudah ditutup (riwayatnya masih ada): peringatannya ikut hilang.
+    seedShift(null);
+    const tertutup = await renderInteractive(providers(React.createElement(PosPage, null)));
+    check(
+      "shift yang sudah ditutup tidak lagi diingatkan (walau riwayatnya masih tersimpan)",
+      tertutup.query('[data-testid="kasir-ingat-tutup-shift"]') === null &&
+        tertutup.text().includes("Kas belum dibuka"),
+      tertutup.text().slice(0, 320),
+    );
+    await tertutup.unmount();
+    window.localStorage.removeItem(SHIFT_KEY);
+  }
+
+  // 3e. Pengingat tutup shift di halaman Shift & Kas (tempat kasir menutupnya):
+  //     kalimatnya sama dengan yang di halaman Kasir, karena satu modul.
+  {
+    const SHIFT_KEY = "mesinpos.shifts.v1";
+    const { ShiftPage } = await server.ssrLoadModule("/src/pages/ShiftPage.tsx");
+    withFnbSession();
+    // Blok ini justru menguji pengingatnya, jadi pengingat sesi uji umum dinyalakan.
+    withShiftReminderOn();
+    window.localStorage.setItem(
+      SHIFT_KEY,
+      JSON.stringify({
+        current: {
+          id: "shift-uji",
+          openedAt: new Date(Date.now() - 26 * 3600 * 1000).toISOString(),
+          openingCash: 300000,
+          cashSales: 1250000,
+          totalSales: 1500000,
+          saleCount: 24,
+          closedAt: null,
+          countedCash: null,
+          expectedCash: null,
+          variance: null,
+        },
+        history: [],
+      }),
+    );
+    const halaman = await renderInteractive(providers(React.createElement(ShiftPage, null)));
+    const kartu = halaman.query('[data-testid="shift-ingat-tutup"]');
+    check(
+      "halaman Shift & Kas ikut mengingatkan shift yang belum ditutup",
+      (kartu?.textContent ?? "").includes("Shift kemarin belum ditutup"),
+      kartu?.textContent ?? "(tidak ada kartu)",
+    );
+    check(
+      "halaman Shift & Kas menyebut lama shift berjalan",
+      halaman.text().includes("Dibuka kemarin"),
+      halaman.text().slice(0, 320),
+    );
+    check(
+      "halaman Shift & Kas dengan shift terbuka tanpa error konsol",
+      halaman.newErrors().length === 0,
+      halaman.newErrors().join(" | ").slice(0, 200),
+    );
+    await halaman.unmount();
+    window.localStorage.removeItem(SHIFT_KEY);
+  }
+
+  // 3f. Setelan pengingat tutup shift (`tenants.shift`, halaman Pengaturan):
+  //     jamnya, ambangnya, dan saklarnya bisa diatur pemilik toko — bukan lagi
+  //     konstanta di kode — dan halaman Kasir mengikuti setelan itu.
+  {
+    const SHIFT_KEY = "mesinpos.shifts.v1";
+    const { SettingsPage } = await server.ssrLoadModule("/src/pages/SettingsPage.tsx");
+
+    /** Sesi F&B dengan setelan pengingat tertentu (kolom `tenants.shift`). */
+    function withShiftSetting(setting) {
+      window.localStorage.setItem(
+        "mesinpos.session.v1",
+        JSON.stringify({
+          ...FNB_SESSION,
+          tenant: { ...FNB_SESSION.tenant, shift: setting },
+        }),
+      );
+    }
+    const shiftSejak = (jam) => new Date(Date.now() - jam * 3600 * 1000).toISOString();
+    const stateShift = (openedAt) =>
+      JSON.stringify({
+        current: {
+          id: "shift-uji-setelan",
+          openedAt,
+          openingCash: 300000,
+          cashSales: 0,
+          totalSales: 0,
+          saleCount: 0,
+          closedAt: null,
+          countedCash: null,
+          expectedCash: null,
+          variance: null,
+        },
+        history: [],
+      });
+
+    // a) Saklar mati: peringatannya benar-benar berhenti, walaupun kasnya belum
+    //    ditutup sejak kemarin. Badge-nya tetap jujur — yang mati memang
+    //    pengingatnya, bukan keadaannya.
+    withShiftSetting({ active: false, reminderHour: 21, longShiftHours: 14 });
+    window.localStorage.setItem(SHIFT_KEY, stateShift(shiftSejak(26)));
+    const saklarMati = await renderInteractive(providers(React.createElement(PosPage, null)));
+    check(
+      "setelan “pengingat mati” benar-benar mematikan peringatan di kasir",
+      saklarMati.query('[data-testid="kasir-ingat-tutup-shift"]') === null &&
+        saklarMati.text().includes("Shift terbuka"),
+      saklarMati.text().slice(0, 300),
+    );
+    await saklarMati.unmount();
+
+    // b) Ambang dari setelan dipakai: ambang 1 jam + shift 2 jam → sudah keras.
+    //    (Bukan konstanta 14 jam di kode.)
+    withShiftSetting({ active: true, reminderHour: 21, longShiftHours: 1 });
+    window.localStorage.setItem(SHIFT_KEY, stateShift(shiftSejak(2)));
+    const ambangPendek = await renderInteractive(providers(React.createElement(PosPage, null)));
+    const bannerPendek = ambangPendek.query('[data-testid="kasir-ingat-tutup-shift"]');
+    check(
+      "ambang shift lama dari halaman Pengaturan benar-benar dipakai kasir (2 jam ≥ ambang 1 jam)",
+      bannerPendek !== null && (bannerPendek.textContent ?? "").includes("Tutup shift"),
+      bannerPendek?.textContent ?? "(tidak ada banner)",
+    );
+    check(
+      "kasir dengan ambang setelan sendiri tidak menghasilkan error konsol",
+      ambangPendek.newErrors().length === 0,
+      ambangPendek.newErrors().join(" | ").slice(0, 200),
+    );
+    await ambangPendek.unmount();
+
+    // c) Halaman Pengaturan: kartunya menampilkan nilai tersimpan, menolak angka
+    //    janggal, dan menyimpan nilai baru sampai ke sesi/store.
+    withShiftSetting({ active: true, reminderHour: 22, longShiftHours: 8 });
+    window.localStorage.removeItem(SHIFT_KEY);
+    const setelan = await renderInteractive(providers(React.createElement(SettingsPage, null)));
+    check(
+      "halaman Pengaturan punya kartu pengingat tutup shift",
+      setelan.query('[data-testid="setelan-pengingat-shift"]') !== null &&
+        setelan.text().includes("Pengingat tutup shift"),
+      setelan.text().slice(0, 240),
+    );
+    check(
+      "kartunya menampilkan nilai yang tersimpan (lencana 22:00 · 8 jam, kolomnya terisi)",
+      (setelan.query('[data-testid="shift-lencana"]')?.textContent ?? "").includes("22:00") &&
+        setelan.query('[data-testid="shift-jam"]')?.value === "22" &&
+        setelan.query('[data-testid="shift-ambang"]')?.value === "8",
+      `${setelan.query('[data-testid="shift-lencana"]')?.textContent} · ${setelan.query('[data-testid="shift-jam"]')?.value} · ${setelan.query('[data-testid="shift-ambang"]')?.value}`,
+    );
+    check(
+      "petunjuknya menyebut akibat angka itu sebelum disimpan",
+      (setelan.query('[data-testid="shift-petunjuk"]')?.textContent ?? "").includes("22:00"),
+      setelan.query('[data-testid="shift-petunjuk"]')?.textContent ?? "(tidak ada petunjuk)",
+    );
+
+    await setelan.fill('[data-testid="shift-jam"]', "99");
+    check(
+      "jam di luar 0–23 ditolak dengan alasannya, dan tombol simpannya terkunci",
+      (setelan.query('[data-testid="shift-petunjuk"]')?.textContent ?? "").includes("Jam pengingat") &&
+        setelan.query('[data-testid="shift-simpan"]')?.disabled === true,
+      `${setelan.query('[data-testid="shift-petunjuk"]')?.textContent} · disabled=${setelan.query('[data-testid="shift-simpan"]')?.disabled}`,
+    );
+
+    await setelan.fill('[data-testid="shift-jam"]', "20");
+    await setelan.clickOn('[data-testid="shift-simpan"]');
+    check(
+      "menyimpan setelan memberi tahu jam & ambang barunya",
+      setelan.text().includes("20:00") && setelan.text().includes("8 jam"),
+      setelan.text().slice(0, 300),
+    );
+    const tersimpan = (() => {
+      try {
+        return JSON.parse(window.localStorage.getItem("mesinpos.session.v1") ?? "null")?.tenant?.shift ?? null;
+      } catch {
+        return null;
+      }
+    })();
+    check(
+      "setelan barunya benar-benar tersimpan (bukan hanya tampil di layar)",
+      tersimpan?.reminderHour === 20 && tersimpan?.longShiftHours === 8 && tersimpan?.active === true,
+      JSON.stringify(tersimpan),
+    );
+    check(
+      "halaman Pengaturan dengan setelan pengingat tanpa error konsol",
+      setelan.newErrors().length === 0,
+      setelan.newErrors().join(" | ").slice(0, 200),
+    );
+    await setelan.unmount();
+
+    // d) Saklarnya bisa dimatikan dari halaman yang sama, dan keadaannya ikut
+    //    tersimpan — kafe 24 jam tidak perlu memilih jam yang “benar”.
+    withShiftSetting({ active: true, reminderHour: 20, longShiftHours: 8 });
+    const saklar = await renderInteractive(providers(React.createElement(SettingsPage, null)));
+    await saklar.clickOn('[data-testid="shift-saklar"]');
+    await saklar.clickOn('[data-testid="shift-simpan"]');
+    const tersimpanMati = (() => {
+      try {
+        return JSON.parse(window.localStorage.getItem("mesinpos.session.v1") ?? "null")?.tenant?.shift ?? null;
+      } catch {
+        return null;
+      }
+    })();
+    check(
+      "saklar pengingat bisa dimatikan dari halaman Pengaturan dan tersimpan",
+      tersimpanMati?.active === false && tersimpanMati?.reminderHour === 20,
+      JSON.stringify(tersimpanMati),
+    );
+    await saklar.unmount();
+
+    window.localStorage.removeItem(SHIFT_KEY);
+  }
+
+  // 3g. Pemberitahuan ke **pemilik toko** (kas belum dibuka di jam operasional /
+  //     shift belum ditutup). Yang diperiksa bukan kalimatnya saja, melainkan dua
+  //     hal yang mudah diklaim tanpa bukti: apakah kabarnya **benar-benar dibuat**
+  //     (tercatat di store, bukan cuma tampil), dan apakah kasir melihat keadaan
+  //     laporannya apa adanya (terkirim / sudah pernah / belum sampai).
+  //
+  //     Jam operasionalnya dihitung dari jam perangkat yang menjalankan tes ini
+  //     (toko “baru buka satu jam lalu”), supaya blok ini tidak bergantung pada
+  //     pukul berapa suite-nya dijalankan.
+  {
+    const SHIFT_KEY = "mesinpos.shifts.v1";
+    const SENT_KEY = "mesinpos.shift-alerts.v1";
+    const { PosPage } = await server.ssrLoadModule("/src/pages/PosPage.tsx");
+    const { ShiftPage: HalamanShift } = await server.ssrLoadModule("/src/pages/ShiftPage.tsx");
+    const { SettingsPage: HalamanSetelan } = await server.ssrLoadModule(
+      "/src/pages/SettingsPage.tsx",
+    );
+    const jamSekarang = new Date().getHours();
+    const jamBuka = (jamSekarang + 23) % 24;
+    const jamTutup = (jamSekarang + 2) % 24;
+
+    /** Sesi F&B dengan jam operasional yang pasti memuat jam sekarang. */
+    function withOwnerAlertSetting(extra = {}) {
+      window.localStorage.setItem(
+        "mesinpos.session.v1",
+        JSON.stringify({
+          ...FNB_SESSION,
+          tenant: {
+            ...FNB_SESSION.tenant,
+            shift: {
+              active: true,
+              reminderHour: 21,
+              longShiftHours: 14,
+              openHour: jamBuka,
+              closeHour: jamTutup,
+              notifyOwner: true,
+              ...extra,
+            },
+          },
+        }),
+      );
+    }
+
+    /** Menunggu janji di dalam efek selesai (laporan shift dikirim asinkron). */
+    const tungguLaporan = () =>
+      React.act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+    // a) Kas belum dibuka padahal toko sudah buka.
+    withOwnerAlertSetting();
+    window.localStorage.removeItem(SHIFT_KEY);
+    window.localStorage.removeItem(SENT_KEY);
+    let posStore = null;
+    function PantauStore() {
+      posStore = useStore();
+      return null;
+    }
+    const pos = await renderInteractive(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(PosPage, null),
+          React.createElement(PantauStore, null),
+        ),
+      ),
+    );
+    await tungguLaporan();
+    const kabar = pos.query('[data-testid="pos-pemberitahuan-pemilik"]');
+    check(
+      "kasir melihat kabar ke pemilik toko saat kasnya belum dibuka di jam operasional",
+      kabar !== null &&
+        (kabar.textContent ?? "").includes("Kas belum dibuka") &&
+        kabar.getAttribute("data-status") === "sent",
+      `${kabar?.getAttribute("data-status")} · ${kabar?.textContent ?? "(tidak ada kabar)"}`,
+    );
+    const jendelaJam = `${String(jamBuka).padStart(2, "0")}:00–${String(jamTutup).padStart(2, "0")}:00`;
+    check(
+      "kabarnya menyebut pemilik toko & jam operasional yang berlaku, bukan cuma menyuruh kasir",
+      (kabar?.textContent ?? "").includes("Pemilik toko diberi tahu") &&
+        (kabar?.textContent ?? "").includes("shift (kas)") &&
+        (kabar?.textContent ?? "").includes(jendelaJam),
+      `${jendelaJam} · ${kabar?.textContent ?? "(tidak ada kabar)"}`,
+    );
+    check(
+      "laporannya benar-benar tercatat di store (bukan hanya tampil di layar)",
+      posStore?.shiftAlerts?.length === 1 &&
+        posStore?.shiftAlerts?.[0]?.kind === "till-closed" &&
+        posStore?.shiftAlerts?.[0]?.reason === "opening-grace" &&
+        (posStore?.shiftAlerts?.[0]?.dayKey ?? "").length === 10 &&
+        posStore?.shiftAlerts?.[0]?.emailVia === "demo" &&
+        posStore?.shiftAlerts?.[0]?.emailDeliveredAt === null,
+      JSON.stringify(posStore?.shiftAlerts ?? null),
+    );
+    check(
+      "kasir diberi tahu bahwa mode demo tidak punya kanal email/webhook (tidak diklaim terkirim)",
+      (kabar?.textContent ?? "").includes("belum menerima kabarnya") &&
+        (kabar?.textContent ?? "").includes("kanal email") &&
+        (kabar?.textContent ?? "").includes("webhook"),
+      kabar?.textContent ?? "(tidak ada kabar)",
+    );
+    check(
+      "kasir dengan kabar ke pemilik tanpa error konsol",
+      pos.newErrors().length === 0,
+      pos.newErrors().join(" | ").slice(0, 200),
+    );
+    await pos.unmount();
+
+    // b) Saklar pemberitahuan pemilik dimatikan: tidak ada kabar, dan tidak ada
+    //    laporan yang dibuat — pengingat kasirnya tetap berjalan.
+    withOwnerAlertSetting({ notifyOwner: false });
+    window.localStorage.removeItem(SENT_KEY);
+    let storeSaklarMati = null;
+    function PantauSaklarMati() {
+      storeSaklarMati = useStore();
+      return null;
+    }
+    const posMati = await renderInteractive(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(PosPage, null),
+          React.createElement(PantauSaklarMati, null),
+        ),
+      ),
+    );
+    await tungguLaporan();
+    check(
+      "saklar pemberitahuan pemilik yang mati benar-benar menghentikan kabarnya",
+      posMati.query('[data-testid="pos-pemberitahuan-pemilik"]') === null &&
+        (storeSaklarMati?.shiftAlerts?.length ?? 0) === 0,
+      `${storeSaklarMati?.shiftAlerts?.length ?? "?"} laporan · ${posMati.query('[data-testid="pos-pemberitahuan-pemilik"]')?.textContent ?? "(tidak ada kabar)"}`,
+    );
+    await posMati.unmount();
+
+    // c) Halaman Shift & Kas: kabar yang sudah terkirim bisa dibaca ulang —
+    //    termasuk kalimat yang jujur saat belum ada endpoint webhook yang
+    //    melanggannya — lalu ditandai sudah ditangani.
+    withOwnerAlertSetting();
+    window.localStorage.removeItem(SENT_KEY);
+    const shift = await renderInteractive(providers(React.createElement(HalamanShift, null)));
+    await tungguLaporan();
+    check(
+      "halaman Shift & Kas punya kartu pemberitahuan ke pemilik toko",
+      shift.query('[data-testid="setelan-pemberitahuan-pemilik"]') !== null &&
+        shift.text().includes("Pemberitahuan ke pemilik toko"),
+      shift.text().slice(0, 240),
+    );
+    const kabarHalaman = shift.query('[data-testid="pemberitahuan-pemilik-till-closed"]');
+    check(
+      "kabar yang baru dibuat muncul sebagai riwayat yang bisa diperiksa",
+      kabarHalaman !== null &&
+        (kabarHalaman.textContent ?? "").includes("Kas belum dibuka") &&
+        (kabarHalaman.textContent ?? "").includes("kas belum dibuka"),
+      kabarHalaman?.textContent ?? "(tidak ada riwayat)",
+    );
+    check(
+      "riwayatnya menyebut mode demo tidak mengirim email & belum ada endpoint webhook, bukan mengaku sudah sampai",
+      (kabarHalaman?.textContent ?? "").includes("Mode demo tidak punya kanal email server") &&
+        (kabarHalaman?.textContent ?? "").includes("Belum ada endpoint webhook") &&
+        kabarHalaman?.getAttribute("data-terkirim") === "false",
+      `${kabarHalaman?.getAttribute("data-terkirim")} · ${kabarHalaman?.textContent ?? "(tidak ada)"}`,
+    );
+    await shift.clickOn('[data-testid="pemberitahuan-pemilik-tangani"]');
+    await tungguLaporan();
+    check(
+      "kabar bisa ditandai sudah ditangani (dan tombolnya hilang, bukan menumpuk)",
+      shift.text().includes("Ditangani") &&
+        shift.query('[data-testid="pemberitahuan-pemilik-tangani"]') === null,
+      shift.text().slice(0, 320),
+    );
+    check(
+      "halaman Shift & Kas dengan pemberitahuan pemilik tanpa error konsol",
+      shift.newErrors().length === 0,
+      shift.newErrors().join(" | ").slice(0, 200),
+    );
+    await shift.unmount();
+
+    // d) Halaman Pengaturan: jam operasional & saklar pemberitahuan pemilik.
+    withOwnerAlertSetting({ openHour: 8, closeHour: 22 });
+    window.localStorage.removeItem(SHIFT_KEY);
+    const setelanJam = await renderInteractive(
+      providers(React.createElement(HalamanSetelan, null)),
+    );
+    check(
+      "halaman Pengaturan punya kolom jam operasional & saklar pemberitahuan pemilik",
+      setelanJam.query('[data-testid="shift-buka"]') !== null &&
+        setelanJam.query('[data-testid="shift-tutup"]') !== null &&
+        setelanJam.query('[data-testid="shift-pemberitahuan-saklar"]') !== null,
+      setelanJam.text().slice(0, 200),
+    );
+    check(
+      "kolomnya menampilkan jam operasional yang tersimpan, dan lencananya ikut menyebutnya",
+      setelanJam.query('[data-testid="shift-buka"]')?.value === "8" &&
+        setelanJam.query('[data-testid="shift-tutup"]')?.value === "22" &&
+        (setelanJam.query('[data-testid="shift-lencana"]')?.textContent ?? "").includes(
+          "08:00–22:00",
+        ),
+      `${setelanJam.query('[data-testid="shift-buka"]')?.value} · ${setelanJam.query('[data-testid="shift-tutup"]')?.value} · ${setelanJam.query('[data-testid="shift-lencana"]')?.textContent}`,
+    );
+    check(
+      "petunjuknya menyebut kapan pemilik dikabari sebelum disimpan",
+      (setelanJam.query('[data-testid="shift-petunjuk-pemilik"]')?.textContent ?? "").includes(
+        "30 menit",
+      ) &&
+        (setelanJam.query('[data-testid="shift-petunjuk-pemilik"]')?.textContent ?? "").includes(
+          "shift.alert",
+        ),
+      setelanJam.query('[data-testid="shift-petunjuk-pemilik"]')?.textContent ?? "(tidak ada)",
+    );
+    await setelanJam.fill('[data-testid="shift-buka"]', "24");
+    check(
+      "jam buka di luar 0–23 ditolak, dan tombol simpannya terkunci",
+      (setelanJam.query('[data-testid="shift-petunjuk"]')?.textContent ?? "").includes(
+        "Jam buka",
+      ) && setelanJam.query('[data-testid="shift-simpan"]')?.disabled === true,
+      `${setelanJam.query('[data-testid="shift-petunjuk"]')?.textContent} · disabled=${setelanJam.query('[data-testid="shift-simpan"]')?.disabled}`,
+    );
+    await setelanJam.fill('[data-testid="shift-buka"]', "6");
+    await setelanJam.fill('[data-testid="shift-tutup"]', "23");
+    await setelanJam.clickOn('[data-testid="shift-pemberitahuan-saklar"]');
+    await setelanJam.clickOn('[data-testid="shift-pemberitahuan-saklar"]');
+    await setelanJam.clickOn('[data-testid="shift-simpan"]');
+    const setelanTersimpan = (() => {
+      try {
+        return (
+          JSON.parse(window.localStorage.getItem("mesinpos.session.v1") ?? "null")?.tenant
+            ?.shift ?? null
+        );
+      } catch {
+        return null;
+      }
+    })();
+    check(
+      "jam operasional & saklar pemilik baru benar-benar tersimpan (bukan hanya tampil)",
+      setelanTersimpan?.openHour === 6 &&
+        setelanTersimpan?.closeHour === 23 &&
+        setelanTersimpan?.notifyOwner === true,
+      JSON.stringify(setelanTersimpan),
+    );
+    check(
+      "halaman Pengaturan dengan jam operasional tanpa error konsol",
+      setelanJam.newErrors().length === 0,
+      setelanJam.newErrors().join(" | ").slice(0, 200),
+    );
+    await setelanJam.unmount();
+
+    window.localStorage.removeItem(SHIFT_KEY);
+    window.localStorage.removeItem(SENT_KEY);
   }
 
   // 3c-2. Modifier item (`pos.modifier`) di klien: pilihan wajib ditegakkan,
@@ -1559,6 +2394,411 @@ try {
     withoutSession();
   }
 
+  // 3d-2. Bayar di kasir (modul F&B): pesanannya berangkat ke dapur pada momen
+  //       pembayarannya, dan kasirnya diberi tahu di dialog struk yang terbuka
+  //       otomatis. Diuji lewat **layar kasir yang diklik**, bukan lewat store:
+  //       inilah yang dilihat kasir di depan antrean.
+  {
+    withFnbSession();
+    // Pembersih spasi yang sama dengan blok struk lain (`"/src/index.css"`-nya
+    // sama): teks yang dibaca harness harus teks yang dibaca kasir.
+    const rapi = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+
+    const kas = {};
+    function FnbKasProbe() {
+      const store = useStore();
+      kas.tickets = () => store.kdsTickets;
+      kas.stock = (name) => store.products.find((p) => p.name === name)?.stock;
+      kas.products = store.products
+        .filter((p) => p.stock > 0 && !(p.modifiers?.length > 0))
+        .map((p) => ({ name: p.name, price: p.price, stock: p.stock }));
+      return null;
+    }
+
+    const ui = await renderInteractive(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(PosPage, null),
+          React.createElement(FnbKasProbe, null),
+        ),
+      ),
+    );
+
+    const pilihan = (kas.products ?? [])
+      .filter((product) => product.price > 0 && product.price < 100_000)
+      .sort((a, b) => a.price - b.price)[0];
+    check("ada produk F&B untuk diuji di kasir", Boolean(pilihan), JSON.stringify(kas.products).slice(0, 200));
+
+    const stokAwal = kas.stock(pilihan.name);
+    await ui.click(pilihan.name);
+    await ui.click("Bayar");
+    await ui.clickOn('[data-testid="cash-cepat-100000"]');
+    await ui.click("Selesaikan pembayaran");
+
+    const dapurLine = ui.query('[data-testid="struk-dapur"]');
+    check(
+      "dialog struk memberi tahu kasir bahwa pesanannya sudah ke dapur",
+      dapurLine !== null && rapi(dapurLine.textContent).includes("dikirim ke dapur"),
+      rapi(dapurLine && dapurLine.textContent),
+    );
+    check(
+      "stok bergerak saat uangnya diterima (bukan saat dapur menyelesaikan)",
+      kas.stock(pilihan.name) === stokAwal - 1,
+      `${stokAwal} → ${kas.stock(pilihan.name)}`,
+    );
+
+    const tiket = (kas.tickets?.() ?? []).at(-1);
+    check(
+      "pesanan lunas masuk antrean dapur sebagai tiket",
+      Boolean(tiket) && typeof tiket.number === "string",
+      JSON.stringify((kas.tickets?.() ?? []).map((row) => [row.number, row.settled])),
+    );
+    check(
+      "tiketnya ditandai sudah lunas dengan metode bayarnya",
+      tiket?.settled === true && String(tiket.paidLabel).startsWith("Lunas Tunai"),
+      String(tiket?.paidLabel),
+    );
+    check(
+      "daftar pesanan di kasir menandai tiket yang sudah lunas",
+      ui.query(`[data-testid="pos-dapur-lunas-${tiket?.saleId}"]`) !== null,
+      ui
+        .queryAll("[data-testid^='pos-dapur-lunas-']")
+        .map((row) => row.getAttribute("data-testid"))
+        .join(","),
+    );
+    await ui.unmount();
+    withoutSession();
+  }
+
+  // 3d-3. Dapur menekan Selesai pada tiket yang sudah lunas: tiketnya keluar dari
+  //       antrean dan stoknya **tidak** bergerak untuk kedua kalinya.
+  {
+    withFnbSession();
+
+    function SelesaiProbe() {
+      const store = useStore();
+      const step = React.useRef(0);
+      const facts = React.useRef({});
+
+      React.useEffect(() => {
+        if (step.current !== 0) return;
+        step.current = 1;
+        const product = store.products.find((p) => p.stock > 4);
+        facts.current.name = product?.name;
+        void store
+          .createSale({
+            items: [{ productId: product.id, quantity: 1 }],
+            discount: 0,
+            method: "Tunai",
+          })
+          .then((receipt) => {
+            facts.current.kitchenFired = String(receipt.kitchenFired);
+            step.current = 2;
+          })
+          .catch((error) => {
+            facts.current.error = error.message;
+            step.current = 9;
+          });
+      }, [store]);
+
+      React.useEffect(() => {
+        if (step.current !== 2) return;
+        const ticket = store.kdsTickets.at(-1);
+        if (!ticket) return;
+        step.current = 3;
+        facts.current.tiket = String(store.kdsTickets.length);
+        facts.current.settled = String(ticket.settled);
+        facts.current.stokSebelumSelesai = store.products.find(
+          (p) => p.name === facts.current.name,
+        )?.stock;
+        void store.finishKitchenTicket(ticket.saleId).catch((error) => {
+          facts.current.error = error.message;
+        });
+      }, [store]);
+
+      const stockNow = store.products.find((p) => p.name === facts.current.name)?.stock;
+      return React.createElement(
+        "div",
+        null,
+        `kirim=${facts.current.kitchenFired ?? "?"}` +
+          ` tiket_lunas=${facts.current.settled ?? "?"}` +
+          ` tiket_sisa=${store.kdsTickets.length}` +
+          ` stok_sebelum=${facts.current.stokSebelumSelesai ?? "?"}` +
+          ` stok_sesudah=${stockNow ?? "?"}` +
+          ` error=${facts.current.error ?? "-"}`,
+      );
+    }
+
+    const { text } = await renderTree(providers(React.createElement(SelesaiProbe, null)));
+    const facts = Object.fromEntries(
+      [...text.matchAll(/([a-z_]+)=([^ ]+)/g)].map((match) => [match[1], match[2]]),
+    );
+    check("alur tiket lunas tanpa error", facts.error === "-", text);
+    check("penjualan lunas melaporkan dirinya ke dapur", facts.kirim === "true", text);
+    check("tiketnya bertanda sudah lunas", facts.tiket_lunas === "true", text);
+    check("tiket lunas keluar dari antrean setelah Selesai", facts.tiket_sisa === "0", text);
+    check(
+      "menandai selesai tidak mengurangi stok lagi",
+      facts.stok_sesudah === facts.stok_sebelum && facts.stok_sebelum !== "?",
+      text,
+    );
+    withoutSession();
+  }
+
+  // 3d-4. Tombol **Hold**: transaksi yang sedang berjalan ditahan sementara
+  //       (tanpa menyentuh uang, stok, atau antrean dapur) supaya pembeli
+  //       berikutnya dilayani lebih dulu, lalu transaksinya dilanjutkan dari
+  //       daftar Transaksi ditahan. Diuji lewat layar kasir yang diklik.
+  {
+    withFnbSession();
+
+    const kas = {};
+    function HoldProbe() {
+      const store = useStore();
+      kas.products = store.products
+        .filter((p) => p.stock > 0 && p.price > 0 && !(p.modifiers?.length > 0))
+        .map((p) => ({ name: p.name, price: p.price }));
+      kas.tickets = () => store.kdsTickets.length;
+      kas.stock = (name) => store.products.find((p) => p.name === name)?.stock;
+      return null;
+    }
+
+    const ui = await renderInteractive(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(PosPage, null),
+          React.createElement(HoldProbe, null),
+        ),
+      ),
+    );
+
+    const [pertama, kedua] = kas.products ?? [];
+    check(
+      "ada dua produk untuk menguji tombol Hold",
+      Boolean(pertama && kedua),
+      JSON.stringify(kas.products).slice(0, 200),
+    );
+
+    // Rupiah ditulis dengan spasi tak-putus oleh `Intl.NumberFormat`, jadi kedua
+    // sisi dibaca dengan pengrapat spasi yang sama sebelum dibandingkan.
+    const rapi = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+    const jumlahItem = () =>
+      ui.query('[data-testid="keranjang-jumlah-item"]')?.textContent ?? "";
+    const totalKeranjang = () =>
+      rapi(ui.query('[data-testid="keranjang-total"]')?.textContent);
+    const barisDitahan = () => ui.queryAll('[data-testid^="pos-lanjutkan-"]');
+    const teksBaris = (tombol) => rapi(tombol.closest("li")?.textContent);
+
+    await ui.click(pertama.name);
+    check("produk pertama masuk keranjang", jumlahItem().includes("1 item"), jumlahItem());
+    const totalSaatDitahan = totalKeranjang();
+    const stokAwal = kas.stock(pertama.name);
+
+    await ui.clickOn('[data-testid="pos-hold"]');
+    check(
+      "Hold mengosongkan keranjang untuk pembeli berikutnya",
+      jumlahItem().includes("0 item"),
+      jumlahItem(),
+    );
+    check(
+      "Hold tidak mengirim tiket ke dapur & tidak menggerakkan stok",
+      kas.tickets() === 0 && kas.stock(pertama.name) === stokAwal,
+      `tiket=${kas.tickets()} stok=${stokAwal}→${kas.stock(pertama.name)}`,
+    );
+    check(
+      "daftar Transaksi ditahan muncul dengan isinya",
+      barisDitahan().length === 1 &&
+        teksBaris(barisDitahan()[0]).includes("1 item") &&
+        teksBaris(barisDitahan()[0]).includes(totalSaatDitahan),
+      teksBaris(barisDitahan()[0] ?? { closest: () => null }),
+    );
+    check(
+      "kasir diberi tahu ke mana transaksinya pergi",
+      ui.text().includes("ditahan tadi pukul"),
+      ui.text().slice(-200),
+    );
+
+    // Pembeli berikutnya dilayani lebih dulu — transaksi kedua jalan seperti biasa.
+    await ui.click(kedua.name);
+    check(
+      "pembeli berikutnya bisa dilayani setelah Hold",
+      jumlahItem().includes("1 item"),
+      jumlahItem(),
+    );
+    check(
+      "Lanjutkan tidak bisa ditekan selama keranjang yang sekarang masih berisi",
+      barisDitahan()[0].disabled === true,
+      "tombolnya masih aktif",
+    );
+
+    // Transaksi kedua juga ditahan, lalu yang pertama dilanjutkan kembali.
+    await ui.clickOn('[data-testid="pos-hold"]');
+    check(
+      "dua transaksi bisa ditahan sekaligus",
+      barisDitahan().length === 2,
+      String(barisDitahan().length),
+    );
+    await ui.clickOn('[data-testid^="pos-lanjutkan-"]');
+    check(
+      "transaksi yang dilanjutkan kembali ke keranjang",
+      jumlahItem().includes("1 item") && barisDitahan().length === 1,
+      `${jumlahItem()} · baris=${barisDitahan().length}`,
+    );
+    check(
+      "isinya kembali utuh — nominalnya sama dengan saat ditahan",
+      totalKeranjang() === totalSaatDitahan,
+      `${totalSaatDitahan} → ${totalKeranjang()}`,
+    );
+    check(
+      "notis melanjutkan menyebut transaksinya",
+      ui.text().includes("dilanjutkan"),
+      ui.text().slice(-200),
+    );
+
+    await ui.clickOn('[data-testid^="pos-buang-"]');
+    check(
+      "Buang menghapus tahanan yang tersisa",
+      ui.query('[data-testid="pos-ditahan"]') === null && barisDitahan().length === 0,
+      String(barisDitahan().length),
+    );
+    await ui.unmount();
+    withoutSession();
+  }
+
+  // 3d-5. Meja yang pesanannya sudah dibayar tetap terkunci untuk kasir sampai
+  //       dapur menekan **Selesai** — dibuktikan pada dua layar yang dipakai
+  //       bersamaan (kasir & dapur berbagi store yang sama).
+  {
+    withFnbSession();
+
+    const kas = {};
+    function MejaProbe() {
+      const store = useStore();
+      kas.products = store.products
+        .filter((p) => p.stock > 2 && p.price > 0 && !(p.modifiers?.length > 0))
+        .map((p) => ({ name: p.name, price: p.price }));
+      kas.tables = store.tables
+        .filter((t) => t.active)
+        .map((t) => ({ id: t.id, name: t.name }));
+      kas.tickets = () => store.kdsTickets;
+      return null;
+    }
+
+    const ui = await renderInteractive(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(PosPage, null),
+          React.createElement(KdsPage, null),
+          React.createElement(MejaProbe, null),
+        ),
+      ),
+    );
+
+    const produk = (kas.products ?? [])[0];
+    const meja = (kas.tables ?? [])[0];
+    check(
+      "ada produk & meja aktif untuk menguji kunci meja",
+      Boolean(produk && meja),
+      JSON.stringify(kas).slice(0, 200),
+    );
+
+    const chip = () => ui.query(`[data-testid="pos-meja-${meja.id}"]`);
+    const kartuDapur = () =>
+      (ui.query(`[data-testid="meja-kartu-${meja.id}"]`)?.textContent ?? "")
+        .replace(/\s+/g, " ")
+        .trim();
+    const jumlahItem = () =>
+      ui.query('[data-testid="keranjang-jumlah-item"]')?.textContent ?? "";
+
+    check(
+      "meja awal masih bebas dipilih kasir",
+      chip() !== null && chip().disabled === false,
+      String(chip()?.getAttribute("title")),
+    );
+    check(
+      "meja belum terisi di layar dapur",
+      kartuDapur().includes("Kosong"),
+      kartuDapur(),
+    );
+
+    await ui.clickOn(`[data-testid="pos-meja-${meja.id}"]`);
+    check(
+      "meja yang dipilih tercatat di keranjang",
+      jumlahItem().includes(`Meja ${meja.name}`),
+      jumlahItem(),
+    );
+    await ui.click(produk.name);
+    await ui.click("Bayar");
+    await ui.clickOn('[data-testid="cash-cepat-100000"]');
+    await ui.click("Selesaikan pembayaran");
+    await ui.clickOn('[aria-label="Tutup struk"]');
+
+    const tiket = (kas.tickets?.() ?? []).at(-1);
+    check(
+      "penjualan lunas masuk antrean dapur dengan mejanya",
+      Boolean(tiket) && tiket.tableName === meja.name && tiket.settled === true,
+      JSON.stringify((kas.tickets?.() ?? []).map((row) => [row.number, row.tableName, row.settled])),
+    );
+    check(
+      "meja terkunci untuk kasir begitu uangnya diterima",
+      chip().disabled === true && chip().getAttribute("data-meja-terkunci") === "true",
+      String(chip()?.getAttribute("title")),
+    );
+    check(
+      "alasannya disebutkan: sudah dibayar, tunggu dapur",
+      String(chip()?.getAttribute("title")).includes("sudah dibayar") &&
+        String(chip()?.getAttribute("title")).includes("Selesai"),
+      String(chip()?.getAttribute("title")),
+    );
+    check(
+      "kartu meja di layar dapur menandainya terisi",
+      kartuDapur().includes(`Terisi ${tiket?.number}`),
+      kartuDapur(),
+    );
+    let klikTerkunci = "berhasil";
+    try {
+      await ui.clickOn(`[data-testid="pos-meja-${meja.id}"]`);
+    } catch (error) {
+      klikTerkunci = error.message;
+    }
+    check(
+      "kasir tidak bisa memilih meja yang sudah dibayar",
+      klikTerkunci.includes("nonaktif"),
+      klikTerkunci,
+    );
+
+    await ui.clickOn(`[data-testid="kds-selesai-${tiket?.saleId}"]`);
+    check(
+      "dapur menekan Selesai: tiketnya keluar dari antrean",
+      !(kas.tickets?.() ?? []).some((row) => row.saleId === tiket?.saleId),
+      JSON.stringify((kas.tickets?.() ?? []).map((row) => row.number)),
+    );
+    check(
+      "meja terbuka lagi untuk kasir setelah dapur selesai",
+      chip().disabled === false && chip().getAttribute("data-meja-terkunci") === "false",
+      String(chip()?.getAttribute("title")),
+    );
+    check(
+      "kartu meja di layar dapur kembali kosong",
+      kartuDapur().includes("Kosong"),
+      kartuDapur(),
+    );
+    await ui.clickOn(`[data-testid="pos-meja-${meja.id}"]`);
+    check(
+      "meja itu benar-benar bisa dipakai kasir lagi",
+      jumlahItem().includes(`Meja ${meja.name}`),
+      jumlahItem(),
+    );
+    await ui.unmount();
+    withoutSession();
+  }
+
   // 3e. Piutang B2B & credit limit (`ar.creditlimit`, modul Grosir) di klien:
   //     pelanggan menunggak dan pelanggan tanpa limit ditolak dengan pesan yang
   //     sama seperti server, sementara tempo yang sah membuat nota piutang baru
@@ -1580,6 +2820,7 @@ try {
 
   function withWholesaleSession() {
     window.localStorage.setItem("mesinpos.session.v1", JSON.stringify(WS_SESSION));
+    withOpenShift();
   }
 
   const { ReceivablesPage } = await server.ssrLoadModule(
@@ -1845,6 +3086,7 @@ try {
 
   function withUmkmSession() {
     window.localStorage.setItem("mesinpos.session.v1", JSON.stringify(UMKM_SESSION));
+    withOpenShift();
   }
 
   const { MembersPage } = await server.ssrLoadModule("/src/pages/MembersPage.tsx");
@@ -2033,6 +3275,7 @@ try {
         tenant: { ...ENTERPRISE_SESSION.tenant, planKey },
       }),
     );
+    withOpenShift();
   }
 
   const { InventoryPage } = await server.ssrLoadModule("/src/pages/InventoryPage.tsx");
@@ -3604,6 +4847,37 @@ try {
         text.includes("30 hari terakhir"),
       text.slice(0, 600),
     );
+    // Bagian enterprise dari analitik (`report.advanced`): proyeksi akhir periode
+    // & analisis keranjang. Yang diperiksa bukan cuma judulnya — proyeksinya harus
+    // menyebut laju hari penuh, dan keranjangnya harus mencetak pasangan produk
+    // beserta pangsa & kebiasaan berulangnya.
+    check(
+      "analitik enterprise: proyeksi akhir periode tampil dengan lajunya",
+      text.includes("Proyeksi akhir periode") &&
+        /Laju Rp\s?[\d.]+\/hari dari \d+ hari penuh/.test(text) &&
+        text.includes("hari penuh ini vs"),
+      JSON.stringify({
+        proyeksi: text.indexOf("Proyeksi akhir periode"),
+        laju: /Laju Rp\s?[\d.]+[^.]*/.exec(text)?.[0] ?? null,
+        hariPenuh: text.includes("hari penuh ini vs"),
+        cuplikan: text.slice(
+          Math.max(0, text.indexOf("Proyeksi akhir periode") - 40),
+          text.indexOf("Proyeksi akhir periode") + 420,
+        ),
+      }),
+    );
+    check(
+      "analitik enterprise: keranjang & pasangan produk yang sering dibeli bersama",
+      text.includes("Keranjang & pasangan produk") &&
+        /Rata-rata [\d.,]+ barang per nota/.test(text) &&
+        text.includes("Sering dibeli bersama") &&
+        text.includes("Lift (×)") &&
+        /di atas 1 berarti saling menarik/.test(text),
+      text.slice(
+        Math.max(0, text.indexOf("Keranjang & pasangan produk") - 40),
+        text.indexOf("Keranjang & pasangan produk") + 700,
+      ),
+    );
     check(
       "halaman Laporan tanpa error konsol",
       newErrors.length === 0,
@@ -3669,6 +4943,12 @@ try {
       "laporan harian tetap terbaca walau analitik lanjutannya mati",
       starter.text.includes("Omzet per metode bayar") && starter.text.includes("Total omzet"),
       starter.text.slice(0, 300),
+    );
+    check(
+      "paket Starter juga tidak melihat proyeksi & keranjang (satu gerbang, bukan dua)",
+      !starter.text.includes("Proyeksi akhir periode") &&
+        !starter.text.includes("Keranjang & pasangan produk"),
+      starter.text.slice(0, 400),
     );
   }
 
@@ -4091,6 +5371,234 @@ try {
     withoutSession();
   }
 
+  // 3e-6d. Unduhan laporan dari halaman Laporan — PDF, Excel (.xlsx), dan CSV.
+  //        Harness murni (`verify-laporan.mjs`) menjaga byte berkasnya dan
+  //        peramban sungguhan (`verify-laporan-browser.mjs`) membuktikan unduhannya
+  //        benar-benar terjadi. Yang belum dijaga keduanya: tombolnya benar-benar
+  //        menyerahkan **dokumen laporan** (bukan berkas kosong) ke peramban, dan
+  //        hasilnya diberitahukan ke pengguna. Itu yang diperiksa di sini — tanpa
+  //        peramban sungguhan, cukup dengan mengamati berkas yang lewat.
+  {
+    const { ReportsPage } = await server.ssrLoadModule("/src/pages/ReportsPage.tsx");
+    window.localStorage.setItem(
+      "mesinpos.session.v1",
+      JSON.stringify({
+        user: { name: "Uji Unduh Laporan", email: "unduh-laporan@mesinpos.test" },
+        tenant: {
+          name: "Pusat Bahan Bangunan",
+          slug: "pusat-bahan-bangunan",
+          storeName: "Pusat",
+          vertical: "umkm",
+          verticals: ["umkm", "fnb", "wholesale"],
+          planKey: "enterprise",
+          role: "owner",
+          shift: { active: false, reminderHour: 21, longShiftHours: 14 },
+          createdAt: new Date().toISOString(),
+          trialEndsAt: new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString(),
+        },
+      }),
+    );
+
+    /*
+      Berkas yang “diunduh” ditangkap di `URL.createObjectURL`: happy-dom tidak
+      menulis apa pun ke folder unduhan, jadi yang diamati adalah berkas yang
+      diserahkan halaman ke peramban — lengkap dengan ukuran, jenis, dan isinya.
+
+      Dua hal harus dipasang lebih dulu: `Blob` milik happy-dom (Blob milik Bun
+      ditolak oleh `URL.createObjectURL` — “expects a Blob object”, sehingga tanpa
+      ini halamannya seolah-olah gagal menyusun berkas), dan `createObjectURL`-nya
+      sendiri, yang di sini mencatat berkasnya lalu mengembalikan alamat palsu.
+    */
+    const asliBlob = globalThis.Blob;
+    const asliCreate = URL.createObjectURL;
+    const asliRevoke = URL.revokeObjectURL;
+    const unduhan = [];
+    globalThis.Blob = window.Blob;
+    URL.createObjectURL = (blob) => {
+      unduhan.push({ blob, type: blob.type, size: blob.size });
+      return `blob:mesinpos-uji/${unduhan.length}`;
+    };
+    URL.revokeObjectURL = () => {};
+
+    try {
+      const halaman = await renderInteractive(
+        providers(React.createElement(ReportsPage, null)),
+      );
+      check(
+        "halaman Laporan menawarkan unduhan PDF, Excel, dan CSV",
+        Boolean(halaman.query('[data-testid="laporan-unduh"]')) &&
+          Boolean(halaman.query('[data-testid="laporan-unduh-pdf"]')) &&
+          Boolean(halaman.query('[data-testid="laporan-unduh-excel"]')) &&
+          Boolean(halaman.query('[data-testid="laporan-unduh-csv"]')),
+        halaman.text().slice(0, 300),
+      );
+
+      const KASUS = [
+        {
+          testid: "laporan-unduh-pdf",
+          ext: "pdf",
+          mime: "application/pdf",
+          periksa: async (blob) =>
+            new TextDecoder().decode(
+              new Uint8Array(await blob.arrayBuffer()).subarray(0, 5),
+            ) === "%PDF-",
+        },
+        {
+          testid: "laporan-unduh-excel",
+          ext: "xlsx",
+          mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          periksa: async (blob) => {
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            return bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
+          },
+        },
+        {
+          testid: "laporan-unduh-csv",
+          ext: "csv",
+          mime: "text/csv;charset=utf-8",
+          periksa: async (blob) => {
+            const teks = await blob.text();
+            return teks.startsWith("\uFEFF") && teks.includes("Metode bayar");
+          },
+        },
+      ];
+
+      /** Berkas yang lewat per tombol: dipakai lagi untuk memeriksa isinya. */
+      const berkasTersimpan = {};
+
+      for (const kasus of KASUS) {
+        unduhan.length = 0;
+        await halaman.clickOn(`[data-testid="${kasus.testid}"]`);
+        check(
+          `tombol ${kasus.ext}: tepat satu berkas diserahkan ke peramban`, 
+          unduhan.length === 1,
+          `${unduhan.length} berkas`,
+        );
+        const berkas = unduhan[0];
+        berkasTersimpan[kasus.ext] = berkas.blob;
+        check(
+          `tombol ${kasus.ext}: ukurannya wajar (bukan berkas kosong)`,
+          berkas.size > 200,
+          `${berkas.size} byte`,
+        );
+        check(
+          `tombol ${kasus.ext}: jenis berkasnya sesuai`, 
+          berkas.type === kasus.mime,
+          berkas.type,
+        );
+        check(
+          `tombol ${kasus.ext}: isinya benar-benar berkas laporan`, 
+          await kasus.periksa(berkas.blob),
+          "tanda awal berkas tidak sesuai",
+        );
+        const pesan = halaman.query('[data-testid="laporan-unduh-hasil"]');
+        check(
+          `tombol ${kasus.ext}: pengguna diberi tahu nama berkas yang disimpan`,
+          new RegExp(`laporan-[a-z0-9-]+-\\d{8}-\\d{4}\\.${kasus.ext}`).test(
+            pesan?.textContent ?? "",
+          ) && /disimpan di perangkat ini/.test(pesan?.textContent ?? ""),
+          pesan?.textContent ?? "(pesan tidak ada)",
+        );
+      }
+
+      /*
+        Daftar “Berkas yang sudah diunduh”: yang diperiksa bukan hanya barisnya ada,
+        melainkan bahwa jenis, nama, ukuran, dan **tanggal unduhnya** benar-benar
+        terbaca — itu yang diminta pemilik toko.
+      */
+      const barisUnduhan = halaman.queryAll('[data-testid="laporan-unduhan-baris"]');
+      const jenis = barisUnduhan.map((row) => row.getAttribute("data-jenis"));
+      check(
+        "daftar unduhan berisi tiga baris (PDF, Excel, CSV) dengan jenisnya",
+        barisUnduhan.length === 3 &&
+          ["pdf", "xlsx", "csv"].every((kind) => jenis.includes(kind)),
+        jenis.join(","),
+      );
+      check(
+        "daftar unduhan menampilkan nama berkas, ukuran, dan tanggal unduhnya",
+        barisUnduhan.every((row) => {
+          const teks = (row.textContent ?? "").replace(/\s+/g, " ");
+          const waktu = row.getAttribute("data-waktu") ?? "";
+          return (
+            /laporan-[a-z0-9-]+-\d{8}-\d{4}\.(pdf|xlsx|csv)/.test(teks) &&
+            /\d+([,.]\d+)? KB/.test(teks) &&
+            /^\d{1,2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}$/.test(waktu) &&
+            teks.includes(waktu)
+          );
+        }),
+        barisUnduhan.map((row) => row.textContent).join(" || ").slice(0, 300),
+      );
+      check(
+        "daftar unduhan urut dari yang terbaru (CSV paling atas)",
+        jenis[0] === "csv",
+        jenis.join(","),
+      );
+      check(
+        "daftar unduhan menyediakan tautan unduh ulang ke berkasnya",
+        barisUnduhan.every(
+          (row) => row.querySelector('a[download]')?.getAttribute("href") !== null,
+        ),
+        "ada baris tanpa tautan unduh ulang",
+      );
+
+      /* Grafiknya harus ikut ke dalam berkas, bukan cuma tampil di halaman. */
+      const adaTeks = (blob, teks) =>
+        blob.arrayBuffer().then((buffer) => {
+          const bytes = new Uint8Array(buffer);
+          const pola = new TextEncoder().encode(teks);
+          for (let index = 0; index + pola.length <= bytes.length; index += 1) {
+            let cocok = true;
+            for (let j = 0; j < pola.length; j += 1) {
+              if (bytes[index + j] !== pola[j]) {
+                cocok = false;
+                break;
+              }
+            }
+            if (cocok) return true;
+          }
+          return false;
+        });
+      /*
+        Berkasnya dibaca sebagai teks (latin1) supaya tata letak barunya ikut diperiksa:
+        rangka kartu putih (`1 1 1 rg`), pita bernada per bagian (beberapa warna `rg`
+        berbeda), batang bagan yang digambar sebagai jalur vektor (`f`), dan judul
+        bagannya yang benar-benar tercetak.
+      */
+      const teksBlob = (blob) =>
+        blob.arrayBuffer().then((buffer) =>
+          new TextDecoder("windows-1252").decode(new Uint8Array(buffer)),
+        );
+      const pdfTeks = await teksBlob(berkasTersimpan.pdf);
+      const warnaPita = new Set(pdfTeks.match(/[\d.]+ [\d.]+ [\d.]+ rg/g) ?? []);
+      const bentukTerisi = (pdfTeks.match(/\nf\n/g) ?? []).length;
+      check(
+        "berkas PDF memuat desain barunya: kartu, pita bernada per bagian, dan bagan batang vektor",
+        pdfTeks.includes("1 1 1 rg") &&
+          pdfTeks.includes("GRAFIK - ") &&
+          warnaPita.size >= 6 &&
+          bentukTerisi >= 40,
+        `${warnaPita.size} warna pita, ${bentukTerisi} bentuk terisi`,
+      );
+      check(
+        "berkas Excel memuat lembar bagan & gambarnya",
+        (await adaTeks(berkasTersimpan.xlsx, "xl/charts/chart1.xml")) &&
+          (await adaTeks(berkasTersimpan.xlsx, "xl/drawings/drawing1.xml")),
+        "arsip xlsx tanpa bagian bagan",
+      );
+      check(
+        "unduhan laporan tanpa error konsol",
+        halaman.newErrors().length === 0,
+        halaman.newErrors().join(" | ").slice(0, 200),
+      );
+      await halaman.unmount();
+    } finally {
+      globalThis.Blob = asliBlob;
+      URL.createObjectURL = asliCreate;
+      URL.revokeObjectURL = asliRevoke;
+    }
+    withoutSession();
+  }
+
   // 4. Penyimpanan yang melempar — persis yang terjadi di HP dengan mode privat
   //    atau storage diblokir. Penulisan localStorage di dalam efek sesi dulu
   //    tidak dijaga, dan satu lemparan di efek membuat React melepas seluruh
@@ -4168,7 +5676,9 @@ try {
     );
     check(
       "checklist izin memuat seluruh kelompok izin",
-      text.includes("Kasir & meja") &&
+      text.includes("Kasir, dapur & kas") &&
+        text.includes("Bekerja di layar dapur (KDS)") &&
+        text.includes("Membuka & menutup shift kas") &&
         text.includes("Produk & stok") &&
         text.includes("Pembelian") &&
         text.includes("Uang, piutang & hutang") &&
@@ -4221,8 +5731,50 @@ try {
       ].map((row) => row.value);
       check(
         "pemilik ditawari seluruh peran bawaan, termasuk Pemilik",
-        ownerOptions.length === 5 && ownerOptions.includes("owner"),
+        ["owner", "manager", "cashier", "inventory", "finance"].every((role) =>
+          ownerOptions.includes(role),
+        ),
         ownerOptions.join(","),
+      );
+      /*
+        Laporan pemilik toko: peran kustom yang sudah dibuat **tidak muncul** di
+        pilihan saat mendaftarkan anggota baru — peran itu dulu hanya bisa
+        ditugaskan setelah orangnya masuk tim. Sekarang ada pilihannya di form
+        yang sama, dan daftarnya peran kustom yang **aktif**.
+      */
+      /*
+        **Satu pemilih peran**, bukan dua: peran tambahan (kustom) ikut di daftar
+        yang sama dengan peran bawaan, dan tidak ada pemilih kedua di formulir.
+        Nilai peran tambahan memakai awalan `custom:` (`roleChoiceValue`).
+      */
+      const roleSelect = ui.query("#member-role");
+      const roleSelectLabels = [
+        ...(roleSelect?.querySelectorAll("option") ?? []),
+      ].map((row) => (row.textContent ?? "").trim());
+      const roleGroups = [
+        ...(roleSelect?.querySelectorAll("optgroup") ?? []),
+      ].map((row) => row.getAttribute("label"));
+      check(
+        "peran tambahan muncul di pemilih peran yang sama dengan peran bawaan",
+        roleSelect !== null &&
+          roleSelectLabels.includes("Kasir Shift Malam") &&
+          roleSelectLabels.includes("Admin Harga") &&
+          roleSelectLabels.includes("Kasir") &&
+          roleGroups.join("|") === "Peran bawaan|Peran tambahan",
+        `${roleGroups.join(" | ")} :: ${roleSelectLabels.join(" | ")}`,
+      );
+      check(
+        "formulir undangan tidak lagi menanyakan peran dua kali",
+        ui.query("#member-custom-role") === null &&
+          ui.queryAll('select[id="member-role"]').length === 1,
+        `${ui.query("#member-custom-role") ? "pemilih kedua masih ada" : "tidak ada pemilih kedua"}`,
+      );
+      check(
+        "catatan pemilih peran menjelaskan peran tambahan berdiri sendiri",
+        (ui.query('[data-testid="member-role-catatan"]')?.textContent ?? "").includes(
+          "Peran tambahan berdiri sendiri",
+        ),
+        ui.query('[data-testid="member-role-catatan"]')?.textContent ?? "(tidak ada)",
       );
 
       // Email yang tidak bisa menerima kode (domainnya tanpa titik) ditolak sebelum
@@ -4288,6 +5840,47 @@ try {
         ui.text().slice(0, 700),
       );
 
+      /*
+        Mendaftarkan anggota baru **langsung dengan peran kustom**: pilihan yang
+        sama dipakai saat mengirim, dan baris anggotanya benar-benar memakai
+        peran itu (bukan cuma bisa dipilih di formulirnya).
+      */
+      await ui.fill("#member-email", "kasir.malam@kopi-nusantara.id");
+      await ui.fill("#member-name", "Kasir Malam");
+      await ui.select("#member-role", "custom:role-malam");
+      check(
+        "pilihan peran yang dipilih terbaca sebelum dikirim",
+        (ui.query('[data-testid="member-role-catatan"]')?.textContent ?? "").includes(
+          "Kasir Shift Malam",
+        ),
+        ui.query('[data-testid="member-role-catatan"]')?.textContent ?? "(tidak ada)",
+      );
+      await ui.click("Daftarkan ke tim");
+      const barisMalam = ui
+        .queryAll("tbody tr")
+        .find((row) => (row.textContent ?? "").includes("kasir.malam@kopi-nusantara.id"));
+      check(
+        "anggota baru benar-benar memakai peran yang dipilih di formulir",
+        barisMalam !== undefined &&
+          barisMalam.querySelector('[aria-label="Peran Kasir Malam"]')?.value ===
+            "custom:role-malam",
+        barisMalam?.textContent?.slice(0, 200) ?? "baris tidak ditemukan",
+      );
+      check(
+        "daftar anggota punya satu kolom Peran, bukan dua",
+        [...ui.queryAll("thead th")].filter((row) =>
+          (row.textContent ?? "").trim() === "Peran",
+        ).length === 1 &&
+          !ui.text().includes("Peran bawaan (Kasir)"),
+        [...ui.queryAll("thead th")].map((row) => (row.textContent ?? "").trim()).join(" | "),
+      );
+      check(
+        "notisnya menyebut satu peran saja untuk anggota baru itu",
+        ui.text().includes("terdaftar sebagai Kasir Shift Malam") &&
+          !ui.text().includes("peran kustom Kasir Shift Malam"),
+        ui.text().slice(0, 500),
+      );
+
       // Undangan ulang untuk email yang sudah jadi anggota = perubahan peran,
       // bukan baris kedua di daftar (aturan yang sama dengan `members.add`).
       await ui.fill("#member-email", "sari@kopi-nusantara.id");
@@ -4300,7 +5893,7 @@ try {
       await ui.click("Daftarkan ke tim");
       check(
         "daftar anggota tidak bertambah saat email yang sama diundang lagi",
-        ui.queryAll("tbody tr").length === before + 1 &&
+        ui.queryAll("tbody tr").length === before + 2 &&
           ui.text().includes("sudah anggota tim — perannya diperbarui menjadi"),
         `${ui.queryAll("tbody tr").length} | ${ui.text().slice(0, 400)}`,
       );
@@ -4507,7 +6100,9 @@ try {
           ui.query("#edit-name")?.value === "Rizal Pratama" &&
           ui.query("#edit-email")?.value === "rizal@kopi-nusantara.id" &&
           ui.query("#edit-phone")?.value === "628551234567" &&
-          ui.query("#edit-role")?.value === "inventory",
+          (ui.query('[data-testid="edit-peran-catatan"]')?.textContent ?? "").includes(
+            "peran bawaan Staf Gudang",
+          ),
         ui.text().slice(0, 240),
       );
       await ui.fill("#edit-name", "Rizal P.");
@@ -4573,9 +6168,36 @@ try {
       //      Dua pemilik **aktif** diperlukan supaya pagar “akun sendiri” bisa
       //      diuji terpisah dari pagar “pemilik terakhir” (urutan pagarnya memang
       //      begitu di `lib/team.ts`, dan server memutuskan hal yang sama).
+      //      Peran diganti dari kolom **Peran** di daftar anggota — satu tempat
+      //      untuk peran bawaan & peran tambahan; formulir Ubah hanya identitas.
       await klikDi(baris("sari@kopi-nusantara.id"), "Ubah");
+      check(
+        "form Ubah tidak lagi menanyakan peran kedua kalinya",
+        ui.query("#edit-role") === null &&
+          (ui.query('[data-testid="edit-peran-catatan"]')?.textContent ?? "").includes(
+            "peran tambahan Kasir Shift Malam",
+          ) &&
+          (ui.query('[data-testid="edit-peran-catatan"]')?.textContent ?? "").includes(
+            "kolom Peran",
+          ),
+        ui.query('[data-testid="edit-peran-catatan"]')?.textContent ?? "(tidak ada)",
+      );
+      await ui.click("Batal");
+      /*
+        Sari di data contoh memakai peran tambahan `role-malam`. Mengangkatnya
+        menjadi Pemilik harus **melepas** peran tambahan itu — pemilik selalu
+        memegang seluruh izin, dan peran tambahan yang masih menempel berarti
+        pemiliknya tidak lagi punya `billing.manage`.
+      */
       await React.act(async () => {
-        const pilihPeran = ui.query("#edit-role");
+        const pilihPeran = baris("sari@kopi-nusantara.id").querySelector(
+          '[aria-label="Peran Sari Wulandari"]',
+        );
+        check(
+          "kolom Peran menampilkan peran tambahan yang sedang dipakai",
+          pilihPeran?.value === "custom:role-malam",
+          `nilai kolom Peran: ${pilihPeran?.value ?? "(tidak ada)"}`,
+        );
         const setter = Object.getOwnPropertyDescriptor(
           window.HTMLSelectElement.prototype,
           "value",
@@ -4583,12 +6205,18 @@ try {
         setter.call(pilihPeran, "owner");
         pilihPeran.dispatchEvent(new window.Event("change", { bubbles: true }));
       });
-      await ui.click("Simpan perubahan");
       check(
-        "pemilik bisa mengangkat anggota lain menjadi pemilik dari halaman",
+        "pemilik bisa mengangkat anggota lain menjadi pemilik dari kolom Peran",
         (baris("sari@kopi-nusantara.id")?.textContent ?? "").includes("Pemilik") &&
-          ui.text().includes("Sari Wulandari: peran diperbarui."),
+          ui.text().includes("Sari Wulandari sekarang Pemilik."),
         ui.text().slice(0, 300),
+      );
+      check(
+        "pemilik baru tidak lagi memakai peran tambahan",
+        (baris("sari@kopi-nusantara.id")?.textContent ?? "").includes(
+          "Selalu seluruh izin",
+        ),
+        baris("sari@kopi-nusantara.id")?.textContent?.slice(0, 200) ?? "baris hilang",
       );
 
       // ------------------- pagar “akun sendiri” di halaman --------------------
@@ -4680,9 +6308,10 @@ try {
         : [];
       check(
         "manajer tidak ditawari peran Pemilik saat mendaftarkan anggota",
-        options.length === 4 &&
-          !options.includes("owner") &&
+        !options.includes("owner") &&
           options.includes("cashier") &&
+          // Peran tambahan ikut di daftar yang sama; yang penting Pemilik tidak ada.
+          options.some((value) => value.startsWith("custom:")) &&
           manajer
             .text()
             .includes("hanya pemilik tenant yang boleh menetapkan pemilik lain"),
@@ -4730,6 +6359,219 @@ try {
       "menu mengikuti izin peran kustom",
       gated.text.includes("Kasir (POS)") && !gated.text.includes("Tim & Peran"),
       gated.text.slice(0, 400),
+    );
+    withoutSession();
+  }
+
+  // 3e-7b. **Pengaturan peran bawaan** (`roleSettings`): izinnya bisa disesuaikan,
+  //       perannya bisa dinonaktifkan/dihapus, dan semuanya benar-benar **diklik**
+  //       di DOM — bukan hanya diperiksa teksnya. Yang diuji juga bahwa peran yang
+  //       dinonaktifkan hilang dari pilihan undangan, dan bahwa izin peran bawaan
+  //       yang dipersempit workspace ikut mempersempit rute klien.
+  {
+    const { TeamPage } = await server.ssrLoadModule("/src/pages/TeamPage.tsx");
+    const { App: AppRoot } = await server.ssrLoadModule("/src/App.tsx");
+
+    withEnterpriseSession();
+    const { text, newErrors } = await renderTree(
+      providers(React.createElement(TeamPage, null)),
+    );
+    check(
+      "halaman menampilkan kartu peran bawaan",
+      text.includes("Peran bawaan") &&
+        text.includes("Izin peran bawaan bisa disesuaikan"),
+      text.slice(0, 400),
+    );
+    check(
+      "kelima peran bawaan tampil",
+      ["Pemilik", "Manajer", "Kasir", "Staf Gudang", "Keuangan"].every((label) =>
+        text.includes(label),
+      ),
+      text.slice(0, 600),
+    );
+    check(
+      "pemilik dijelaskan terkunci (seluruh izin, tidak bisa diubah)",
+      text.includes("Peran Pemilik selalu memegang seluruh izin"),
+      text.slice(0, 800),
+    );
+    check(
+      "ringkasan peran bawaan tampil",
+      text.includes("5 peran bawaan") && text.includes("dari 5 masih bisa ditugaskan"),
+      text.slice(0, 400),
+    );
+    check(
+      "halaman peran bawaan tanpa error konsol",
+      newErrors.length === 0,
+      newErrors.join(" | ").slice(0, 200),
+    );
+
+    const ui = await renderInteractive(
+      providers(React.createElement(TeamPage, null)),
+    );
+    const baris = (role) => {
+      const row = ui.query(`[data-testid="peran-bawaan-${role}"]`);
+      return row ? (row.textContent ?? "").replace(/\s+/g, " ").trim() : "";
+    };
+    const opsiPeran = () => [
+      ...(ui.query("#member-role")?.querySelectorAll("option") ?? []),
+    ].map((row) => row.value);
+
+    check(
+      "baris Kasir menampilkan izin bawaan (8 izin)",
+      baris("cashier").includes("8 izin (bawaan)") &&
+        baris("cashier").includes("Melihat laporan") &&
+        // Dapur & kas tidak lagi menumpang `pos.sell`: keduanya izin sendiri.
+        baris("cashier").includes("Bekerja di layar dapur (KDS)") &&
+        baris("cashier").includes("Membuka & menutup shift kas"),
+      baris("cashier"),
+    );
+    check(
+      "pemilik tidak menawarkan tombol apa pun",
+      !ui.query('[aria-label="Ubah izin peran Pemilik"]') &&
+        !ui.query('[aria-label="Hapus peran Pemilik"]') &&
+        !ui.query('[aria-label="Nonaktifkan peran Pemilik"]'),
+      baris("owner"),
+    );
+    check(
+      "Hapus peran yang masih dipakai mati (Kasir: 2 anggota)",
+      ui.query('[aria-label="Hapus peran Kasir"]')?.disabled === true,
+      baris("cashier"),
+    );
+    check(
+      "Hapus peran yang belum dipakai hidup (Keuangan: 0 anggota)",
+      ui.query('[aria-label="Hapus peran Keuangan"]')?.disabled === false,
+      baris("finance"),
+    );
+
+    // --- 1) Menyunting izin Kasir: `report.view` dilepas, lalu dikembalikan ---
+    await ui.clickOn('[aria-label="Ubah izin peran Kasir"]');
+    check(
+      "editor menyebut peran bawaan yang sedang disunting",
+      ui.text().includes("Ubah izin peran Kasir") &&
+        Boolean(ui.query('[data-testid="editor-peran-bawaan"]')) &&
+        // Nama & keterangan hanya untuk peran kustom — peran bawaan tidak punya
+        // kolom itu di editornya.
+        !ui.query("#role-name"),
+      ui.text().slice(0, 400),
+    );
+    const izinReport = () =>
+      ui
+        .queryAll("button[aria-pressed]")
+        .find((row) => (row.textContent ?? "").trim() === "Melihat laporan");
+    check(
+      "izin yang sedang berlaku tampil tercentang di editor",
+      izinReport()?.getAttribute("aria-pressed") === "true",
+      String(izinReport()?.getAttribute("aria-pressed")),
+    );
+    await React.act(async () => {
+      izinReport().click();
+    });
+    await ui.click("Simpan izin");
+    check(
+      "izin Kasir tersimpan & ditandai disesuaikan",
+      baris("cashier").includes("izin disesuaikan") &&
+        baris("cashier").includes("7 izin (disesuaikan)") &&
+        !baris("cashier").includes("Melihat laporan"),
+      baris("cashier"),
+    );
+    check(
+      "notis menyebut peran & jumlah izinnya",
+      ui.text().includes("Izin peran Kasir disimpan (7 izin)"),
+      ui.text().slice(0, 200),
+    );
+    check(
+      "tombol Kembalikan izin bawaan muncul setelah izin disesuaikan",
+      Boolean(ui.query('[aria-label="Kembalikan izin bawaan Kasir"]')),
+      baris("cashier"),
+    );
+
+    // --- 2) Menonaktifkan Kasir: hilang dari pilihan undangan ---
+    await ui.clickOn('[aria-label="Nonaktifkan peran Kasir"]');
+    check(
+      "peran dinonaktifkan tampil nonaktif beserta akibatnya",
+      baris("cashier").includes("nonaktif") &&
+        baris("cashier").includes("tidak ditawarkan lagi saat mengundang"),
+      baris("cashier"),
+    );
+    check(
+      "peran nonaktif hilang dari pilihan peran undangan",
+      !opsiPeran().includes("cashier") &&
+        opsiPeran().includes("manager") &&
+        opsiPeran().includes("finance"),
+      opsiPeran().join(","),
+    );
+    await ui.clickOn('[aria-label="Aktifkan peran Kasir"]');
+    check(
+      "peran bisa diaktifkan kembali dan muncul lagi di pilihan undangan",
+      baris("cashier").includes("aktif") && opsiPeran().includes("cashier"),
+      `${baris("cashier").slice(0, 120)} | ${opsiPeran().join(",")}`,
+    );
+
+    // --- 3) Kembalikan izin bawaan: jejak “disesuaikan” hilang ---
+    await ui.clickOn('[aria-label="Kembalikan izin bawaan Kasir"]');
+    check(
+      "Kembalikan izin bawaan mengembalikan izin asli peran itu",
+      baris("cashier").includes("8 izin (bawaan)") &&
+        baris("cashier").includes("Melihat laporan") &&
+        !ui.query('[aria-label="Kembalikan izin bawaan Kasir"]'),
+      baris("cashier"),
+    );
+
+    // --- 4) Menghapus peran Keuangan, lalu memulihkannya ---
+    await ui.clickOn('[aria-label="Hapus peran Keuangan"]');
+    check(
+      "menghapus peran menuntut konfirmasi lebih dulu",
+      Boolean(ui.query('[aria-label="Yakin hapus peran Keuangan"]')) &&
+        baris("finance").includes("Keuangan"),
+      baris("finance"),
+    );
+    await ui.clickOn('[aria-label="Yakin hapus peran Keuangan"]');
+    check(
+      "peran dihapus: statusnya dihapus & tombol Pulihkan tersedia",
+      baris("finance").includes("dihapus") &&
+        Boolean(ui.query('[aria-label="Pulihkan peran Keuangan"]')) &&
+        !opsiPeran().includes("finance"),
+      `${baris("finance")} | ${opsiPeran().join(",")}`,
+    );
+    await ui.clickOn('[aria-label="Pulihkan peran Keuangan"]');
+    check(
+      "peran yang dihapus bisa dipulihkan kembali",
+      baris("finance").includes("aktif") &&
+        !ui.query('[aria-label="Pulihkan peran Keuangan"]') &&
+        opsiPeran().includes("finance"),
+      `${baris("finance")} | ${opsiPeran().join(",")}`,
+    );
+    check(
+      "aksi peran bawaan tidak melempar error",
+      ui.newErrors().length === 0,
+      ui.newErrors().join(" | ").slice(0, 200),
+    );
+    await ui.unmount();
+
+    // --- 5) Sesi kasir yang izinnya dipersempit workspace ---
+    window.localStorage.setItem(
+      "mesinpos.session.v1",
+      JSON.stringify({
+        ...ENTERPRISE_SESSION,
+        tenant: {
+          ...ENTERPRISE_SESSION.tenant,
+          role: "cashier",
+          customRole: null,
+          rolePermissions: ["pos.sell"],
+        },
+      }),
+    );
+    const sempit = await renderTree(providers(React.createElement(AppRoot, null)));
+    check(
+      "rute mengikuti izin peran bawaan yang disesuaikan",
+      sempit.text.includes("Akses ditolak") &&
+        sempit.text.includes("Peran Kasir tidak memiliki izin"),
+      sempit.text.slice(0, 300),
+    );
+    check(
+      "menu ikut menyempit saat izin peran bawaan dipersempit",
+      sempit.text.includes("Kasir (POS)") && !sempit.text.includes("Tim & Peran"),
+      sempit.text.slice(0, 400),
     );
     withoutSession();
   }
@@ -9444,7 +11286,7 @@ try {
       "halaman Panduan menjelaskan cara memasang logo saat workspace belum punya",
       panduanTanpaLogo.text().includes("belum punya logo") &&
         panduanTanpaLogo.text().includes("Struk belanja") &&
-        panduanTanpaLogo.text().includes("18 bagian · 12 gambar"),
+        panduanTanpaLogo.text().includes("19 bagian · 12 gambar"),
       panduanTanpaLogo.text().slice(0, 260),
     );
     check(

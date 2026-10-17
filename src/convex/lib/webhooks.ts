@@ -89,6 +89,30 @@ export const WEBHOOK_EVENTS: WebhookEventDefinition[] = [
     label: "Piutang lewat tempo",
     description: "Piutang B2B melewati jatuh temponya dan belum lunas.",
   },
+  {
+    key: "shift.alert",
+    label: "Kas belum dibuka / shift belum ditutup",
+    description:
+      "Kas belum dibuka padahal toko sudah buka, atau shift belum ditutup padahal toko sudah tutup.",
+  },
+  {
+    key: "product.updated",
+    label: "Produk berubah",
+    description:
+      "Nama, SKU, harga, satuan, atau status produk berubah — termasuk harga baru yang harus dipakai platform.",
+  },
+  {
+    key: "stock.changed",
+    label: "Stok berubah",
+    description:
+      "Satu pergerakan stok tercatat: penjualan, pembelian, opname, penyesuaian, atau perpindahan gudang.",
+  },
+  {
+    key: "purchase.received",
+    label: "Barang dari supplier diterima",
+    description:
+      "Penerimaan barang (GRN) tercatat — stok bertambah dan hutang supplier lahir pada transaksi yang sama.",
+  },
 ];
 
 export const WEBHOOK_EVENT_KEYS: string[] = WEBHOOK_EVENTS.map((event) => event.key);
@@ -96,7 +120,7 @@ export const WEBHOOK_EVENT_KEYS: string[] = WEBHOOK_EVENTS.map((event) => event.
 export const WEBHOOK_URL_MAX = 300;
 export const WEBHOOK_DESCRIPTION_MAX = 120;
 export const MAX_WEBHOOK_ENDPOINTS = 10;
-/** Batas jumlah event per endpoint (katalognya sendiri 10). */
+/** Batas jumlah event per endpoint (katalognya sendiri 11). */
 export const MAX_WEBHOOK_EVENTS = WEBHOOK_EVENTS.length;
 
 /** Berapa lama tanda tangan masih dianggap segar. */

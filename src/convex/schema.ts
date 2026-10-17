@@ -56,6 +56,8 @@ export const verticalValidator = v.union(
 export const permissionValidator = v.union(
   v.literal("pos.sell"),
   v.literal("pos.void"),
+  v.literal("kds.manage"),
+  v.literal("shift.manage"),
   v.literal("product.manage"),
   v.literal("category.manage"),
   v.literal("stock.adjust"),
@@ -133,6 +135,34 @@ export const receiptSettingValidator = v.object({
   copies: v.optional(v.number()),
   footerText: v.optional(v.string()),
 });
+
+/**
+ * Setelan pengingat tutup shift (`tenants.shift`) — jam pengingatnya, ambang
+ * “shift sudah terlalu lama”, dan saklar hidup/matinya. Semua bidang opsional:
+ * baris tenant yang belum pernah mengaturnya tetap sah dan dibaca sebagai bawaan
+ * (21:00, 14 jam, aktif) oleh `shiftSettingOf`, jadi perilaku pengingatnya tidak
+ * berubah setelah kolom ini ditambahkan.
+ */
+export const shiftSettingValidator = v.object({
+  active: v.optional(v.boolean()),
+  reminderHour: v.optional(v.number()),
+  longShiftHours: v.optional(v.number()),
+  /**
+   * Jam operasional toko (`shiftOwnerAlert`): jam buka & jam tutupnya menurut
+   * waktu lokal perangkat kasir, plus saklar pemberitahuan ke pemilik toko.
+   * Opsional dengan alasan yang sama — baris tenant lama dibaca sebagai bawaan
+   * (08:00–22:00, pemberitahuan hidup) oleh `shiftSettingOf`.
+   */
+  openHour: v.optional(v.number()),
+  closeHour: v.optional(v.number()),
+  notifyOwner: v.optional(v.boolean()),
+});
+
+/** Jenis pemberitahuan shift ke pemilik toko (`shiftAlerts.kind`). */
+export const shiftAlertKindValidator = v.union(
+  v.literal("till-closed"),
+  v.literal("shift-open"),
+);
 
 /**
  * Jenis pajak yang benar-benar dipungut saat penjualan itu terjadi
@@ -452,6 +482,12 @@ export default defineSchema({
      */
     receipt: v.optional(receiptSettingValidator),
     /**
+     * Setelan pengingat tutup shift (`tenants.updateShift`, halaman Pengaturan):
+     * jam pengingat, ambang shift lama, dan saklarnya. Dibaca halaman Kasir &
+     * halaman Shift & Kas saat memutuskan kapan kasir diingatkan.
+     */
+    shift: v.optional(shiftSettingValidator),
+    /**
      * Logo toko yang tercetak di atas nama usaha pada struk (`tenants.setLogo`).
      * Disimpan sebagai **id berkas** di penyimpanan Convex, bukan URL — URL
      * bertanda tangan punya masa berlaku, jadi URL yang ditulis ke sini akan mati
@@ -467,12 +503,19 @@ export default defineSchema({
   memberships: defineTable({
     tenantId: v.id("tenants"),
     userId: v.id("users"),
-    role: roleValidator,
     /**
-     * Peran kustom yang berlaku untuk anggota ini (`rbac.custom`, Phase 4).
-     * Kalau diisi, izinnya **menggantikan** `role`; kalau kosong atau peran
-     * kustomnya sudah hilang/nonaktif, `role` yang berlaku (lihat lib/rbac.ts).
+     * Peran **bawaan** anggota ini. Kosong berarti anggota itu memakai **peran
+     * tambahan** (`customRoleId`) yang **berdiri sendiri** — tidak ada peran dasar
+     * yang menemani, jadi ketika peran tambahannya tidak sah ia tidak memakai izin
+     * peran bawaan mana pun (lihat lib/rbac.ts). Satu keanggotaan selalu punya
+     * salah satu: `role` **atau** `customRoleId`.
+     *
+     * Dibuat opsional 2026-10-17: sebelumnya baris anggota berperan tambahan
+     * menyimpan `role: "cashier"` sebagai peran dasar tersembunyi, dan itu yang
+     * membuat peran baru terasa “berdiri di atas peran tertentu”.
      */
+    role: v.optional(roleValidator),
+    /** Peran tambahan (kustom) yang berlaku untuk anggota ini, kalau ada. */
     customRoleId: v.optional(v.id("customRoles")),
     storeIds: v.array(v.id("stores")),
     active: v.boolean(),
@@ -521,8 +564,13 @@ export default defineSchema({
     secretHash: v.string(),
     /** Scope yang boleh dipanggil kunci ini (subset izin pembuatnya). */
     scopes: v.array(permissionValidator),
-    /** Peran pembuat saat kunci dibuat; dipakai ulang saat verifikasi. */
-    creatorRole: roleValidator,
+    /**
+     * Peran **bawaan** pembuat saat kunci dibuat; kosong kalau pembuatnya memakai
+     * peran tambahan (berdiri sendiri). Verifikasi kunci memakai izin efektif
+     * pembuatnya (`createdById`) lebih dulu, jadi kolom ini hanya cadangan untuk
+     * kunci lama yang pembuatnya tidak tercatat.
+     */
+    creatorRole: v.optional(roleValidator),
     active: v.boolean(),
     expiresAt: v.optional(v.number()),
     revokedAt: v.optional(v.number()),
@@ -606,6 +654,36 @@ export default defineSchema({
   })
     .index("by_tenant", ["tenantId"])
     .index("by_tenant_name", ["tenantId", "name"]),
+
+  /**
+   * **Pengaturan peran bawaan** per workspace — satu baris per peran yang
+   * disesuaikan (lihat `lib/roleSettings.ts`).
+   *
+   * Peran bawaan tetap kontrak produk; yang bisa diatur tenant adalah **izinnya**
+   * (`permissions`), **status pemakaiannya** (`active`), dan apakah perannya
+   * **dihapus** dari daftar penugasan (`removed`). Kolomnya sengaja semuanya
+   * `optional` supaya **kolom kosong berarti bawaan**: workspace yang belum pernah
+   * membuka pengaturan ini berjalan persis seperti sebelumnya, dan baris yang
+   * salah bentuk pun jatuh kembali ke izin bawaan alih-alih mengunci orang.
+   *
+   * Nama peran tidak disimpan di sini: labelnya dipakai struk, sidebar, pesan
+   * penolakan, dan jejak audit, jadi ia tetap satu untuk semua workspace.
+   */
+  roleSettings: defineTable({
+    tenantId: v.id("tenants"),
+    role: roleValidator,
+    /** Izin pengganti; kosong = izin bawaan `permissionsFor(role)`. */
+    permissions: v.optional(v.array(permissionValidator)),
+    /** `false` = tidak bisa ditugaskan lagi ke anggota baru; kosong = aktif. */
+    active: v.optional(v.boolean()),
+    /** `true` = dihapus dari daftar penugasan; kosong = tidak dihapus. */
+    removed: v.optional(v.boolean()),
+    updatedById: v.optional(v.id("users")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_tenant_role", ["tenantId", "role"]),
 
   /**
    * Tiket dukungan (`support.dedicated`, Phase 5 / Dukungan khusus & skala
@@ -1269,6 +1347,63 @@ export default defineSchema({
     .index("by_tenant_store", ["tenantId", "storeId"])
     .index("by_cashier", ["cashierId"]),
 
+  /**
+   * Pemberitahuan shift yang **sudah dikirim ke pemilik toko**: kas belum dibuka
+   * di jam operasional, atau shift belum ditutup (toko sudah tutup / shift
+   * lintas hari / shift terlalu lama).
+   *
+   * Sumbernya perangkat kasir, bukan tabel `shifts`: shift di aplikasi ini hidup
+   * di perangkat (`mesinpos.shifts.v1`) supaya kasir tetap bisa bekerja saat
+   * internetnya putus, jadi hanya perangkat itu yang tahu kasnya sedang terbuka
+   * atau belum pernah dibuka. Yang diputuskan server di sini adalah hal yang
+   * memang miliknya: **sekali per hari per jenis** (`dayKey`), dikirim ke
+   * langganan webhook pemilik, dan disimpan sebagai jejak yang bisa dibaca ulang
+   * di halaman Shift & Kas.
+   */
+  shiftAlerts: defineTable({
+    tenantId: v.id("tenants"),
+    storeId: v.optional(v.id("stores")),
+    /** Anggota yang melaporkannya (kasir yang perangkatnya melihat keadaan itu). */
+    reportedBy: v.optional(v.id("users")),
+    kind: shiftAlertKindValidator,
+    /** Alasan yang lebih rinci (`opening-grace`, `after-close`, `cross-day`, `long-shift`). */
+    reason: v.string(),
+    /** Hari kalender **lokal perangkat** — pembanding “sudah diberitahukan hari ini”. */
+    dayKey: v.string(),
+    title: v.string(),
+    message: v.string(),
+    /** Waktu buka shift yang dilaporkan, kalau memang ada shift terbuka. */
+    openedAt: v.optional(v.number()),
+    /** Label jam lokal perangkat saat laporan dibuat (`08:15`). */
+    localClock: v.string(),
+    /** Jumlah endpoint webhook yang ikut dikirimi (0 = tidak ada pelanggan). */
+    notifiedEndpoints: v.number(),
+    /**
+     * Alamat email pemilik toko yang dikabari (`tenants.ownerId` + anggota
+     * berperan `owner`). Opsional supaya baris lama tetap sah; kosong berarti
+     * workspace itu belum punya alamat pemilik yang bisa dikabari.
+     */
+    emailRecipients: v.optional(v.array(v.string())),
+    /**
+     * Saluran yang benar-benar dipakai untuk email itu (`resend`, `uji`) —
+     * `uji` berarti alamatnya berdomain `.test` sehingga tidak ada email yang
+     * berangkat, dan itu dibedakan dari email yang gagal terkirim.
+     */
+    emailVia: v.optional(v.string()),
+    /** Waktu email benar-benar berangkat; kosong = belum/gagal. */
+    emailDeliveredAt: v.optional(v.number()),
+    /** Pesan kegagalan pengiriman email terakhir, kalau ada. */
+    emailError: v.optional(v.string()),
+    /** Waktu server menerima laporan. */
+    reportedAt: v.number(),
+    /** Diisi saat pemilik/manajer menandai kabar itu sudah ditangani. */
+    resolvedAt: v.optional(v.number()),
+    resolvedBy: v.optional(v.id("users")),
+  })
+    .index("by_tenant_reported", ["tenantId", "reportedAt"])
+    .index("by_tenant_kind_day", ["tenantId", "kind", "dayKey"]),
+
+
   sales: defineTable({
     tenantId: v.id("tenants"),
     storeId: v.id("stores"),
@@ -1312,6 +1447,20 @@ export default defineSchema({
      * penjualan — dua catatan uang yang tidak boleh berbeda.
      */
     digitalChargeId: v.optional(v.id("digitalCharges")),
+    /**
+     * Momen penjualan **lunas** ini dikirim ke dapur (modul F&B, `pos.kds`).
+     * Diisi `pos.createSale` begitu pembayarannya dicatat, supaya pesanan sampai
+     * ke dapur tanpa tombol kedua — sama seperti pesanan QR meja yang menjadi
+     * tiket pada momen pelunasannya. Kosong = tidak ada dapur yang menunggu
+     * (workspace tanpa modul F&B, atau penjualan biasa).
+     */
+    kitchenFiredAt: v.optional(v.number()),
+    /**
+     * Momen dapur menyatakan pesanannya beres. Stoknya **sudah** bergerak saat
+     * penjualannya dicatat, jadi ini penanda antrean saja — bukan penyelesaian
+     * penjualan (itu yang dilakukan `finalizeHeldSale` atas pesanan tertahan).
+     */
+    kitchenDoneAt: v.optional(v.number()),
     createdAt: v.number(),
   })
     .index("by_tenant", ["tenantId"])

@@ -143,7 +143,7 @@ const roadmap = [
   {
     phase: "Phase 4",
     title: "Enterprise Intelligence",
-    body: "Advanced BI analytics, peran kustom, dan API & webhook sudah jalan: tren omzet, margin kotor, produk & kategori teratas, jam tersibuk, dan temuan otomatis di halaman Laporan — plus peran bernama dengan izin yang bisa dirancang sendiri di halaman Tim & Peran, serta kunci API bercakupan (termasuk endpoint tulis untuk pesanan dari sistem luar) dan webhook bertanda tangan HMAC di halaman API & Webhook.",
+    body: "Advanced BI analytics, peran kustom, dan API & webhook sudah jalan: tren omzet, margin kotor, produk & kategori teratas, jam tersibuk, dan temuan otomatis di halaman Laporan, lengkap dengan proyeksi akhir periode dari laju hari penuh dan analisis keranjang (produk yang sering dibeli bersama) — plus peran bernama dengan izin yang bisa dirancang sendiri — dan izin peran bawaan yang bisa disesuaikan per workspace — di halaman Tim & Peran, serta kunci API bercakupan (termasuk endpoint tulis untuk pesanan dari sistem luar) dan webhook bertanda tangan HMAC di halaman API & Webhook.",
     status: "Berjalan",
   },
   {
@@ -191,17 +191,24 @@ function SiteHeader() {
   const { active: layarPenuh, toggle: toggleLayarPenuh } = useFullscreen();
   return (
     <header className="sticky top-0 z-50 border-b border-border/60 glass">
-      <div className="container flex h-16 items-center justify-between">
-        <Link to="/" className="flex items-center gap-2.5">
+      {/*
+        `flex-wrap` + `min-h-16` adalah jaring pengaman untuk HP tersempit (≤ 340 px):
+        di lebar itu merek + tiga kontrol tidak muat sebaris, dan **membiarkannya
+        membungkus ke baris kedua jauh lebih baik daripada memotong tombol ajakan**
+        (dulu tombol “Coba Gratis” terpotong di lebar 390 px). Di lebar yang muat,
+        tingginya tetap 64 px seperti sebelumnya.
+      */}
+      <div className="container flex min-h-16 flex-wrap items-center justify-between gap-x-2 gap-y-1 py-2 sm:py-0">
+        <Link to="/" className="flex shrink-0 items-center gap-2.5">
           <span className="grid size-9 place-items-center rounded-lg bg-primary/15 text-primary">
             <Store className="size-5" />
           </span>
-          <span className="text-lg font-bold tracking-tight">
+          <span className="text-base font-bold tracking-tight sm:text-lg">
             Mesin<span className="text-primary">POS</span>
           </span>
         </Link>
 
-        <nav className="hidden items-center gap-8 text-sm text-muted-foreground md:flex">
+        <nav className="hidden items-center gap-4 text-sm text-muted-foreground md:flex lg:gap-8">
           <a className="transition-colors hover:text-foreground" href="#fitur">
             Fitur
           </a>
@@ -214,13 +221,30 @@ function SiteHeader() {
           <a className="transition-colors hover:text-foreground" href="#roadmap">
             Roadmap
           </a>
+          {/*
+            Dokumentasi API sengaja ikut di navigasi publik: pembacanya calon
+            mitra integrasi (mis. pusatbahanbangunan.com) yang belum punya akun,
+            jadi halaman itu harus bisa ditemukan tanpa masuk dulu.
+          */}
+          <Link className="transition-colors hover:text-foreground" to="/dokumentasi-api">
+            Dokumentasi API
+          </Link>
         </nav>
 
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+          {/*
+            Tombol layar penuh hanya ditawarkan dari layar lebar. Di HP ia berebut
+            baris dengan tombol ajakan utama, dan yang paling dulu terpotong justru
+            tombolnya (beranda meluap 60 px di lebar 390 px sebelum ini) — padahal
+            layar penuh di peramban HP tidak menambah apa pun yang belum disediakan
+            peramban itu sendiri. Di backstage tombol yang sama tetap ada di semua
+            ukuran, karena di sanalah ia menyembunyikan sidebar kasir.
+          */}
           <FullscreenToggle
             active={layarPenuh}
             onToggle={toggleLayarPenuh}
             hasSidebar={false}
+            className="hidden sm:inline-flex"
           />
           <ThemeToggle />
           {/*
@@ -234,13 +258,18 @@ function SiteHeader() {
             keduanya menuju `/auth` yang sama — yang membedakan hanya tujuan
             setelah masuk: beranda aplikasi atau onboarding tenant baru.
           */}
-          <Button asChild variant="ghost" size="sm">
+          <Button asChild variant="ghost" size="sm" className="px-2 sm:px-3">
             <Link to="/auth?returnTo=/app">Masuk</Link>
           </Button>
-          <Button asChild size="sm">
+          {/*
+            Di lebar tersempit, labelnya yang tinggal dan ikonnya disembunyikan —
+            bukan sebaliknya: ajakannya tetap terbaca utuh, dan tidak ada satu pun
+            kontrol yang harus menghilang dari header agar muat.
+          */}
+          <Button asChild size="sm" className="px-3">
             <Link to="/auth?returnTo=/onboarding">
               Coba Gratis
-              <ArrowRight className="size-4" />
+              <ArrowRight className="hidden size-4 sm:block" />
             </Link>
           </Button>
         </div>
@@ -675,7 +704,7 @@ function SiteFooter() {
   return (
     <footer className="border-t border-border/60 bg-secondary/20">
       <div className="container py-14">
-        <div className="grid gap-10 lg:grid-cols-[1.4fr_repeat(3,1fr)]">
+        <div className="grid gap-10 lg:grid-cols-[1.4fr_repeat(4,1fr)]">
           <div>
             <div className="flex items-center gap-2.5">
               <span className="grid size-9 place-items-center rounded-lg bg-primary/15 text-primary">
@@ -710,6 +739,23 @@ function SiteFooter() {
               </ul>
             </div>
           ))}
+          {/* Satu kolom nyata untuk pengembang: dokumentasi API bisa dibaca
+              tanpa sesi, dan itulah pintu masuk mitra integrasi. */}
+          <div>
+            <div className="text-sm font-semibold">Pengembang</div>
+            <ul className="mt-4 space-y-2.5 text-sm text-muted-foreground">
+              <li>
+                <Link className="transition-colors hover:text-foreground" to="/dokumentasi-api">
+                  Dokumentasi API
+                </Link>
+              </li>
+              <li>
+                <Link className="transition-colors hover:text-foreground" to="/app/api">
+                  Kunci API &amp; webhook
+                </Link>
+              </li>
+            </ul>
+          </div>
         </div>
         <div className="mt-12 flex flex-col items-center justify-between gap-4 border-t border-border/60 pt-6 text-xs text-muted-foreground sm:flex-row">
           <span>© {new Date().getFullYear()} MesinPOS. Seluruh hak cipta dilindungi.</span>

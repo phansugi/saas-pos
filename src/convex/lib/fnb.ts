@@ -6,10 +6,33 @@
  * aturan yang sama — denah meja tidak boleh "benar" di UI dan salah di server.
  *
  * Keputusan model yang penting: **status meja tidak disimpan**. Meja terisi
- * kalau ada pesanan tertahan (`sales.status === "held"`) yang menunjuk meja itu.
- * Dengan begitu tidak ada dua sumber kebenaran yang bisa berbeda: menyelesaikan
- * atau membatalkan pesanan otomatis mengosongkan mejanya, tanpa patch tambahan
+ * kalau ada **tiket dapur** yang menunjuk meja itu (`isKitchenTicket`) — yaitu
+ * pesanan tertahan yang dikirim lebih dulu, dan penjualan yang **sudah lunas**
+ * tetapi tiketnya belum ditandai beres oleh dapur. Dengan begitu tidak ada dua
+ * sumber kebenaran yang bisa berbeda: begitu dapur menekan **Selesai** (atau
+ * pesanannya dibatalkan), mejanya otomatis kosong lagi — tanpa patch tambahan
  * yang bisa terlewat.
+ *
+ * Akibatnya memang disengaja: **meja yang pesanannya sudah dibayar tetap
+ * terkunci** sampai dapur selesai. Meja itu masih dipakai tamunya — makanannya
+ * belum datang — jadi menempatkan pesanan lain di situ akan mencampur dua
+ * tagihan di satu meja. Yang menyatukan aturan itu di server (`pos.createSale`),
+ * denah kasir, dan denah layar dapur adalah `tableHolders` di bawah.
+ *
+ * Antrean dapur punya **dua sumber tiket**, dan keduanya sama-sama "pesanan yang
+ * harus disiapkan dapur":
+ *
+ *  1. pesanan tertahan (`status: "held"`) — dikirim kasir lebih dulu, uangnya
+ *     menyusul (`finalizeHeldSale`), dan termasuk pesanan QR meja yang sudah
+ *     lunas,
+ *  2. penjualan yang **sudah lunas** (`status: "completed"`) dengan
+ *     `kitchenFiredAt` terisi — tiket yang lahir **pada momen pembayarannya**,
+ *     supaya kasir tidak perlu menekan tombol kedua setelah uangnya masuk.
+ *
+ * Bedanya hanya di tombol **Selesai**-nya: tiket tertahan diselesaikan (stok
+ * bergerak di situ), sedangkan tiket lunas hanya ditandai selesai
+ * (`kitchenDoneAt`) karena stoknya sudah bergerak saat penjualannya dicatat.
+ * Penandanya `settled` di `KdsTicket`, jadi layar dapur tidak perlu menebak.
  */
 
 import {
@@ -53,12 +76,18 @@ export interface TableRef {
   sortOrder?: number;
 }
 
-/** Pesanan yang masih terbuka — hari ini selalu `status: "held"`. */
+/** Satu tiket dapur yang sedang menempati sebuah meja. */
 export interface OpenOrderRef {
   id: string;
   number: string;
   createdAt: number;
   tableId?: string;
+  /**
+   * `true` = penjualannya **sudah lunas** dan tiketnya hanya menunggu dapur
+   * menekan Selesai. Dipakai memilih kalimat penolakan yang benar di
+   * `seatTable`: "tunggu dapur" bukan "batalkan dulu".
+   */
+  settled?: boolean;
 }
 
 export interface TableInput {
@@ -145,6 +174,12 @@ export interface TableState extends TableRef {
   orderId?: string;
   orderNumber?: string;
   waitingMinutes?: number;
+  /**
+   * `true` = yang menempati meja ini sudah dibayar dan tinggal menunggu dapur.
+   * Denah memakainya untuk menyebut apa yang sedang ditunggu (dan kenapa
+   * mejanya belum boleh dipakai lagi).
+   */
+  paid?: boolean;
 }
 
 export function waitingMinutes(createdAt: number, now: number = Date.now()): number {
@@ -156,9 +191,12 @@ export function isTicketLate(minutes: number): boolean {
 }
 
 /**
- * Denah meja: setiap meja aktif yang punya pesanan terbuka berstatus terisi.
- * Meja nonaktif tetap dilaporkan (dengan status `inactive`) supaya denah tidak
- * berbohong saat meja sedang diperbaiki; UI tinggal memfilternya.
+ * Denah meja: setiap meja aktif yang punya **tiket dapur** berstatus terisi.
+ * Daftar tiketnya disiapkan pemanggil (`ticketTableHolders` untuk antrean dapur,
+ * `tableHolders` untuk penjualan tersimpan), jadi denah kasir dan layar dapur
+ * tidak mungkin memakai daftar yang berbeda. Meja nonaktif tetap dilaporkan
+ * (dengan status `inactive`) supaya denah tidak berbohong saat meja sedang
+ * diperbaiki; UI tinggal memfilternya.
  */
 export function tableStates(
   tables: readonly TableRef[],
@@ -183,13 +221,78 @@ export function tableStates(
       orderId: order.id,
       orderNumber: order.number,
       waitingMinutes: waitingMinutes(order.createdAt, now),
+      paid: order.settled === true,
     };
   });
+}
+
+/** Penjualan yang bisa menempati sebuah meja — seperlunya untuk `tableHolders`. */
+export interface TableHolderSale extends KitchenSaleRef {
+  id: string;
+  number: string;
+  createdAt: number;
+  tableId?: string;
+}
+
+/**
+ * Meja mana yang sedang ditempati, dari **penjualan** yang tersimpan.
+ *
+ * Satu tempat untuk seluruh pemakaian, supaya "meja terisi" tidak pernah punya
+ * dua arti: pesanan tertahan (uang belum masuk) dan penjualan lunas yang masih
+ * di dapur (`isKitchenTicket`) sama-sama menahan mejanya, sedangkan penjualan
+ * yang **belum** pernah sampai ke dapur (workspace tanpa layar dapur) tidak.
+ * Dipakai `pos.createSale` (menolak meja yang masih terisi) dan store demo.
+ */
+export function tableHolders(sales: readonly TableHolderSale[]): OpenOrderRef[] {
+  return sales
+    .filter((sale) => Boolean(sale.tableId) && isKitchenTicket(sale))
+    .map((sale) => ({
+      id: sale.id,
+      number: sale.number,
+      createdAt: sale.createdAt,
+      tableId: sale.tableId,
+      settled: sale.status !== "held",
+    }));
+}
+
+/**
+ * Versi yang sama untuk **tiket dapur** yang sudah dihitung (`kdsTickets`):
+ * denah kasir dan denah layar dapur membacanya dari antrean yang sama, jadi
+ * meja yang terkunci di kasir tidak mungkin tampak kosong di dapur (dan
+ * sebaliknya).
+ */
+export function ticketTableHolders(tickets: readonly KdsTicket[]): OpenOrderRef[] {
+  return tickets
+    .filter((ticket) => Boolean(ticket.tableId))
+    .map((ticket) => ({
+      id: ticket.saleId,
+      number: ticket.number,
+      createdAt: ticket.createdAt,
+      tableId: ticket.tableId,
+      settled: ticket.settled,
+    }));
 }
 
 export type SeatResult =
   | { ok: true; table: TableRef }
   | { ok: false; reason: string };
+
+/**
+ * Satu kalimat penolakan untuk semua jalan yang menemukan meja masih terisi:
+ * menempatkan pesanan baru (`seatTable`), menonaktifkan meja, dan menamai ulang
+ * meja yang sedang dipakai.
+ *
+ * Dua keadaannya berbeda dan kalimatnya harus berbeda juga: tiket yang **sudah
+ * dibayar** tinggal menunggu dapur (tidak ada yang perlu dibatalkan kasir),
+ * sedangkan pesanan tertahan memang masih bisa diselesaikan atau dibatalkan.
+ * Satu tempat supaya denah kasir, layar dapur, dan kalimat penolakan server tidak
+ * pernah berbeda.
+ */
+export function tableOccupiedReason(tableName: string, open: OpenOrderRef): string {
+  return open.settled
+    ? `Meja ${tableName} masih terisi pesanan ${open.number} yang sudah dibayar. Tunggu dapur menekan Selesai dulu — meja itu dipakai tamunya sampai pesanannya beres.`
+    : `Meja ${tableName} masih terisi pesanan ${open.number}. Selesaikan atau batalkan dulu.`;
+}
 
 /**
  * Boleh tidaknya menempatkan pesanan baru di sebuah meja. Satu meja hanya boleh
@@ -206,12 +309,7 @@ export function seatTable(
   if (!table.active) return { ok: false, reason: `Meja ${table.name} sedang tidak aktif.` };
 
   const open = orders.find((order) => order.tableId === tableId);
-  if (open) {
-    return {
-      ok: false,
-      reason: `Meja ${table.name} masih terisi pesanan ${open.number}. Selesaikan atau batalkan dulu.`,
-    };
-  }
+  if (open) return { ok: false, reason: tableOccupiedReason(table.name, open) };
   return { ok: true, table };
 }
 
@@ -495,6 +593,26 @@ export interface KdsTicket {
   late: boolean;
   itemCount: number;
   items: KdsTicketItem[];
+  /**
+   * `true` = penjualannya **sudah lunas** (tiket lahir dari pembayaran di kasir),
+   * jadi menekan **Selesai** hanya menandai tiketnya beres. `false` = pesanan
+   * tertahan: menekan Selesai yang menyelesaikan penjualannya (stok bergerak).
+   */
+  settled: boolean;
+  /**
+   * Penanda pembayaran tiket lunas: `Lunas Tunai · diterima dapur pukul 13:42`.
+   * `null` untuk pesanan tertahan — uangnya belum masuk di situ.
+   */
+  paidLabel: string | null;
+}
+
+/** Satu pesanan yang masuk antrean dapur, apa pun sumber tiketnya. */
+export interface KdsOrderRef extends OpenOrderRef {
+  items: readonly KdsTicketItem[];
+  /** Penjualannya sudah lunas (`status: "completed"`), bukan pesanan tertahan. */
+  settled?: boolean;
+  /** Label pembayarannya, dihitung `ticketPaidLabel` untuk tiket yang lunas. */
+  paidLabel?: string | null;
 }
 
 /**
@@ -503,7 +621,7 @@ export interface KdsTicket {
  * supaya layar dapur tetap terbaca kalau mejanya kemudian diubah namanya.
  */
 export function kdsQueue(
-  orders: readonly (OpenOrderRef & { items: readonly KdsTicketItem[] })[],
+  orders: readonly KdsOrderRef[],
   tables: readonly TableRef[],
   now: number = Date.now(),
 ): KdsTicket[] {
@@ -513,6 +631,7 @@ export function kdsQueue(
     .sort((a, b) => a.createdAt - b.createdAt || a.number.localeCompare(b.number))
     .map((order) => {
       const minutes = waitingMinutes(order.createdAt, now);
+      const settled = order.settled ?? false;
       return {
         saleId: order.id,
         number: order.number,
@@ -523,8 +642,49 @@ export function kdsQueue(
         late: isTicketLate(minutes),
         itemCount: order.items.reduce((sum, item) => sum + item.quantity, 0),
         items: [...order.items],
+        settled,
+        paidLabel: settled ? (order.paidLabel ?? null) : null,
       };
     });
+}
+
+/**
+ * Bentuk penjualan yang menentukan apakah ia sedang menunggu di dapur. Dipakai
+ * server **dan** store demo supaya daftar tiketnya tidak pernah berbeda.
+ */
+export interface KitchenSaleRef {
+  status: "completed" | "held" | "void";
+  /** Momen penjualan lunas ini dikirim ke dapur (`createSale` yang mengisinya). */
+  kitchenFiredAt?: number | null;
+  /** Momen dapur menyatakan pesanannya beres. */
+  kitchenDoneAt?: number | null;
+}
+
+/**
+ * Sedang menunggu di dapur? Dua sumbernya: pesanan tertahan, dan penjualan lunas
+ * yang sudah dikirim ke dapur tetapi belum ditandai selesai oleh dapur. Penjualan
+ * yang dibatalkan (`void`) tidak pernah muncul lagi di antrean.
+ */
+export function isKitchenTicket(sale: KitchenSaleRef): boolean {
+  if (sale.status === "held") return true;
+  if (sale.status !== "completed") return false;
+  return Boolean(sale.kitchenFiredAt) && !sale.kitchenDoneAt;
+}
+
+/**
+ * Apakah penjualan yang baru tersimpan langsung dikirim ke dapur?
+ *
+ * Hanya alur F&B: penjualan biasa tidak punya dapur yang perlu diberi tahu, dan
+ * layar dapur sendiri hanya ada kalau fitur `pos.kds` hidup di paket workspace
+ * itu — jadi menyalakannya bukan keputusan per transaksi, melainkan setelan
+ * workspace. Pesanan tertahan tidak lewat sini karena ia **sudah** tiket dapur
+ * sejak pertama disimpan.
+ */
+export function fireKitchenOnSale(input: {
+  kdsFeatureOn: boolean;
+  status: "completed" | "held";
+}): boolean {
+  return input.kdsFeatureOn && input.status === "completed";
 }
 
 /**
@@ -577,6 +737,41 @@ export function clockOfDay(timestamp: number): string {
 
 /** Awalan penanda momen pelunasan di kartu tiket dapur. */
 export const TICKET_RECEIVED_PREFIX = "diterima dapur pukul";
+
+/** Nama metode pembayaran backend dalam Bahasa Indonesia (`cash` → "Tunai"). */
+export const PAYMENT_METHOD_LABELS: Record<string, string> = {
+  cash: "Tunai",
+  qris: "QRIS",
+  card: "Kartu",
+  transfer: "Transfer",
+};
+
+export function paymentMethodLabel(method: string): string {
+  return PAYMENT_METHOD_LABELS[method] ?? method;
+}
+
+/** Pembayaran penjualan lunas, seperlunya untuk penanda di kartu tiket dapur. */
+export interface TicketSettlement {
+  /** `cash` | `qris` | `card` | `transfer`. */
+  method: string;
+  /** Momen penjualan itu dikirim ke dapur (`kitchenFiredAt`). */
+  firedAt?: number | null;
+}
+
+/**
+ * Penanda pembayaran tiket dapur yang **lunas di kasir**: `Lunas Tunai ·
+ * diterima dapur pukul 13:42`. `null` = bukan tiket penjualan lunas (pesanan
+ * tertahan belum dibayar siapa pun, jadi tidak ada yang bisa ditandai).
+ */
+export function ticketPaidLabel(
+  payment: TicketSettlement | null | undefined,
+): string | null {
+  if (!payment) return null;
+  const channel = `Lunas ${paymentMethodLabel(payment.method)}`;
+  return payment.firedAt
+    ? `${channel} · ${TICKET_RECEIVED_PREFIX} ${clockOfDay(payment.firedAt)}`
+    : channel;
+}
 
 /**
  * Penanda kanal & momen pelunasan sebuah tiket dapur: `Lunas QRIS dari meja ·

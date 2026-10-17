@@ -58,6 +58,12 @@ import type {
   ThreewaySummary,
 } from "@/lib/threeway";
 import type { ProductDeletionCheck, ProductUsage } from "@/lib/productEdit";
+import type {
+  ShiftLocalClock,
+  ShiftOwnerAlertKind,
+  ShiftOwnerAlertReason,
+  ShiftSetting,
+} from "@/lib/shift";
 import type { ReceiptSetting } from "@/lib/struk";
 import type { TaxSetting } from "@/lib/tax";
 import type { StoreModules } from "./modules";
@@ -627,6 +633,14 @@ export interface StoreKdsTicket {
   late: boolean;
   itemCount: number;
   items: { name: string; quantity: number; modifiers?: string[] }[];
+  /**
+   * Tiket yang penjualannya **sudah lunas** (dikirim ke dapur pada momen
+   * pembayarannya). Tombol Selesai pada tiket begini hanya menandai antreannya
+   * beres — stoknya sudah bergerak saat penjualannya dicatat.
+   */
+  settled: boolean;
+  /** Penanda pembayarannya, mis. `Lunas Tunai · diterima dapur pukul 13:42`. */
+  paidLabel: string | null;
 }
 
 /**
@@ -693,6 +707,127 @@ export interface UpdatedReceipt {
   changed: boolean;
   setting: ReceiptSetting;
   sentence: string;
+}
+
+/**
+ * Masukan setelan pengingat tutup shift dari halaman Pengaturan — satu setelan
+ * utuh (saklar, jam pengingat, ambang shift lama), bukan sepotong-sepotong,
+ * supaya server bisa menolak gabungan yang tidak masuk akal sebelum satu bidang
+ * pun tersimpan.
+ */
+export type UpdateShiftInput = ShiftSetting;
+
+/** Hasil menulis setelan pengingat tutup shift: yang tersimpan + kalimatnya. */
+export interface UpdatedShift {
+  changed: boolean;
+  setting: ShiftSetting;
+  sentence: string;
+}
+
+/**
+ * Shift kas yang **sedang berjalan untuk toko ini** — bukan untuk perangkat yang
+ * sedang dipakai.
+ *
+ * Bedanya penting: kas dibuka pemilik di ponselnya, lalu kasir melayani pembeli
+ * dari ponsel lain. Kalau keadaannya hanya hidup di perangkat yang membukanya,
+ * kasir itu melihat “Kas belum dibuka” dan tidak bisa menjual walau kas tokonya
+ * jelas terbuka. Karena itu keadaannya dibaca dari tabel `shifts` di server
+ * (`pos.till`), dan semua perangkat melihat kas yang sama.
+ */
+export interface StoreTillShift {
+  id: string;
+  /** Waktu buka dalam milidetik (epoch), sama seperti `shifts.openedAt`. */
+  openedAt: number;
+  openingCash: number;
+}
+
+/** Satu Z-report yang sudah ditutup, untuk tabel riwayat di halaman Shift & Kas. */
+export interface StoreTillHistoryRow {
+  id: string;
+  openedAt: number;
+  closedAt: number;
+  openingCash: number;
+  /** Uang yang dihitung kasir saat menutup kas. */
+  countedCash: number;
+  /** Kas awal + penjualan tunai shift itu. */
+  expectedCash: number;
+  /** `countedCash - expectedCash`; positif = lebih. */
+  variance: number;
+}
+
+/** Keadaan kas toko: shift yang berjalan + riwayat penutupannya. */
+export interface StoreTill {
+  current: StoreTillShift | null;
+  history: StoreTillHistoryRow[];
+}
+
+/**
+ * Keadaan kas yang dilaporkan perangkat ke server untuk dikabarkan ke pemilik
+ * toko. Yang dikirim **keadaannya**, bukan kalimatnya: jenis dan jam lokal
+ * diperiksa ulang server dengan aturan yang sama (`shiftOwnerAlert`), jadi
+ * laporan yang tidak cocok dengan jam operasionalnya ditolak — bukan diteruskan
+ * menjadi pemberitahuan palsu.
+ */
+export interface ShiftAlertReportInput {
+  kind: ShiftOwnerAlertKind;
+  /** Jam lokal perangkat saat ini (`shiftLocalClock`). */
+  clock: ShiftLocalClock;
+  /** Waktu buka shift yang masih terbuka; kosong = tidak ada shift. */
+  openedAt?: number;
+}
+
+/** Jawaban server atas satu laporan: terkirim / tidak perlu / sudah pernah. */
+export interface ShiftAlertReportResult {
+  /** `true` kalau kabarnya benar-benar tercatat (dan dikirim ke pelanggan webhook). */
+  recorded: boolean;
+  /** `true` kalau hari itu kabar yang sama sudah pernah dikirim. */
+  duplicate: boolean;
+  alertId: string | null;
+  kind: ShiftOwnerAlertKind | null;
+  /** Alasan aturannya, mis. `opening-grace` atau `after-close`. */
+  reason: ShiftOwnerAlertReason | null;
+  dayKey: string | null;
+  /** Jumlah endpoint webhook yang ikut dikirimi (0 = belum ada pelanggan). */
+  notifiedEndpoints: number;
+  /** Alamat email pemilik toko yang kabarnya dijadwalkan ke sana. */
+  emailRecipients: string[];
+  /** Kalimat siap-baca untuk kasir — apa yang terjadi dengan laporannya. */
+  notice: string;
+}
+
+/**
+ * Satu kabar shift yang **sudah dikirim ke pemilik toko** (`shiftAlerts`), seperti
+ * yang dibaca halaman Shift & Kas.
+ *
+ * Kabarnya pergi lewat dua jalur dan keduanya dibaca dari baris yang sama:
+ * **email** ke pemilik workspace (`emailRecipients`, hasilnya di `emailVia` /
+ * `emailDeliveredAt` / `emailError`) dan **langganan webhook** workspace
+ * (`notifiedEndpoints`). Jadi “pemilik sudah dikabari” bisa diperiksa ulang — dan
+ * saat emailnya belum berangkat atau webhooknya belum ada pelanggan, halaman
+ * mengatakannya apa adanya, bukan mengaku sudah sampai.
+ */
+export interface StoreShiftAlert {
+  id: string;
+  kind: ShiftOwnerAlertKind;
+  reason: string;
+  /** Hari kalender lokal perangkat, `YYYY-MM-DD`. */
+  dayKey: string;
+  title: string;
+  message: string;
+  /** Jam lokal perangkat saat laporan dibuat (`08:15`). */
+  localClock: string;
+  openedAt: number | null;
+  notifiedEndpoints: number;
+  /** Alamat email pemilik toko yang dikabari (kosong = belum ada alamatnya). */
+  emailRecipients: string[];
+  /** Saluran yang dipakai untuk email itu (`resend`, `uji`, `demo`). */
+  emailVia: string | null;
+  /** Waktu email benar-benar berangkat; kosong = belum/gagal. */
+  emailDeliveredAt: number | null;
+  /** Pesan kegagalan pengiriman email terakhir, kalau ada. */
+  emailError: string | null;
+  reportedAt: number;
+  resolvedAt: number | null;
 }
 
 /**
@@ -792,6 +927,13 @@ export interface CreateSaleResult {
   queued: boolean;
   /** Bagian diskon yang berasal dari member, kalau ada. */
   memberDiscount?: number;
+  /**
+   * Penjualan ini langsung masuk antrean dapur pada momen pembayarannya (modul
+   * F&B dengan fitur `pos.kds` hidup). Kosong untuk workspace tanpa dapur, dan
+   * kosong juga saat penjualannya masih menunggu sinkronisasi — tiketnya baru
+   * lahir saat server menyimpannya.
+   */
+  kitchenFired?: boolean;
 }
 
 /** Member pelanggan & diskon tetapnya (modul UMKM, `member.discount`). */
@@ -1334,6 +1476,30 @@ export interface StoreCustomRole {
   memberCount: number;
 }
 
+/**
+ * Satu **peran bawaan** yang bisa diatur workspace (izin, status, dihapus).
+ *
+ * Nama perannya tidak di sini karena tidak bisa diubah: `label` datang dari
+ * `ROLE_LABELS` supaya struk, sidebar, dan audit tetap memakai nama yang sama di
+ * semua workspace.
+ */
+export interface StoreBuiltinRole {
+  role: Role;
+  label: string;
+  /** Izin yang benar-benar berlaku (sudah termasuk penyesuaian workspace). */
+  permissions: Permission[];
+  /** Izin bawaan peran ini, untuk tombol “Kembalikan izin bawaan”. */
+  basePermissions: Permission[];
+  /** `false` = tidak bisa ditugaskan lagi ke anggota baru. */
+  active: boolean;
+  /** `true` = dihapus dari daftar penugasan (bisa dipulihkan). */
+  removed: boolean;
+  /** Izinnya memang disesuaikan workspace ini (bukan bawaan). */
+  customized: boolean;
+  /** Keanggotaan (termasuk yang nonaktif) yang memakai peran ini. */
+  memberCount: number;
+}
+
 /** Ringkasan daftar peran kustom untuk kartu di halaman Tim & Peran. */
 export interface StoreRoleSummary {
   total: number;
@@ -1342,7 +1508,27 @@ export interface StoreRoleSummary {
   limit: number;
   /** Batas jumlah peran belum tercapai. */
   canCreate: boolean;
+  /** Ringkasan peran bawaan: berapa yang disesuaikan/dinonaktifkan/dihapus. */
+  builtin: StoreBuiltinRoleSummary;
 }
+
+/** Ringkasan pengaturan peran bawaan workspace ini. */
+export interface StoreBuiltinRoleSummary {
+  total: number;
+  customized: number;
+  disabled: number;
+  removed: number;
+  /** Peran bawaan yang masih bisa ditugaskan. */
+  assignable: number;
+}
+
+export const EMPTY_BUILTIN_ROLE_SUMMARY: StoreBuiltinRoleSummary = {
+  total: 0,
+  customized: 0,
+  disabled: 0,
+  removed: 0,
+  assignable: 0,
+};
 
 export const EMPTY_ROLE_SUMMARY: StoreRoleSummary = {
   total: 0,
@@ -1350,6 +1536,7 @@ export const EMPTY_ROLE_SUMMARY: StoreRoleSummary = {
   assignedMembers: 0,
   limit: 0,
   canCreate: true,
+  builtin: EMPTY_BUILTIN_ROLE_SUMMARY,
 };
 
 /** Satu anggota tim beserta izin efektifnya (`rbac.custom`, Phase 4). */
@@ -1358,8 +1545,11 @@ export interface StoreTeamMember {
   userId: string;
   name: string;
   email: string;
-  /** Peran bawaan; tetap berlaku kalau peran kustomnya dilepas. */
-  role: Role;
+  /**
+   * Peran **bawaan** anggota ini; `null` = ia memakai peran tambahan dan peran
+   * tambahan itu berdiri sendiri (tidak ada peran dasar yang tersimpan).
+   */
+  role: Role | null;
   customRoleId: string | null;
   customRoleName: string | null;
   /** Izin efektif: dari peran kustom kalau ada, kalau tidak dari peran bawaan. */
@@ -1385,7 +1575,11 @@ export interface UpdateTeamMemberInput {
   membershipId: string;
   name?: string;
   email?: string;
-  role?: Role;
+  /**
+   * Peran bawaan yang baru. `null` melepas peran bawaan (anggota hanya memakai
+   * peran tambahan); `undefined` tidak mengubah peran.
+   */
+  role?: Role | null;
   /** Kosong/`null` menghapus nomor WhatsApp. */
   phone?: string | null;
   active?: boolean;
@@ -1406,7 +1600,21 @@ export interface InviteTeamMemberInput {
   name?: string;
   /** Nomor WhatsApp opsional; kalau diisi, undangan `wa.me` bisa langsung dikirim. */
   phone?: string;
-  role: Role;
+  /**
+   * Peran **bawaan** anggota baru. Wajib kecuali `customRoleId` diisi — peran
+   * tambahan berdiri sendiri, jadi anggotanya tidak punya peran dasar apa pun.
+   */
+  role?: Role | null;
+  /**
+   * Peran tambahan yang **langsung dipakai** anggota ini saat didaftarkan —
+   * pilihan yang dulu baru bisa ditetapkan sesudah orangnya masuk tim.
+   *
+   * Kalau diisi, anggota itu **hanya** memakai peran ini (`role` tidak ditulis).
+   * Penugasannya butuh fitur `rbac.custom` dan melewati pagar eskalasi yang sama
+   * dengan `roles.assign`: peran yang memuat izin di luar wewenang pengundang
+   * ditolak, dan pemilik tenant tidak boleh diberi peran tambahan.
+   */
+  customRoleId?: string | null;
 }
 
 /** Hasil satu undangan: keanggotaan mana, dan apakah baru dibuat atau diperbarui. */
@@ -1414,7 +1622,8 @@ export interface InvitedTeamMember {
   membershipId: string;
   userId: string;
   email: string;
-  role: Role;
+  /** `null` = anggota itu hanya memakai peran tambahan (berdiri sendiri). */
+  role: Role | null;
   /** `true` = anggota baru; `false` = email itu sudah anggota dan perannya diperbarui. */
   created: boolean;
   /**
@@ -1438,7 +1647,8 @@ export interface StoreApiKey {
   mask: string;
   publicId: string;
   scopes: Permission[];
-  creatorRole: Role;
+  /** `null` = kunci dibuat anggota yang memakai peran tambahan (tanpa peran bawaan). */
+  creatorRole: Role | null;
   status: "active" | "revoked" | "expired" | "disabled";
   expiresAt: number | null;
   lastUsedAt: number | null;
@@ -1539,6 +1749,18 @@ export interface UpdateCustomRoleInput {
   roleId: string;
   name?: string;
   description?: string;
+  permissions?: Permission[];
+  active?: boolean;
+}
+
+/**
+ * Mengubah izin dan/atau status satu **peran bawaan**.
+ *
+ * `permissions` yang diisi berarti “izin pengganti” (butuh fitur `rbac.custom`);
+ * `active` boleh diubah tanpa fitur — menonaktifkan peran justru mencabut akses.
+ */
+export interface UpdateBuiltinRoleInput {
+  role: Role;
   permissions?: Permission[];
   active?: boolean;
 }
@@ -1866,6 +2088,17 @@ export interface StoreApi {
    * pemulihan tidak pernah berjalan (`false`).
    */
   workspacePending: boolean;
+  /**
+   * Membatalkan pendaftaran akun yang baru dibuat: **email yang dipakai mendaftar
+   * dihapus** dari server (baris `users` beserta jejak masuknya), lalu pemanggil
+   * keluar dari sesi dan kembali ke beranda.
+   *
+   * Server menolak kalau akun sudah punya workspace atau berperan platform (lihat
+   * `@/lib/account`), jadi halaman hanya perlu menampilkan penolakannya apa adanya.
+   * Mode demo tidak punya akun di server: yang dikembalikan hanya email sesi, dan
+   * data demo di perangkat ini tetap ada.
+   */
+  cancelRegistration(): Promise<{ email: string; sentence: string }>;
   error: string | null;
   products: StoreProduct[];
   /**
@@ -1934,6 +2167,60 @@ export interface StoreApi {
   receipt: ReceiptSetting;
   /** Menyimpan setelan struk; aturannya sama dengan `tenants.updateReceipt`. */
   setReceipt(input: UpdateReceiptInput): Promise<UpdatedReceipt>;
+  /**
+   * Setelan pengingat tutup shift workspace: jam pengingatnya, ambang “shift
+   * sudah terlalu lama”, dan saklar hidup/matinya.
+   *
+   * Halaman Kasir (banner di atas katalog produk) dan halaman Shift & Kas (kartu
+   * pengingat) membaca setelan yang sama, jadi pengingat yang dilihat kasir tidak
+   * pernah berbeda dari yang diatur pemilik toko. Workspace yang belum pernah
+   * mengaturnya dibaca sebagai bawaan (aktif, 21:00, 14 jam), yaitu perilaku
+   * sebelum setelan ini ada.
+   */
+  shift: ShiftSetting;
+  /** Menyimpan setelan pengingat; aturannya sama dengan `tenants.updateShift`. */
+  setShift(input: UpdateShiftInput): Promise<UpdatedShift>;
+  /**
+   * Kabar shift yang sudah pernah dikirim ke pemilik toko (kas belum dibuka di
+   * jam operasional / shift belum ditutup), terbaru dulu.
+   *
+   * Isinya sama dengan yang dibaca halaman Shift & Kas dari `shiftAlerts.list`:
+   * “pemilik sudah diberi tahu” harus bisa diperiksa ulang, bukan cuma klaim di
+   * layar kasir. Di mode demo daftarnya hidup di memori sesi, karena tidak ada
+   * tabel yang menyimpannya.
+   */
+  shiftAlerts: StoreShiftAlert[];
+  /**
+   * Melaporkan keadaan kas perangkat ini supaya pemilik toko diberi tahu kalau
+   * memang perlu (`shiftAlerts.report`). Server memutuskan ulang dengan aturan
+   * yang sama, jadi balikannya selalu menjelaskan: terkirim, tidak perlu, atau
+   * hari itu sudah pernah.
+   */
+  reportShiftAlert(input: ShiftAlertReportInput): Promise<ShiftAlertReportResult>;
+  /** Menandai satu kabar sudah ditangani (`shiftAlerts.resolve`). */
+  resolveShiftAlert(alertId: string): Promise<void>;
+  /**
+   * Keadaan kas **toko** (bukan perangkat): shift yang berjalan + riwayat
+   * Z-report-nya. Di mode Convex isinya dibaca dari tabel `shifts` lewat
+   * `pos.till`; di mode demo dari penyimpanan perangkat yang sama dengan yang
+   * dibaca halaman Kasir.
+   *
+   * Halaman Kasir memakainya sebagai gerbangnya: kas yang dibuka pemilik di
+   * perangkat lain membuka kasir di semua perangkat, dan kasir yang menjual tidak
+   * perlu memegang izin `shift.manage` untuk itu.
+   */
+  till: StoreTill;
+  /**
+   * Membuka kas toko (`pos.openShift`) — kas awal adalah uang kembalian di laci.
+   * Butuh izin `shift.manage`; server menolak shift kedua untuk kasir yang sama.
+   */
+  openTill(input: { openingCash: number }): Promise<void>;
+  /**
+   * Menutup kas toko (`pos.closeShift`): uang fisik yang dihitung dibandingkan
+   * dengan kas awal + penjualan tunai, lalu selisihnya disimpan sebagai Z-report.
+   * Butuh izin `shift.manage`.
+   */
+  closeTill(input: { countedCash: number }): Promise<void>;
   /**
    * Logo toko (`tenants.logo`) yang tercetak di atas nama usaha pada setiap struk;
    * `null` = workspace itu belum punya logo, dan struknya dicetak seperti sebelum
@@ -2093,6 +2380,13 @@ export interface StoreApi {
   holdSale(input: HoldSaleInput): Promise<{ number: string | null; total: number }>;
   /** Selesaikan pesanan tertahan: stok bergerak dan mejanya kosong lagi. */
   completeHeld(saleId: string): Promise<void>;
+  /**
+   * Tombol **Selesai** di layar dapur, satu jalan untuk kedua jenis tiket: pesanan
+   * tertahan diselesaikan (stok bergerak), sedangkan tiket yang sudah lunas hanya
+   * ditandai beres. Mana yang berlaku ditentukan server dari data penjualannya,
+   * bukan dari tombol yang ditekan — jadi stok tidak pernah bergerak dua kali.
+   */
+  finishKitchenTicket(saleId: string): Promise<void>;
   /**
    * Menyimpan harga dasar + konfigurasi grosir (harga bertingkat, konversi
    * satuan). Divalidasi ulang di server dan butuh modul Grosir aktif.
@@ -2297,6 +2591,12 @@ export interface StoreApi {
    * `team.manage`, bukan error.
    */
   customRoles: StoreCustomRole[];
+  /**
+   * Peran bawaan beserta penyesuaiannya (`roleSettings`) — selalu berisi kelima
+   * peran, termasuk yang dinonaktifkan/dihapus, karena halaman harus bisa
+   * mengaktifkan & memulihkannya kembali.
+   */
+  builtinRoles: StoreBuiltinRole[];
   roleSummary: StoreRoleSummary;
   teamMembers: StoreTeamMember[];
   /**
@@ -2337,6 +2637,16 @@ export interface StoreApi {
   deleteCustomRole(roleId: string): Promise<void>;
   /** Menugaskan peran kustom; `null` mengembalikan anggota ke peran bawaannya. */
   assignCustomRole(membershipId: string, roleId: string | null): Promise<void>;
+  /** Menyunting izin dan/atau menonaktifkan sebuah peran bawaan. */
+  updateBuiltinRole(
+    input: UpdateBuiltinRoleInput,
+  ): Promise<{ role: Role; permissions: Permission[]; active: boolean }>;
+  /** Menghapus peran bawaan dari daftar penugasan; ditolak kalau masih dipakai. */
+  deleteBuiltinRole(role: Role): Promise<void>;
+  /** Memulihkan peran bawaan yang dihapus (izin & statusnya tetap). */
+  restoreBuiltinRole(role: Role): Promise<void>;
+  /** Mengembalikan izin bawaan sebuah peran (membatalkan penyesuaian izinnya). */
+  resetBuiltinRole(role: Role): Promise<void>;
   /**
    * Akses API & webhook (`api.access`, Phase 4): kunci API tenant beserta
    * endpoint webhook dan riwayat kirimannya. Selalu berbentuk daftar kosong

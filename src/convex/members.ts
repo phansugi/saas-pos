@@ -2,19 +2,24 @@ import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import {
   internalMutation,
+  internalQuery,
   mutation,
   query,
   type MutationCtx,
 } from "./_generated/server";
-import type { Id } from "./_generated/dataModel";
-import type { Role } from "./lib/authz";
+import type { Doc, Id } from "./_generated/dataModel";
+import type { Permission, Role } from "./lib/authz";
 import {
   getTenantOrThrow,
+  requireFeature,
   requirePermission,
+  resolveMembershipPermissions,
   writeAuditLog,
 } from "./lib/access";
+import { assignmentError, lackingFromPermissions } from "./lib/rbac";
 import { membershipAssignmentError } from "./lib/platform";
 import {
+  legacyRoleCleanupDecision,
   normalizePhone,
   validateTeamInvite,
   validateTeamMemberEdit,
@@ -31,6 +36,23 @@ import { roleValidator } from "./schema";
  * only exist because an owner or manager invited them.
  */
 
+/**
+ * Penyesuaian peran bawaan workspace ini — dibaca sekali per permintaan supaya
+ * undangan & perubahan anggota memakai aturan yang sama dengan halaman.
+ *
+ * Hanya peran bawaan yang **tersimpan** di `roleSettings`; peran yang belum
+ * pernah diatur tidak punya baris dan berarti bawaan (aktif, izin bawaan).
+ */
+async function roleSettingsOf(
+  ctx: MutationCtx,
+  tenantId: Id<"tenants">,
+): Promise<Doc<"roleSettings">[]> {
+  return ctx.db
+    .query("roleSettings")
+    .withIndex("by_tenant", (q) => q.eq("tenantId", tenantId))
+    .collect();
+}
+
 export const add = mutation({
   args: {
     tenantId: v.id("tenants"),
@@ -39,8 +61,19 @@ export const add = mutation({
     name: v.optional(v.string()),
     /** Nomor WhatsApp opsional untuk undangan lewat `wa.me`. */
     phone: v.optional(v.string()),
-    role: roleValidator,
+    /**
+     * Peran **bawaan**. Kosong hanya sah kalau `customRoleId` diisi — peran
+     * tambahan berdiri sendiri dan tidak menumpang peran bawaan tertentu.
+     */
+    role: v.optional(roleValidator),
     storeIds: v.optional(v.array(v.id("stores"))),
+    /*
+      Peran kustom yang **langsung dipakai** anggota ini saat didaftarkan.
+      Sebelumnya peran kustom hanya bisa ditugaskan setelah orangnya ada di tim
+      (kolom “Peran kustom” di daftar anggota) — itulah yang dikeluhkan pemilik
+      toko. `null` = lepas peran kustomnya, `undefined` = jangan diubah.
+    */
+    customRoleId: v.optional(v.union(v.null(), v.id("customRoles"))),
   },
   handler: async (ctx, args) => {
     // Inviting people is itself a privileged action.
@@ -53,10 +86,24 @@ export const add = mutation({
 
     // Email & pagar eskalasi memakai aturan murni yang sama dengan halaman
     // (`validateTeamInvite`): undangan hanya untuk email yang benar-benar bisa
-    // menerima kode masuk, dan hanya pemilik yang boleh mencetak pemilik kedua.
+    // menerima kode masuk, hanya pemilik yang boleh mencetak pemilik kedua, dan
+    // peran yang sudah dinonaktifkan/dihapus tidak ditawarkan lagi.
+    /*
+      Peran tambahan berdiri sendiri: kalau undangan membawa `customRoleId`, tidak
+      ada peran bawaan yang ikut ditulis, jadi status peran bawaan mana pun tidak
+      dipakai sebagai pagar — pagar sebenarnya adalah peran tambahannya (aktif,
+      fitur `rbac.custom`, tidak melebihi wewenang pengundang) yang diperiksa di
+      bawah.
+    */
     const invitation = validateTeamInvite(
-      { email: args.email, name: args.name, role: args.role },
-      { actingRole: actor.role },
+      { email: args.email, name: args.name, role: args.role ?? null },
+      {
+        actingRole: actor.role ?? null,
+        roleSettings: args.customRoleId
+          ? []
+          : await roleSettingsOf(ctx, args.tenantId),
+        standaloneCustomRole: Boolean(args.customRoleId),
+      },
     );
     if (!invitation.ok) throw new Error(invitation.reason);
     const { email, name } = invitation.value;
@@ -80,6 +127,54 @@ export const add = mutation({
         }
       }
     }
+
+    /*
+      Peran kustom (kalau dipilih) diperiksa **sebelum** keanggotaan ditulis:
+      fitur `rbac.custom` harus dimuat paketnya (membukanya berarti menambah
+      akses), perannya harus milik tenant ini & sedang aktif, dan pagar
+      eskalasinya memakai izin **efektif** pengundang — aturan yang sama persis
+      dengan `roles.assign`, karena menugaskan lewat undangan sama saja dengan
+      menugaskannya setelah orangnya masuk.
+    */
+    let customRoleId: Id<"customRoles"> | undefined;
+    if (args.customRoleId) {
+      const blockedAssignment = assignmentError(args.role ?? null);
+      if (blockedAssignment) throw new Error(blockedAssignment);
+
+      await requireFeature(ctx, args.tenantId, args.actorId, "rbac.custom");
+
+      const role = await ctx.db.get(args.customRoleId);
+      if (!role || role.tenantId !== args.tenantId) {
+        throw new Error("Peran kustom tidak ditemukan untuk tenant ini.");
+      }
+      if (!role.active) {
+        throw new Error(
+          `Peran "${role.name}" sedang nonaktif; aktifkan dulu sebelum ditugaskan.`,
+        );
+      }
+
+      const { permissions: actorPermissions } = await resolveMembershipPermissions(
+        ctx,
+        actor,
+      );
+      const lacking = lackingFromPermissions(
+        actorPermissions,
+        role.permissions as Permission[],
+      );
+      if (lacking.length > 0) {
+        throw new Error(
+          `Anda tidak bisa menugaskan peran yang punya izin di luar wewenang Anda (${lacking.join(", ")}).`,
+        );
+      }
+      customRoleId = role._id;
+    }
+
+    /*
+      Satu anggota = satu peran. Undangan dengan peran tambahan tidak menyimpan
+      peran bawaan sama sekali, jadi peran itu benar-benar berdiri sendiri;
+      undangan tanpa peran tambahan membawa peran bawaan seperti biasa.
+    */
+    const roleBawaan: Role | null = invitation.value.role ?? null;
 
     const existingUser = await ctx.db
       .query("users")
@@ -109,9 +204,26 @@ export const add = mutation({
       .unique();
 
     if (membership) {
-      // Re-adding someone is a role change / reactivation, not a duplicate row.
+      /*
+        Re-adding someone is a role change / reactivation, not a duplicate row.
+
+        Peran yang dikirim **menggantikan** peran lama seutuhnya — tidak ada dua
+        peran yang menumpuk di satu baris. Undangan yang **tidak** menyebut
+        peran tambahan sama sekali (`customRoleId` tidak dikirim) tidak menyentuh
+        penugasan yang sedang berlaku: anggota berperan tambahan tetap memakai
+        peran tambahannya, bukan diam-diam jatuh ke peran bawaan yang dikirim
+        formulir. Yang benar-benar melepas peran tambahan adalah `null` eksplisit.
+      */
+      const peranTambahanBerlaku: Id<"customRoles"> | null =
+        args.customRoleId === undefined
+          ? (membership.customRoleId ?? null)
+          : (customRoleId ?? null);
+      const roleBaris: Role | null =
+        peranTambahanBerlaku === null ? roleBawaan : null;
+
       await ctx.db.patch(membership._id, {
-        role: args.role,
+        role: roleBaris ?? undefined,
+        customRoleId: peranTambahanBerlaku ?? undefined,
         active: true,
         storeIds: args.storeIds ?? membership.storeIds,
         // Nomor yang dikirim menimpa; yang kosong membiarkan nomor lama.
@@ -123,9 +235,23 @@ export const add = mutation({
         action: "member.update",
         entity: "memberships",
         entityId: membership._id,
-        meta: { email, role: args.role },
+        meta: {
+          email,
+          role: roleBaris,
+          customRoleId: peranTambahanBerlaku,
+        },
       });
       return { userId, membershipId: membership._id, created: false };
+    }
+
+    /*
+      Keanggotaan baru: peran tambahan berdiri sendiri (`role` tidak ditulis),
+      peran bawaan wajib ada — `validateTeamInvite` sudah memastikannya, dan
+      pagar ini menahan bentuk data yang tidak sah sebelum barisnya dibuat.
+    */
+    const role: Role | null = customRoleId ? null : roleBawaan;
+    if (!role && !customRoleId) {
+      throw new Error("Pilih satu peran untuk anggota ini.");
     }
 
     const stores =
@@ -140,11 +266,12 @@ export const add = mutation({
     const membershipId = await ctx.db.insert("memberships", {
       tenantId: args.tenantId,
       userId,
-      role: args.role,
+      role: role ?? undefined,
       storeIds: stores,
       active: true,
       createdAt: Date.now(),
       phone,
+      customRoleId,
     });
 
     // Undangan lewat email dijadwalkan untuk anggota **baru**: mutation tidak
@@ -156,7 +283,8 @@ export const add = mutation({
       tenantId: args.tenantId,
       email,
       name,
-      role: args.role,
+      role,
+      customRoleName: await customRoleNameOf(ctx, args.tenantId, customRoleId),
       invitedByName: await actorName(ctx, args.actorId),
     });
 
@@ -166,7 +294,7 @@ export const add = mutation({
       action: "member.add",
       entity: "memberships",
       entityId: membershipId,
-      meta: { email, role: args.role },
+      meta: { email, role, customRoleId: customRoleId ?? null },
     });
 
     return { userId, membershipId, created: true };
@@ -200,7 +328,12 @@ export const resendInvite = mutation({
       tenantId: args.tenantId,
       email: user.email,
       name: user.name,
-      role: membership.role,
+      role: membership.role ?? null,
+      customRoleName: await customRoleNameOf(
+        ctx,
+        args.tenantId,
+        membership.customRoleId,
+      ),
       invitedByName: await actorName(ctx, args.actorId),
     });
 
@@ -283,8 +416,11 @@ async function scheduleInviteEmail(
     tenantId: Id<"tenants">;
     email: string;
     name?: string;
-    role: Role;
+    /** `null` = anggota itu hanya memakai peran tambahan (berdiri sendiri). */
+    role: Role | null;
     invitedByName: string;
+    /** Nama peran kustom yang dipakai anggota ini, kalau ada. */
+    customRoleName?: string;
   },
 ): Promise<void> {
   const tenant = await getTenantOrThrow(ctx, input.tenantId);
@@ -292,10 +428,28 @@ async function scheduleInviteEmail(
     membershipId: input.membershipId,
     email: input.email,
     name: input.name,
-    role: input.role,
+    role: input.role ?? undefined,
+    customRoleName: input.customRoleName,
     workspace: tenant.name,
     invitedBy: input.invitedByName,
   });
+}
+
+/**
+ * Nama peran kustom sebuah keanggotaan — untuk undangan (email) dan audit.
+ *
+ * Dibaca dari id-nya, bukan dari salinan di keanggotaan: nama peran bisa diubah
+ * pemilik toko, dan undangan harus menyebut nama yang berlaku sekarang.
+ */
+async function customRoleNameOf(
+  ctx: MutationCtx,
+  tenantId: Id<"tenants">,
+  customRoleId: Id<"customRoles"> | undefined,
+): Promise<string | undefined> {
+  if (!customRoleId) return undefined;
+  const role = await ctx.db.get(customRoleId);
+  if (!role || role.tenantId !== tenantId) return undefined;
+  return role.name;
 }
 
 /**
@@ -369,7 +523,7 @@ export const update = mutation({
         membershipId: membership._id,
         name: user.name,
         email: user.email,
-        role: membership.role,
+        role: membership.role ?? null,
         phone: membership.phone ?? null,
         active: membership.active,
       },
@@ -381,10 +535,11 @@ export const update = mutation({
         active: args.active,
       },
       {
-        actingRole: actor.role,
+        actingRole: actor.role ?? null,
         actorMembershipId: actor._id,
         activeOwners: await countActiveOwners(ctx, args.tenantId),
         otherEmails: await otherMemberEmails(ctx, args.tenantId, membership.userId),
+        roleSettings: await roleSettingsOf(ctx, args.tenantId),
       },
     );
     if (!decision.ok) throw new Error(decision.reason);
@@ -403,11 +558,26 @@ export const update = mutation({
       });
     }
 
+    /*
+      Peran Pemilik selalu memegang seluruh izin, jadi peran tambahan yang masih
+      menempel dilepas saat seseorang diangkat menjadi pemilik. Tanpa ini, pemilik
+      itu akan memakai izin peran tambahannya — termasuk kehilangan
+      `billing.manage` — dan tenant bisa terkunci dari langganannya sendiri.
+    */
+    /*
+      Satu anggota = satu peran. Begitu peran bawaan dikirim secara eksplisit,
+      peran tambahan yang menempel dilepas — tanpa ini anggota akan menyimpan dua
+      peran sekaligus dan peran barunya terasa “menumpang” peran lama.
+    */
+    const lepasPeranTambahan =
+      args.role !== undefined && membership.customRoleId !== undefined;
+
     await ctx.db.patch(membership._id, {
-      role: decision.value.role,
+      role: decision.value.role ?? undefined,
       active: decision.value.active,
       // Nomor kosong berarti dihapus, bukan disimpan sebagai string kosong.
       phone: decision.value.phone ?? undefined,
+      ...(lepasPeranTambahan ? { customRoleId: undefined } : {}),
     });
 
     await writeAuditLog(ctx, {
@@ -421,6 +591,7 @@ export const update = mutation({
         changed: decision.changed,
         role: decision.value.role,
         active: decision.value.active,
+        customRoleId: lepasPeranTambahan ? null : undefined,
       },
     });
 
@@ -462,11 +633,11 @@ export const remove = mutation({
     const decision = validateTeamMemberRemoval(
       {
         membershipId: membership._id,
-        role: membership.role,
+        role: membership.role ?? null,
         active: membership.active,
       },
       {
-        actingRole: actor.role,
+        actingRole: actor.role ?? null,
         actorMembershipId: actor._id,
         activeOwners: await countActiveOwners(ctx, args.tenantId),
       },
@@ -533,6 +704,182 @@ export const recordWaInvite = mutation({
     });
 
     return { recorded: true as const };
+  },
+});
+
+/**
+ * Merapikan baris keanggotaan **lama** yang masih menyimpan peran bawaan bersama
+ * peran tambahannya.
+ *
+ * Baris seperti itu ditulis sebelum 2026-10-17, waktu peran tambahan masih
+ * “menumpang” peran bawaan (`cashier` sebagai peran dasar tersembunyi). Sejak
+ * aturan “satu anggota = satu peran” berlaku, tidak ada jalur tulis yang
+ * menghasilkannya lagi — tetapi baris yang sudah ada di database tidak berubah
+ * sendiri, jadi perlu dirapikan sekali di sini.
+ *
+ * Sifatnya:
+ *  - **tidak mencabut akses** — yang dilepas selalu peran yang **tidak berlaku**
+ *    sekarang, mengikuti `legacyRoleCleanupDecision`;
+ *  - **idempoten** — baris yang sudah hanya punya satu peran dilewati, jadi aman
+ *    dijalankan berkali-kali;
+ *  - **bertahap** — satu panggilan membaca `batchSize` baris, lalu menjadwalkan
+ *    batch berikutnya sampai habis (batas baca/tulis satu transaksi Convex tidak
+ *    pernah tersentuh walaupun anggotanya ribuan);
+ *  - **bisa diuji tanpa menulis** — `dryRun` hanya melaporkan keputusannya.
+ *
+ * Jalankan dari terminal deployment:
+ *
+ *   bunx convex run members:cleanupLegacyRoles '{"dryRun":true}'   # lihat dulu
+ *   bunx convex run members:cleanupLegacyRoles                     # rapikan
+ */
+export const cleanupLegacyRoles = internalMutation({
+  args: {
+    /** Kursor batch sebelumnya; kosongkan untuk mulai dari awal. */
+    cursor: v.optional(v.union(v.null(), v.string())),
+    /** Jumlah baris per batch (1–200, bawaan 100). */
+    batchSize: v.optional(v.number()),
+    /** Hanya laporkan, jangan menulis apa pun. */
+    dryRun: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const dryRun = args.dryRun === true;
+    const batchSize = Math.min(
+      Math.max(Math.trunc(args.batchSize ?? 100), 1),
+      200,
+    );
+
+    const page = await ctx.db.query("memberships").paginate({
+      numItems: batchSize,
+      cursor: args.cursor ?? null,
+    });
+
+    const rows: {
+      membershipId: Id<"memberships">;
+      tenantId: Id<"tenants">;
+      role: Role;
+      customRoleId: Id<"customRoles">;
+      action: "drop-base-role" | "drop-custom-role";
+      reason: string;
+    }[] = [];
+    let droppedBaseRole = 0;
+    let droppedCustomRole = 0;
+    let skipped = 0;
+
+    for (const membership of page.page) {
+      const customRole = membership.customRoleId
+        ? await ctx.db.get(membership.customRoleId)
+        : null;
+      const decision = legacyRoleCleanupDecision({
+        role: membership.role ?? null,
+        customRoleId: membership.customRoleId ?? null,
+        tenantId: membership.tenantId,
+        customRole,
+      });
+
+      if (decision.action === "none") {
+        skipped += 1;
+        continue;
+      }
+
+      // Baris ini pasti punya kedua peran; `legacyRoleCleanupDecision` hanya
+      // memutuskan melepas yang mana.
+      const role = membership.role as Role;
+      const customRoleId = membership.customRoleId as Id<"customRoles">;
+
+      if (!dryRun) {
+        await ctx.db.patch(
+          membership._id,
+          decision.action === "drop-base-role"
+            ? { role: undefined }
+            : { customRoleId: undefined },
+        );
+      }
+
+      if (decision.action === "drop-base-role") droppedBaseRole += 1;
+      else droppedCustomRole += 1;
+
+      rows.push({
+        membershipId: membership._id,
+        tenantId: membership.tenantId,
+        role,
+        customRoleId,
+        action: decision.action,
+        reason: decision.reason,
+      });
+    }
+
+    if (!dryRun && !page.isDone) {
+      await ctx.scheduler.runAfter(0, internal.members.cleanupLegacyRoles, {
+        cursor: page.continueCursor,
+        batchSize,
+      });
+    }
+
+    return {
+      dryRun,
+      scanned: page.page.length,
+      cleaned: rows.length,
+      droppedBaseRole,
+      droppedCustomRole,
+      skipped,
+      done: page.isDone,
+      rows,
+    };
+  },
+});
+
+/**
+ * Laporan baca-saja: baris keanggotaan mana yang **masih** menyimpan peran
+ * bawaan bersama peran tambahannya, beserta keputusan pembersihannya.
+ *
+ * Dipakai untuk memastikan pembersihan benar-benar habis (`legacyCount: 0`) dan
+ * untuk melihat keputusan `dryRun` per baris tanpa menulis apa pun.
+ */
+export const legacyRoleReport = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    // Batas baca satu query Convex 4096 dokumen; jumlah anggota satu deployment
+    // jauh di bawahnya. `truncated` tetap dilaporkan apa adanya kalau tidak.
+    const memberships = await ctx.db.query("memberships").take(4096);
+
+    const rows: {
+      membershipId: Id<"memberships">;
+      tenantId: Id<"tenants">;
+      role: Role;
+      customRoleId: Id<"customRoles">;
+      customRoleName: string | null;
+      action: "none" | "drop-base-role" | "drop-custom-role";
+      reason: string;
+    }[] = [];
+
+    for (const membership of memberships) {
+      const customRole = membership.customRoleId
+        ? await ctx.db.get(membership.customRoleId)
+        : null;
+      const decision = legacyRoleCleanupDecision({
+        role: membership.role ?? null,
+        customRoleId: membership.customRoleId ?? null,
+        tenantId: membership.tenantId,
+        customRole,
+      });
+      if (decision.action === "none") continue;
+      rows.push({
+        membershipId: membership._id,
+        tenantId: membership.tenantId,
+        role: membership.role as Role,
+        customRoleId: membership.customRoleId as Id<"customRoles">,
+        customRoleName: customRole?.name ?? null,
+        action: decision.action,
+        reason: decision.reason,
+      });
+    }
+
+    return {
+      scanned: memberships.length,
+      legacyCount: rows.length,
+      truncated: memberships.length === 4096,
+      rows,
+    };
   },
 });
 

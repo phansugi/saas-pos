@@ -89,6 +89,9 @@ const session = {
     // sama persis, sehingga selisih sekecil apa pun langsung kelihatan.
     taxActive: false,
     taxRatePct: 11,
+    // Pengingat tutup shift dimatikan: skrip ini menguji denah meja & alur tamu,
+    // bukan pengingatnya — bannernya tidak boleh ikut mengubah tata letaknya.
+    shift: { active: false, reminderHour: 21, longShiftHours: 14 },
     createdAt: new Date().toISOString(),
     trialEndsAt: new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString(),
   },
@@ -105,6 +108,36 @@ await context.addInitScript(([key, value]) => {
     // Penyimpanan diblokir: bukan bagian yang diuji di sini.
   }
 }, ["mesinpos.session.v1", JSON.stringify(session)]);
+
+/*
+  Gerbang kasir (`posShiftGate`): kasir tidak bisa menjual kalau tidak ada shift
+  yang terbuka di perangkat ini, jadi shiftnya dibuka lebih dulu di sini — sama
+  seperti kasir sungguhan, yang membukanya di halaman Shift & Kas.
+*/
+await context.addInitScript(([key, id]) => {
+  try {
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({
+        current: {
+          id,
+          openedAt: new Date().toISOString(),
+          openingCash: 300000,
+          cashSales: 0,
+          totalSales: 0,
+          saleCount: 0,
+          closedAt: null,
+          countedCash: null,
+          expectedCash: null,
+          variance: null,
+        },
+        history: [],
+      }),
+    );
+  } catch {
+    // Penyimpanan diblokir: tombol kasirnya akan menyebut sebabnya sendiri.
+  }
+}, ["mesinpos.shifts.v1", "shift-uji-meja"]);
 
 const page = await context.newPage();
 page.on("console", (message) => {

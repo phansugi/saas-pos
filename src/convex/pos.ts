@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { mutation, query, type MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
   applyStockChange,
@@ -25,8 +25,16 @@ import {
   checkSaleAgainstCharge,
 } from "./lib/digitalPayment";
 import { discountBreakdown } from "./lib/loyalty";
-import { isModuleActive } from "./lib/billing/modules";
-import { kdsQueue, seatTable, type KdsTicketItem } from "./lib/fnb";
+import { isFeatureEnabled, isModuleActive } from "./lib/billing/modules";
+import {
+  fireKitchenOnSale,
+  isKitchenTicket,
+  kdsQueue,
+  seatTable,
+  tableHolders,
+  ticketPaidLabel,
+  type KdsTicketItem,
+} from "./lib/fnb";
 import {
   applyModifiers,
   hasModifiers,
@@ -269,14 +277,21 @@ export const createSale = mutation({
         .query("sales")
         .withIndex("by_table", (q) => q.eq("tableId", args.tableId))
         .collect();
-      const openOrders = onTable
-        .filter((s) => s.status === "held")
-        .map((s) => ({
+      // Meja ditempati selama masih ada **tiket dapur** yang menunjuknya —
+      // termasuk penjualan yang sudah dibayar tetapi belum ditandai selesai oleh
+      // dapur (`tableHolders`). Jadi meja tamu yang uangnya sudah masuk tetap
+      // terkunci sampai dapurnya menekan Selesai, bukan langsung bebas.
+      const openOrders = tableHolders(
+        onTable.map((s) => ({
           id: s._id,
           number: s.number,
           createdAt: s.createdAt,
           tableId: s.tableId,
-        }));
+          status: s.status,
+          kitchenFiredAt: s.kitchenFiredAt,
+          kitchenDoneAt: s.kitchenDoneAt,
+        })),
+      );
 
       const seat = seatTable(
         [
@@ -567,6 +582,23 @@ export const createSale = mutation({
       });
     }
 
+    // 4c. Dapur (modul F&B). Penjualan yang **sudah lunas** langsung dikirim ke
+    //     antrean dapur pada momen pembayarannya — begitulah kasir bekerja:
+    //     pembeli membayar (tunai, QRIS, atau VA), pesanannya berangkat ke
+    //     dapur, dan struknya ditawarkan di layar yang sama. Tanpa langkah ini
+    //     dapur baru melihat pesanannya setelah kasir menekan tombol kedua.
+    //
+    //     Gerbangnya fitur `pos.kds` (bukan sekadar modul F&B): kalau layar
+    //     dapurnya tidak ada di paket workspace ini, tidak ada yang menerima
+    //     tiketnya — dan penjualannya tidak diklaim "sudah ke dapur".
+    const fireKitchen = fireKitchenOnSale({
+      kdsFeatureOn: isFeatureEnabled(entitlements, tenant.verticals, "pos.kds"),
+      status,
+    });
+    if (fireKitchen) {
+      await ctx.db.patch(saleId, { kitchenFiredAt: now });
+    }
+
     // 5. Deduct stock through the ledger unless the order is only held.
     //    Stok yang **baru saja** menembus ambang dicatat di sini supaya webhook
     //    `stock.low` dikirim saat kejadiannya, bukan pada setiap penjualan
@@ -609,6 +641,9 @@ export const createSale = mutation({
         digitalCharge: digitalCharge?.number,
         member: member?.code,
         memberDiscount: discount.memberDiscount,
+        // Dapur ikut tercatat di jejak audit: ini keputusan yang menggerakkan
+        // orang, bukan hanya angka di layar.
+        kitchen: fireKitchen ? "fired" : undefined,
       },
     });
 
@@ -662,27 +697,41 @@ export const createSale = mutation({
       creditAmount,
       /** Bagian diskon yang berasal dari member (0 kalau tanpa member). */
       memberDiscount: discount.memberDiscount,
+      /**
+       * Penjualan ini sudah masuk antrean dapur pada momen yang sama. Dibaca
+       * layar kasir untuk memberi tahu kasirnya — bukan untuk memutuskan apa pun.
+       */
+      kitchenFired: fireKitchen,
       deduplicated: false,
     };
   },
 });
 
-/** Completes a previously held order, deducting stock at that moment. */
-export const finalizeHeldSale = mutation({
-  args: { saleId: v.id("sales"), actorId: v.id("users") },
-  handler: async (ctx, args) => {
-    const sale = await ctx.db.get(args.saleId);
+/**
+ * Isi penyelesaian pesanan tertahan, dipakai dua jalan: tombol **Selesai** di
+ * layar dapur (`finalizeHeldSale`) dan `kitchenDone` yang menerima tiket tertahan
+ * maupun tiket yang sudah lunas. Satu tempat supaya stok, audit, dan webhook-nya
+ * tidak pernah berbeda tergantung tombol mana yang ditekan.
+ */
+async function finalizeHeldSaleNow(
+  ctx: MutationCtx,
+  saleId: Id<"sales">,
+  actorId: Id<"users">,
+) {
+  {
+    const sale = await ctx.db.get(saleId);
     if (!sale) throw new Error("Pesanan tidak ditemukan.");
     if (sale.status === "completed") return { saleId: sale._id };
 
     await requireSalesAllowed(ctx, sale.tenantId);
-    // Mengirim pesanan tertahan ke dapur = alur KDS milik modul F&B; peran
-    // kasir tetap wajib, dan gerbang modul dievaluasi atas tenant yang sama.
-    await requireFeature(ctx, sale.tenantId, args.actorId, "pos.kds", "pos.sell");
+    // Mengirim pesanan tertahan ke dapur = alur KDS milik modul F&B. Izinnya
+    // `kds.manage` (bukan `pos.sell`): menyelesaikan tiket dapur adalah
+    // pekerjaan dapur, dan peran “dapur saja” harus bisa menyelesaikannya.
+    await requireFeature(ctx, sale.tenantId, actorId, "pos.kds", "kds.manage");
 
     const items = await ctx.db
       .query("saleItems")
-      .withIndex("by_sale", (q) => q.eq("saleId", args.saleId))
+      .withIndex("by_sale", (q) => q.eq("saleId", saleId))
       .collect();
 
     const lowStockCrossings: {
@@ -702,7 +751,7 @@ export const finalizeHeldSale = mutation({
         reason: "sale",
         refType: "sale",
         refId: sale._id,
-        actorId: args.actorId,
+        actorId,
       });
       if (product && stockCrossedLow(remaining + item.quantity, remaining)) {
         lowStockCrossings.push({
@@ -717,7 +766,7 @@ export const finalizeHeldSale = mutation({
 
     await writeAuditLog(ctx, {
       tenantId: sale.tenantId,
-      actorId: args.actorId,
+      actorId,
       action: "sale.finalize",
       entity: "sales",
       entityId: sale._id,
@@ -757,6 +806,63 @@ export const finalizeHeldSale = mutation({
     }
 
     await scheduleWebhookDeliveryPass(ctx, enqueued);
+
+    return { saleId: sale._id };
+  }
+}
+
+/** Completes a previously held order, deducting stock at that moment. */
+export const finalizeHeldSale = mutation({
+  args: { saleId: v.id("sales"), actorId: v.id("users") },
+  handler: async (ctx, args) => finalizeHeldSaleNow(ctx, args.saleId, args.actorId),
+});
+
+/**
+ * Tombol **Selesai** di layar dapur, untuk kedua jenis tiket.
+ *
+ * Dua keadaan yang memang berbeda, dan bedanya bukan hiasan:
+ *
+ *  - **pesanan tertahan** (`status: "held"`) — uangnya belum tercatat sebagai
+ *    penjualan yang selesai, dan stoknya belum bergerak. Menekan Selesai di sini
+ *    adalah penyelesaian penjualannya (`finalizeHeldSale`), termasuk pesanan QR
+ *    meja yang memang sudah dibayar tamunya.
+ *  - **penjualan lunas yang dikirim ke dapur** (`kitchenFiredAt` terisi) —
+ *    penjualannya sudah tercatat dan stoknya sudah bergerak sejak kasir menagih
+ *    uangnya, jadi dapur hanya **menandai** tiketnya beres (`kitchenDoneAt`).
+ *    Menyelesaikan penjualan untuk kedua kalinya justru akan mengurangi stok dua
+ *    kali, dan itu yang dijaga fungsi ini.
+ */
+export const kitchenDone = mutation({
+  args: { saleId: v.id("sales"), actorId: v.id("users") },
+  handler: async (ctx, args) => {
+    const sale = await ctx.db.get(args.saleId);
+    if (!sale) throw new Error("Pesanan tidak ditemukan.");
+
+    // Pesanan tertahan diserahkan ke jalur yang sudah ada, apa adanya.
+    if (sale.status === "held") {
+      return await finalizeHeldSaleNow(ctx, args.saleId, args.actorId);
+    }
+
+    await requireSalesAllowed(ctx, sale.tenantId);
+    await requireFeature(ctx, sale.tenantId, args.actorId, "pos.kds", "kds.manage");
+
+    if (!isKitchenTicket(sale)) {
+      throw new Error(
+        "Pesanan ini tidak sedang menunggu di dapur — mungkin sudah ditandai selesai atau dibatalkan.",
+      );
+    }
+
+    const now = Date.now();
+    await ctx.db.patch(sale._id, { kitchenDoneAt: now });
+
+    await writeAuditLog(ctx, {
+      tenantId: sale.tenantId,
+      actorId: args.actorId,
+      action: "sale.kitchenDone",
+      entity: "sales",
+      entityId: sale._id,
+      meta: { number: sale.number, firedAt: sale.kitchenFiredAt },
+    });
 
     return { saleId: sale._id };
   },
@@ -873,10 +979,10 @@ export const listHeld = query({
 });
 
 /**
- * Antrean dapur (`pos.kds`): pesanan tertahan, paling lama menunggu di depan,
- * lengkap dengan meja dan itemnya. Dihitung oleh aturan yang sama dengan layar
- * dapur (`lib/fnb.ts`), jadi urutan dan penandaan "lama" tidak bisa berbeda
- * antara server dan UI.
+ * Antrean dapur (`pos.kds` + izin `kds.manage`): pesanan tertahan, paling lama
+ * menunggu di depan, lengkap dengan meja dan itemnya. Dihitung oleh aturan yang
+ * sama dengan layar dapur (`lib/fnb.ts`), jadi urutan dan penandaan "lama" tidak
+ * bisa berbeda antara server dan UI.
  */
 export const kdsTickets = query({
   args: {
@@ -885,9 +991,11 @@ export const kdsTickets = query({
     actorId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    // Layar dapur adalah fitur modul F&B: tanpa modulnya aktif, tidak ada
-    // antrean yang boleh dibaca (bukan sekadar disembunyikan di klien).
-    await requireFeature(ctx, args.tenantId, args.actorId, "pos.kds");
+    // Layar dapur adalah fitur modul F&B **dan** pekerjaan tersendiri
+    // (`kds.manage`): tanpa modulnya aktif tidak ada antrean yang boleh dibaca,
+    // dan peran yang bukan pekerja dapur tidak membaca pesanan pelanggan
+    // (bukan sekadar disembunyikan di klien).
+    await requireFeature(ctx, args.tenantId, args.actorId, "pos.kds", "kds.manage");
 
     const tables = await ctx.db
       .query("tables")
@@ -902,7 +1010,10 @@ export const kdsTickets = query({
         q.eq("tenantId", args.tenantId).eq("storeId", args.storeId),
       )
       .collect();
-    const held = sales.filter((sale) => sale.status === "held");
+    // Dua sumber tiket: pesanan tertahan, dan penjualan lunas yang sudah dikirim
+    // ke dapur tetapi belum ditandai selesai (`isKitchenTicket` — aturan yang sama
+    // dipakai store demo, jadi demo tidak pernah menampilkan antrean yang berbeda).
+    const tickets = sales.filter((sale) => isKitchenTicket(sale));
 
     const orders: {
       id: string;
@@ -910,18 +1021,30 @@ export const kdsTickets = query({
       createdAt: number;
       tableId?: Id<"tables">;
       items: KdsTicketItem[];
+      settled: boolean;
+      paidLabel: string | null;
     }[] = [];
 
-    for (const sale of held) {
+    for (const sale of tickets) {
       const items = await ctx.db
         .query("saleItems")
         .withIndex("by_sale", (q) => q.eq("saleId", sale._id))
         .collect();
+      const settled = sale.status !== "held";
       orders.push({
         id: sale._id,
         number: sale.number,
-        createdAt: sale.createdAt,
+        // Tiket lunas menunggu **sejak dikirim ke dapur**, bukan sejak keranjangnya
+        // mulai disusun — itu momen yang dipakai dapur untuk menilai lama tunggu.
+        createdAt: sale.kitchenFiredAt ?? sale.createdAt,
         tableId: sale.tableId,
+        settled,
+        paidLabel: settled
+          ? ticketPaidLabel({
+              method: sale.payments[0]?.method ?? "",
+              firedAt: sale.kitchenFiredAt,
+            })
+          : null,
         items: items.map((item) => ({
           name: item.name,
           quantity: item.quantity,
@@ -979,6 +1102,70 @@ export const recent = query({
   },
 });
 
+/*
+  Kas toko itu **satu**, bukan satu per ponsel. Shift disimpan di tabel `shifts`
+  (`pos.openShift`/`pos.closeShift`), jadi kas yang dibuka pemilik harus terbaca
+  kasir di perangkat lain — tanpa itu gerbang kasir di halaman POS hanya melihat
+  perangkatnya sendiri dan menolak menjual walau kas tokonya jelas terbuka.
+
+  Yang dituntut hanya **keanggotaan**, bukan `shift.manage`: kasir yang melayani
+  penjualan justru tidak memegang izin kas, dan merekalah yang paling perlu tahu
+  kasnya sudah dibuka. Isi yang dikembalikan pun hanya keadaan kas — tidak ada
+  uang, nama pelanggan, atau apa pun yang bisa dibaca peran lain dari sini.
+*/
+export const till = query({
+  args: {
+    tenantId: v.id("tenants"),
+    storeId: v.id("stores"),
+    actorId: v.id("users"),
+  },
+  handler: async (ctx, args) => {
+    await requireMembership(ctx, args.tenantId, args.actorId);
+
+    const store = await ctx.db.get(args.storeId);
+    if (!store || store.tenantId !== args.tenantId) {
+      throw new Error("Toko tidak valid untuk tenant ini.");
+    }
+
+    const rows = await ctx.db
+      .query("shifts")
+      .withIndex("by_tenant_store", (q) =>
+        q.eq("tenantId", args.tenantId).eq("storeId", args.storeId),
+      )
+      .order("desc")
+      .take(60);
+
+    // Shift yang paling baru dibuka yang masih berjalan. Kalau ada lebih dari
+    // satu (mis. dua kasir membuka kas di jam yang sama), yang terbaru yang
+    // dipakai: kasnya memang sedang terbuka, dan jam bukanya yang paling dekat
+    // dengan keadaan sekarang.
+    const open = rows.find((row) => row.status === "open") ?? null;
+    const history = rows
+      .filter((row) => row.status === "closed" && row.closedAt !== undefined)
+      .slice(0, 10);
+
+    return {
+      current: open
+        ? {
+            id: open._id as string,
+            openedAt: open.openedAt,
+            openingCash: open.openingCash,
+            cashierId: open.cashierId as string,
+          }
+        : null,
+      history: history.map((row) => ({
+        id: row._id as string,
+        openedAt: row.openedAt,
+        closedAt: row.closedAt as number,
+        openingCash: row.openingCash,
+        countedCash: row.closingCash ?? 0,
+        expectedCash: row.expectedCash ?? 0,
+        variance: row.variance ?? 0,
+      })),
+    };
+  },
+});
+
 export const openShift = mutation({
   args: {
     tenantId: v.id("tenants"),
@@ -988,19 +1175,33 @@ export const openShift = mutation({
   },
   handler: async (ctx, args) => {
     await requireSalesAllowed(ctx, args.tenantId);
-    await requirePermission(ctx, args.tenantId, args.cashierId, "pos.sell");
+    // Kas dibuka penjualnya sendiri (`shift.manage`), bukan lewat izin menjual:
+    // mengelola kas adalah pekerjaan tersendiri yang bisa dipisah merchant.
+    await requirePermission(ctx, args.tenantId, args.cashierId, "shift.manage");
 
     const store = await ctx.db.get(args.storeId);
     if (!store || store.tenantId !== args.tenantId) {
       throw new Error("Toko tidak valid untuk tenant ini.");
     }
 
+    /*
+      Satu kas per **toko**, bukan per kasir: keadaannya dibaca semua perangkat
+      (`pos.till`), jadi dua shift terbuka untuk toko yang sama akan membuat
+      halaman Kasir memilih salah satunya dan Z-report-nya terbelah. Pengguna
+      yang menekan Buka shift dua kali (atau dari dua perangkat) ditolak dengan
+      kalimat yang menyebut kasnya, bukan “kasir ini”.
+    */
     const open = await ctx.db
       .query("shifts")
-      .withIndex("by_cashier", (q) => q.eq("cashierId", args.cashierId))
-      .collect();
+      .withIndex("by_tenant_store", (q) =>
+        q.eq("tenantId", args.tenantId).eq("storeId", args.storeId),
+      )
+      .order("desc")
+      .take(20);
     if (open.some((s) => s.status === "open")) {
-      throw new Error("Masih ada shift terbuka untuk kasir ini.");
+      throw new Error(
+        "Kas toko ini masih terbuka — tutup dulu shift yang berjalan sebelum membuka yang baru.",
+      );
     }
 
     return await ctx.db.insert("shifts", {
@@ -1029,8 +1230,10 @@ export const closeShift = mutation({
     if (!shift) throw new Error("Shift tidak ditemukan.");
 
     // A Z-report moves money and closes a till — same authority as selling on
-    // it. (The actor need not be the shift's own cashier: a manager may close.)
-    await requirePermission(ctx, shift.tenantId, args.actorId, "pos.sell");
+    // it, but its own permission (`shift.manage`): a cash-count supervisor may
+    // hold it without being able to sell. (The actor need not be the shift's
+    // own cashier: a manager may close.)
+    await requirePermission(ctx, shift.tenantId, args.actorId, "shift.manage");
 
     if (shift.status === "closed") throw new Error("Shift sudah ditutup.");
 

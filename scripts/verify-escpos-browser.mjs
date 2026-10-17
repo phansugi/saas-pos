@@ -57,6 +57,7 @@ function check(name, condition, detail) {
 }
 
 const SESSION_KEY = "mesinpos.session.v1";
+const SHIFT_KEY = "mesinpos.shifts.v1";
 
 /** Sesi demo pemilik toko, supaya `/app` bisa dibuka tanpa alur masuk. */
 function sessionFor(planKey) {
@@ -72,10 +73,49 @@ function sessionFor(planKey) {
       role: "owner",
       taxActive: true,
       taxRatePct: 11,
+      // Pengingat tutup shift dimatikan: skrip ini menguji pencetakan langsung
+      // ke printer, bukan pengingatnya.
+      shift: { active: false, reminderHour: 21, longShiftHours: 14 },
       createdAt: new Date().toISOString(),
       trialEndsAt: new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString(),
     },
   };
+}
+
+/**
+ * Shift kas yang terbuka di konteks itu. Gerbang kasir (`posShiftGate`) menuntut
+ * shiftnya dibuka sebelum halaman Kasir bisa menjual, sedangkan semua struk yang
+ * diuji di sini lahir dari penjualan di kasir — jadi shiftnya dibuka lebih dulu,
+ * sama seperti kasir sungguhan di halaman Shift & Kas.
+ */
+function seedShift(context, id) {
+  return context.addInitScript(
+    ([key, shiftId]) => {
+      try {
+        window.localStorage.setItem(
+          key,
+          JSON.stringify({
+            current: {
+              id: shiftId,
+              openedAt: new Date().toISOString(),
+              openingCash: 300000,
+              cashSales: 0,
+              totalSales: 0,
+              saleCount: 0,
+              closedAt: null,
+              countedCash: null,
+              expectedCash: null,
+              variance: null,
+            },
+            history: [],
+          }),
+        );
+      } catch {
+        // Penyimpanan diblokir: tombol kasirnya akan menyebut sebabnya sendiri.
+      }
+    },
+    [SHIFT_KEY, id],
+  );
 }
 
 /* --------------------------------------------------------- tiruan perangkat -- */
@@ -278,6 +318,7 @@ try {
     },
     [SESSION_KEY, JSON.stringify(sessionFor("enterprise"))],
   );
+  await seedShift(context, "shift-escpos-lengkap");
 
   const page = await context.newPage();
   const consoleErrors = [];
@@ -466,6 +507,7 @@ try {
     },
     [SESSION_KEY, JSON.stringify(sessionFor("enterprise"))],
   );
+  await seedShift(contextLama, "shift-escpos-tanpa-api");
   const pageLama = await contextLama.newPage();
   const galatLama = [];
   pageLama.on("pageerror", (error) => galatLama.push(error.message));
@@ -535,6 +577,7 @@ try {
     },
     [SESSION_KEY, JSON.stringify(sessionFor("enterprise"))],
   );
+  await seedShift(contextBatal, "shift-escpos-batal");
   const pageBatal = await contextBatal.newPage();
   await bayarDanBukaStruk(pageBatal);
   await pageBatal.locator('[data-testid="struk-sambungkan"]').click();

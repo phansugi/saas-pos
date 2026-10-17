@@ -66,6 +66,9 @@ const session = {
     verticals: ["umkm", "fnb"],
     planKey: "enterprise",
     role: "owner",
+    // Pengingat tutup shift dimatikan: skrip ini menguji bip & warna, bukan
+    // pengingatnya — bannernya tidak boleh ikut mengubah tata letak kasir.
+    shift: { active: false, reminderHour: 21, longShiftHours: 14 },
     createdAt: new Date().toISOString(),
     trialEndsAt: new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString(),
   },
@@ -144,6 +147,37 @@ await context.addInitScript(
   },
   ["mesinpos.session.v1", JSON.stringify(session)],
 );
+
+/*
+  Gerbang kasir (`posShiftGate`): halaman Kasir tidak bisa menjual kalau tidak ada
+  shift yang terbuka di perangkat ini. Ketukan produk yang diuji di sini adalah
+  ketukan di halaman kasir, jadi shiftnya dibuka lebih dulu — sama seperti kasir
+  sungguhan, yang membukanya di halaman Shift & Kas.
+*/
+await context.addInitScript(([key, id]) => {
+  try {
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({
+        current: {
+          id,
+          openedAt: new Date().toISOString(),
+          openingCash: 300000,
+          cashSales: 0,
+          totalSales: 0,
+          saleCount: 0,
+          closedAt: null,
+          countedCash: null,
+          expectedCash: null,
+          variance: null,
+        },
+        history: [],
+      }),
+    );
+  } catch {
+    // Penyimpanan diblokir: tombol kasirnya akan menyebut sebabnya sendiri.
+  }
+}, ["mesinpos.shifts.v1", "shift-uji-bip"]);
 
 const page = await context.newPage();
 const galatKonsol = [];

@@ -1465,6 +1465,8 @@ const ROLE_ROWS = [
   ["Menyetujui PR & membuat PO", "purchase.approve", "Pemilik, Manajer"],
   ["Menerima barang (GRN)", "purchase.receive", "Pemilik, Manajer, Staf gudang"],
   ["Menjual di kasir", "pos.sell", "Pemilik, Manajer, Kasir"],
+  ["Bekerja di antrean dapur (KDS)", "kds.manage", "Pemilik, Manajer, Kasir"],
+  ["Membuka & menutup shift kas", "shift.manage", "Pemilik, Manajer, Kasir"],
 ];
 
 const SECTIONS = [
@@ -1842,8 +1844,10 @@ const SECTIONS = [
         "Pembeli umum (penjualan tanpa member sama sekali) juga bisa dikirimi struk: di dialog struknya muncul kolom Nomor WhatsApp pembeli. Tulis nomor yang diberikan pembelinya (mis. 0812-3456-7890) lalu tekan kirim - nomornya divalidasi dulu, dan yang belum sah ditolak beserta sebabnya. Nomor itu dipakai sekali untuk kiriman tersebut; ia tidak disimpan sebagai data member. Tiap kiriman tetap tercatat di jejak audit beserta asal nomornya (dari data member atau diketik kasir) dan nomor tujuannya ditampilkan tersensor, mis. 6281-••••-890.",
         "Kanal WhatsApp-nya diatur pemilik workspace lewat dua kunci di lingkungan deployment (WHATSAPP_ACCESS_TOKEN dan WHATSAPP_PHONE_NUMBER_ID; versi Graph API opsional). Selama kuncinya belum diisi, tombol kirimnya menjawab apa adanya bahwa kanalnya belum tersambung, dan struknya tetap bisa dicetak atau diunduh - jalur tanpa kunci & syaratnya dibahas di bagian Kirim struk ke WhatsApp pembeli.",
       ]);
-      callout(w, "Pesanan yang belum dibayar", [
-        "Untuk kafe/restoran, gunakan tombol Ke dapur: pesanan ditahan, dapur melihatnya di menu Dapur & Meja, dan stok baru berkurang saat pesanannya ditandai Selesai.",
+      callout(w, "Dapur di workspace F&B", [
+        "Di kafe/restoran, pesanan yang dibayar di kasir - tunai, QRIS, maupun Virtual Account - langsung dikirim ke dapur pada momen pembayarannya: tiketnya muncul di menu Dapur & Meja dengan penanda cara bayarnya (mis. Lunas Tunai, diterima dapur pukul 13:42), dan dialog struk yang terbuka otomatis menyebutkan bahwa pesanannya sudah diterima dapur. Stoknya sudah berkurang saat uangnya dicatat, jadi dapur cukup menandai tiketnya Selesai - tanpa menggerakkan stok untuk kedua kalinya.",
+        "Meja yang dipakai pesanan itu tetap terkunci untuk kasir sampai dapur menekan Selesai: kasir tidak bisa memilih meja itu lagi untuk pembeli berikutnya, karena tamunya masih menunggu pesanannya di situ. Meja yang tiketnya sudah ditandai Selesai langsung bebas dipakai lagi.",
+        "Keranjang yang belum dibayar ditahan sementara dengan tombol Hold supaya pembeli berikutnya bisa dilayani lebih dulu, lalu transaksinya dilanjutkan dari daftar Transaksi ditahan di halaman kasir. Selama ditahan belum ada uang, stok, atau tiket dapur yang tercatat - yang ditahan memang urusan layar kasir. Meja yang sudah dipilih ikut ditahan selama transaksinya ada di daftar itu.",
         "QRIS pada workspace dengan kanal tagih digital menerbitkan tagihan lebih dulu; penjualannya baru tercatat setelah tagihan itu lunas.",
       ]);
     },
@@ -1854,11 +1858,18 @@ const SECTIONS = [
     render(w) {
       steps(w, [
         "Sebelum mulai melayani, buka menu Shift & Kas dan tekan Buka shift. Isi Kas awal, yaitu uang kembalian yang ada di laci.",
+        "Halaman Kasir memang terkunci sebelum shiftnya dibuka: tanpa shift yang terbuka, kartu merah Kasir terkunci - shift (kas) belum dibuka muncul di atas daftar produk, dan kartu produk, pemilih meja, tombol Hold, serta tombol Bayar dimatikan. Buka shiftnya dulu di halaman Shift & Kas lewat tombol Buka shift sekarang, lalu keranjang dan pembayaran hidup kembali.",
         "Setelah selesai melayani, tekan Tutup shift & simpan Z-report. Uang di laci dicocokkan dengan penjualan yang tercatat.",
+        "Kasir juga diingatkan supaya tidak lupa menutup shift: halaman Kasir menampilkan banner di atas daftar produk, dan halaman Shift & Kas menampilkan kartu pengingat yang sama, begitu jam pengingatnya lewat, shift sudah berjalan melewati ambangnya, atau shift kemarin belum ditutup. Banner di halaman Kasir disertai tautan Tutup shift sekarang.",
+        "Jam pengingat dan ambang shift lamanya diatur pemilik toko di menu Pengaturan, kartu Pengingat tutup shift: jamnya dipilih 0-23 (bawaan 21.00), ambang shift lama 1-24 jam (bawaan 14 jam), dan pengingatnya bisa dimatikan untuk toko yang buka 24 jam.",
         "Hasil penjualan dan stok yang bergerak bisa dibaca di menu Laporan.",
       ]);
       callout(w, "Mengapa shift penting", [
         "Selisih kas selalu punya shift pemiliknya. Tanpa shift yang dibuka dan ditutup, selisih uang tidak bisa ditelusuri ke orang dan waktu.",
+        "Karena itu penjualan barunya juga tidak boleh dimulai tanpa shift: kas yang belum dibuka berarti uang kembalian awalnya tidak diketahui, dan selisihnya tidak bisa dicocokkan ke siapa pun. Saklar pengingat di halaman Pengaturan hanya mematikan pengingatnya, bukan gerbang ini.",
+      ]);
+      callout(w, "Izin halaman ini: shift.manage", [
+        "Halaman Shift & Kas beserta tombol Buka/Tutup shift dan kabar kas ke pemilik toko dijaga izin shift.manage - bukan pos.sell. Kasir yang melayani penjualan membutuhkan keduanya (penjualan menuntut shift terbuka), sedangkan pengawas kas bisa diberi shift.manage saja tanpa bisa menjual. Mengatur izin peran ada di halaman Tim & Peran (paket Enterprise).",
       ]);
     },
   },
@@ -2221,6 +2232,62 @@ const SECTIONS = [
         "Di sebelah laporan itu, halaman kasir menampilkan tautan cadangan wa.me yang membawa isi struknya sebagai teks - angka belanjanya terbaca penerimanya tanpa lampiran apa pun. Lampiran gambarnya menyusul lewat tombol Bagikan gambar struk (lembar bagikan perangkat: pilih WhatsApp, lalu pilih nomornya), atau lewat Unduh PDF yang dilampirkan sendiri oleh kasir.",
         "Kalau perangkat kasirnya tidak bisa menggambar struknya, halamannya mengatakan itu apa adanya dan mengarahkan ke Unduh PDF - bukan mengirim berkas lain yang tidak diminta.",
         "Di mode demo, kirimannya disimulasikan dan laporannya menulis kata Mode demo. Tidak ada satu pesan pun yang benar-benar keluar, dan itu dikatakan supaya tidak disangka sudah terkirim.",
+      ]);
+    },
+  },
+  {
+    number: 19,
+    title: "Jam operasional & pemberitahuan ke pemilik toko",
+    render(w) {
+      paragraph(
+        w,
+        "Pengingat di Bagian 10 ditujukan ke kasir yang berdiri di depan kasnya. Dua keadaan di bawah ini tidak bisa menunggu kasirnya sadar sendiri, karena pemilik toko sering tidak sedang di toko: kas yang belum dibuka padahal toko sudah buka, dan shift yang belum ditutup padahal toko sudah tutup. Keduanya dikabarkan ke pemilik toko, dan penentunya adalah jam operasional toko.",
+      );
+      subTitle(w, "Mengatur jam operasional toko");
+      steps(w, [
+        "Buka menu Pengaturan di sidebar kiri, lalu cari kartu Pengingat tutup shift. Izinnya billing.manage - pemilik, manajer, dan keuangan.",
+        "Isi Jam buka toko dan Jam tutup toko, masing-masing bilangan bulat 0-23 menurut waktu perangkat kasir yang membuka halamannya. Bawaannya 08:00 dan 22:00.",
+        "Jam tutup yang lebih kecil dari jam buka berarti toko buka lintas malam, misalnya 20 lalu 2. Dua jam yang sama berarti toko buka 24 jam - dan toko 24 jam tidak pernah menerima kabar kas yang belum dibuka, karena tidak punya jam buka.",
+        "Baca kalimat petunjuk di bawah kolomnya: di situ tertulis jam operasional yang sedang berlaku beserta akibatnya, misalnya pemilik toko dikabari setelah 30 menit kasnya belum dibuka.",
+        "Saklar Pemberitahuan ke pemilik toko memisahkan kabar ini dari pengingat kasir: kafe 24 jam boleh mematikan pengingat tutup shift tanpa ikut mematikan kabar kas yang belum dibuka ke pemiliknya.",
+        "Tekan Simpan setelan shift. Jam operasional ini dipakai bersama seluruh kasir di workspace ini, dan mengubahnya tidak pernah menulis ulang penjualan yang sudah tercatat.",
+      ]);
+      subTitle(w, "Kapan pemilik toko dikabari");
+      table(
+        w,
+        ["Keadaan kas", "Kapan kabarnya berangkat"],
+        [
+          [
+            "Kas belum dibuka padahal toko sudah buka",
+            "Hanya di dalam jam operasional, dan baru setelah lewat 30 menit dari jam buka - sebelum itu kasirnya masih menghitung uang kembalian. Di luar jam operasional tokonya memang belum berjualan, jadi tidak ada yang dikabarkan.",
+          ],
+          [
+            "Toko sudah tutup, shift belum ditutup",
+            "Begitu toko tutup menurut jam operasional, padahal shiftnya masih terbuka.",
+          ],
+          [
+            "Shift kemarin belum ditutup",
+            "Shift yang dibuka pada hari kalender sebelumnya: uangnya sudah bercampur ke hari berikutnya, jadi penutupannya perlu ditagih hari itu juga.",
+          ],
+          [
+            "Shift sudah berjalan terlalu lama",
+            "Shift yang belum ditutup lebih lama dari ambangnya (bawaan 14 jam, diatur di kartu yang sama), supaya selisih kasnya tidak menumpuk sampai tutup toko.",
+          ],
+        ],
+        [150, 350],
+      );
+      subTitle(w, "Yang dilihat kasir dan pemilik");
+      bullets(w, [
+        "Di halaman Kasir, kabarnya muncul sebagai banner di atas daftar produk beserta tautan ke halaman Shift & Kas; banner yang sama juga ada di halaman Shift & Kas. Kasir jadi tahu bahwa pemiliknya memang ikut dikabari, bukan hanya dirinya yang diingatkan.",
+        "Banner itu menyebut apa yang benar-benar terjadi dengan kabarnya: sedang memberi tahu, pemilik toko sudah diberi tahu, hari itu sudah pernah, emailnya dijadwalkan ke alamat pemilik, atau gagal dikirim beserta sebabnya. Kalimatnya tidak pernah diubah menjadi klaim terkirim kalau kanalnya memang belum ada.",
+        "Halaman Shift & Kas memuat kartu Pemberitahuan ke pemilik toko: daftar kabar yang dibaca dari server, bukan dari penanda di perangkat ini - lengkap dengan hari, jam lokalnya, dan tombol Tandai ditangani. Yang ditandai tidak dihapus, jejaknya tetap ada sebagai riwayat.",
+        "Tiap baris menyebutkan siapa penerimanya: alamat email pemilik workspace ini beserta hasil pengirimannya (terkirim, sedang dikirim, gagal beserta pesan penyedianya, atau alamat uji yang memang tidak dikirimi email), lalu berapa endpoint webhook yang ikut menerimanya. Kalau belum ada endpoint yang melanggan shift.alert, barisnya tetap jujur: kabarnya tersimpan, dan lewat email itulah pemiliknya dikabari.",
+      ]);
+      callout(w, "Bukan notifikasi push", [
+        "Shift di aplikasi ini hidup di perangkat kasir, jadi server tidak punya cara melihat shift yang tidak pernah dilihatnya. Alurnya: perangkat melaporkan keadaan kasnya beserta jam lokalnya, server memutuskan ulang memakai jam operasional workspace, lalu kabarnya dikirim sebagai email ke alamat pemilik workspace ini (dan ikut masuk ke langganan webhook workspace sebagai event shift.alert).",
+        "Karena itu kabarnya berangkat saat halaman Kasir atau halaman Shift & Kas terbuka di perangkat yang memegang shiftnya - bukan saat ponsel pemiliknya berdering. Laporan yang tidak cocok dengan keadaannya, misalnya dilaporkan di luar jam operasional, ditolak server dan bukan diteruskan.",
+        "Satu kabar per jenis per hari: kunci (workspace, jenis, hari) di server menahannya, jadi kasir yang membuka halaman Kasir berkali-kali tidak mengirim kabar yang sama berulang-ulang. Di mode demo tidak ada kanal email server maupun endpoint webhook, jadi kabarnya tercatat tetapi tidak sampai ke siapa pun.",
+        "Izinnya shift.manage - satu izin dengan halaman Shift & Kas, karena kabar ini memang soal kas, bukan soal menjual. Kasir sudah memilikinya secara bawaan bersama izin menjualnya.",
       ]);
     },
   },

@@ -7,6 +7,13 @@
   "dir": "ltr",
   "start_url": "/",
   "scope": "/",
+  "related_applications": [
+    {
+      "platform": "webapp",
+      "url": "/manifest.webmanifest",
+      "id": "/"
+    }
+  ],
   "display": "fullscreen",
   "display_override": ["fullscreen", "standalone"],
   "orientation": "any",
@@ -14,12 +21,6 @@
   "theme_color": "#20C589",
   "categories": ["business", "finance", "productivity"],
   "icons": [
-    {
-      "src": "/icon.svg",
-      "type": "image/svg+xml",
-      "sizes": "any",
-      "purpose": "any"
-    },
     {
       "src": "/icon-192.png",
       "type": "image/png",
@@ -37,6 +38,13 @@
       "type": "image/png",
       "sizes": "512x512",
       "purpose": "maskable"
+    },
+    {
+      "comment": "Paling belakang dengan sengaja: Android membuat aplikasi (WebAPK) dari ikon raster, jadi PNG di atas yang dipilih lebih dulu — SVG dengan sizes \"any\" pernah dilaporkan menggagalkan pembuatan WebAPK.",
+      "src": "/icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any"
     }
   ],
   "shortcuts": [

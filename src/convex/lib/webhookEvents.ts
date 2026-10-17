@@ -121,6 +121,111 @@ export function opnamePostedEventData(
   };
 }
 
+/**
+ * Isi `product.updated` — dipakai platform untuk menyegarkan katalog & harga
+ * tanpa menarik ulang seluruh katalog. `changed` menyebut field apa yang
+ * berubah supaya penerima bisa memilih menyimpan sebagian (mis. hanya harga).
+ */
+export interface ProductUpdatedEventInput {
+  sku: string;
+  name: string;
+  price: number;
+  unit: string;
+  active: boolean;
+  changed: readonly string[];
+  /** SKU lama saat kategori berganti (SKU ikut diganti kode kategorinya). */
+  previousSku?: string;
+  /** Harga lama saat harga berubah — membantu penerima mengurutkan perubahan. */
+  previousPrice?: number;
+}
+
+export function productUpdatedEventData(
+  input: ProductUpdatedEventInput,
+): Record<string, unknown> {
+  const data: Record<string, unknown> = {
+    sku: input.sku,
+    name: input.name,
+    price: input.price,
+    unit: input.unit,
+    active: input.active,
+    changed: [...input.changed],
+  };
+  // Hanya dikirim kalau memang ada: penerima lama tidak perlu membaca `null`
+  // pada perubahan yang bukan pergantian SKU/harga.
+  if (input.previousSku) data.previousSku = input.previousSku;
+  if (input.previousPrice !== undefined) data.previousPrice = input.previousPrice;
+  return data;
+}
+
+/**
+ * Isi `stock.changed` — **satu pergerakan stok**, bukan saldo hasil hitung ulang.
+ *
+ * `delta` dan `balance` dikirim bersama supaya penerima bisa memakai salah
+ * satunya: platform yang menghitung sendiri memakai `delta`, sedangkan platform
+ * yang ingin langsung menyamakan angkanya memakai `balance`. `refType`/`refId`
+ * menyebut dokumen asalnya (nomor struk, GRN, opname) sehingga penerima bisa
+ * menolak kiriman ganda dengan pasangan yang sama.
+ */
+export interface StockChangedEventInput {
+  sku: string;
+  name: string;
+  delta: number;
+  balance: number;
+  reason: string;
+  refType?: string;
+  refId?: string;
+}
+
+export function stockChangedEventData(
+  input: StockChangedEventInput,
+): Record<string, unknown> {
+  return {
+    sku: input.sku,
+    name: input.name,
+    delta: input.delta,
+    balance: input.balance,
+    reason: input.reason,
+    refType: input.refType ?? null,
+    refId: input.refId ?? null,
+  };
+}
+
+/** Satu baris barang yang diterima pada `purchase.received`. */
+export interface PurchaseReceivedLine {
+  sku: string;
+  name: string;
+  quantity: number;
+  unitCost: number;
+}
+
+export interface PurchaseReceivedEventInput {
+  number: string;
+  /** Nomor PO asal barang. */
+  order: string;
+  supplier: string;
+  total: number;
+  lines: readonly PurchaseReceivedLine[];
+}
+
+/** Isi `purchase.received`: cukup untuk memperbarui stok & harga beli di platform. */
+export function purchaseReceivedEventData(
+  input: PurchaseReceivedEventInput,
+): Record<string, unknown> {
+  return {
+    number: input.number,
+    order: input.order,
+    supplier: input.supplier,
+    total: input.total,
+    lineCount: input.lines.length,
+    lines: input.lines.map((line) => ({
+      sku: line.sku,
+      name: line.name,
+      quantity: line.quantity,
+      unitCost: line.unitCost,
+    })),
+  };
+}
+
 // ------------------------------------------------- dukungan khusus
 
 /**
@@ -275,5 +380,48 @@ export function receivableOverdueEventData(
     balance: input.balance,
     dueDate: input.dueDate,
     daysPastDue: input.daysPastDue,
+  };
+}
+
+// ------------------------------------------------------------- shift & kas
+
+/**
+ * Isi `shift.alert`: kabar untuk **pemilik toko** bahwa kas belum dibuka padahal
+ * toko sudah buka, atau shift belum ditutup padahal toko sudah tutup (termasuk
+ * shift yang dibuka hari sebelumnya).
+ *
+ * Berbeda dari empat event transaksi, keadaannya tidak berasal dari baris
+ * database melainkan dari perangkat kasir — shift hidup di perangkat supaya kasir
+ * tetap bisa bekerja saat internetnya putus. Karena itu `day` dan `localClock`
+ * dikirim apa adanya: penerima membandingkannya dengan jamnya sendiri, bukan
+ * menebak dari `at` yang selalu UTC.
+ */
+export interface ShiftAlertEventInput {
+  kind: string;
+  reason: string;
+  /** Hari kalender lokal perangkat, `YYYY-MM-DD`. */
+  day: string;
+  /** Jam lokal perangkat saat laporan dibuat (`08:15`). */
+  localClock: string;
+  title: string;
+  message: string;
+  /** Waktu buka shift yang masih terbuka; `null` untuk kabar “kas belum dibuka”. */
+  shiftOpenedAt: number | null;
+  /** Jam operasional workspace yang berlaku saat itu, mis. `08:00–22:00`. */
+  operatingHours: string;
+}
+
+export function shiftAlertEventData(
+  input: ShiftAlertEventInput,
+): Record<string, unknown> {
+  return {
+    kind: input.kind,
+    reason: input.reason,
+    day: input.day,
+    localClock: input.localClock,
+    title: input.title,
+    message: input.message,
+    shiftOpenedAt: input.shiftOpenedAt,
+    operatingHours: input.operatingHours,
   };
 }

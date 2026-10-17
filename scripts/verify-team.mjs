@@ -14,11 +14,15 @@ import {
   assignableRoles,
   inviteEmailContent,
   inviteLoginUrl,
+  legacyRoleCleanupDecision,
   MEMBER_CHANGE_LABELS,
   MEMBERSHIP_SUSPENDED_NOTE,
   MEMBER_NAME_MAX,
   normalizePhone,
+  parseRoleChoice,
   resolveTeamInviteForm,
+  ROLE_CHOICE_CUSTOM_PREFIX,
+  roleChoiceValue,
   validateTeamInvite,
   validateTeamMemberEdit,
   validateTeamMemberRemoval,
@@ -146,6 +150,52 @@ check(
   }).text.includes("sari@bisnis.id"),
   "email undangan",
 );
+/*
+  Peran tambahan berdiri sendiri: undangan yang memakainya tidak membawa peran
+  bawaan apa pun (`role: null`), dan emailnya hanya menyebut **satu** peran — nama
+  peran tambahannya — bukan “Kasir (peran kustom: …)”.
+*/
+check(
+  "email undangan menyebut satu peran saja saat memakai peran tambahan",
+  inviteEmailContent({
+    workspace: "Kopi Senja",
+    email: "malam@bisnis.id",
+    role: null,
+    customRoleName: "Kasir Shift Malam",
+    loginUrl: inviteLoginUrl("https://mesinpos.id"),
+  }).text.includes("sebagai Kasir Shift Malam di workspace") &&
+    !inviteEmailContent({
+      workspace: "Kopi Senja",
+      email: "malam@bisnis.id",
+      role: null,
+      customRoleName: "Kasir Shift Malam",
+      loginUrl: inviteLoginUrl("https://mesinpos.id"),
+    }).text.includes("peran kustom:") &&
+    !inviteEmailContent({
+      workspace: "Kopi Senja",
+      email: "malam@bisnis.id",
+      role: null,
+      loginUrl: inviteLoginUrl("https://mesinpos.id"),
+    }).text.includes("peran kustom"),
+  inviteEmailContent({
+    workspace: "Kopi Senja",
+    email: "malam@bisnis.id",
+    role: null,
+    customRoleName: "Kasir Shift Malam",
+    loginUrl: inviteLoginUrl("https://mesinpos.id"),
+  })
+    .text.split("\n")
+    .slice(0, 6)
+    .join(" / "),
+);
+check(
+  "undangan tanpa peran bawaan & tanpa peran tambahan ditolak",
+  validateTeamInvite({ email: "sari@bisnis.id", role: null }, { actingRole: "owner" })
+    .ok === false,
+  JSON.stringify(
+    validateTeamInvite({ email: "sari@bisnis.id", role: null }, { actingRole: "owner" }),
+  ),
+);
 check(
   "peran pemilik hanya ditawarkan kepada pemilik",
   assignableRoles("owner").includes("owner") &&
@@ -160,6 +210,54 @@ check(
   validateTeamInvite({ email: "sari@toko", role: "cashier" }, { actingRole: "owner" })
     .ok === false,
   "email tanpa titik",
+);
+
+/*
+  **Satu nilai untuk satu pemilih peran.** Formulir undangan dan kolom Peran di
+  daftar anggota memakai fungsi yang sama: peran bawaan apa adanya, peran tambahan
+  dengan awalan `custom:<id>` yang **berdiri sendiri** — nilainya tidak membawa
+  peran bawaan mana pun (`role: null`).
+*/
+check(
+  "peran bawaan & peran tambahan punya satu bentuk nilai yang bisa dibaca balik",
+  roleChoiceValue("manager", null) === "manager" &&
+    roleChoiceValue(null, "role-malam") === `${ROLE_CHOICE_CUSTOM_PREFIX}role-malam` &&
+    JSON.stringify(parseRoleChoice("manager")) ===
+      JSON.stringify({ role: "manager", customRoleId: null }) &&
+    JSON.stringify(parseRoleChoice(`${ROLE_CHOICE_CUSTOM_PREFIX}role-malam`)) ===
+      JSON.stringify({ role: null, customRoleId: "role-malam" }) &&
+    parseRoleChoice(`${ROLE_CHOICE_CUSTOM_PREFIX}`) === null &&
+    parseRoleChoice("peran-asing") === null,
+  `${roleChoiceValue("manager", null)} | ${roleChoiceValue(null, "role-malam")} | ${JSON.stringify(parseRoleChoice(`${ROLE_CHOICE_CUSTOM_PREFIX}role-malam`))}`,
+);
+check(
+  "peran tambahan tidak menuliskan peran bawaan apa pun",
+  parseRoleChoice(`${ROLE_CHOICE_CUSTOM_PREFIX}role-malam`).role === null,
+  JSON.stringify(parseRoleChoice(`${ROLE_CHOICE_CUSTOM_PREFIX}role-malam`)),
+);
+/*
+  Peran tambahan berdiri sendiri: Kasir yang dinonaktifkan/dihapus tidak boleh
+  memblokir penugasan peran tambahan, sedangkan undangan yang memakai peran
+  bawaan biasa tetap mengikuti status peran itu.
+*/
+check(
+  "status peran bawaan tidak memblokir undangan berperan tambahan",
+  validateTeamInvite(
+    { email: "malam@bisnis.id", role: null },
+    {
+      actingRole: "owner",
+      standaloneCustomRole: true,
+      roleSettings: [{ role: "cashier", active: false, removed: false }],
+    },
+  ).ok === true &&
+    validateTeamInvite(
+      { email: "biasa@bisnis.id", role: "cashier" },
+      {
+        actingRole: "owner",
+        roleSettings: [{ role: "cashier", active: false, removed: false }],
+      },
+    ).ok === false,
+  "undangan peran tambahan ditolak oleh status Kasir",
 );
 
 // ------------------------------------------------------------ ubah anggota
@@ -422,6 +520,85 @@ check(
       galat.reason.startsWith("Undangan belum bisa dikirim") &&
       galat.reason.includes(MEMBERSHIP_SUSPENDED_NOTE),
     JSON.stringify(galat),
+  );
+}
+
+// ------------------- perapian baris anggota lama: peran bawaan + peran tambahan
+// Baris yang ditulis sebelum 2026-10-17 menyimpan keduanya. Yang dilepas harus
+// peran yang **tidak berlaku** sekarang, supaya akses orangnya tidak berubah.
+{
+  const tenant = "tenant-a";
+  const roleSah = { tenantId: tenant, active: true };
+
+  for (const [label, input] of [
+    ["hanya peran bawaan", { role: "cashier", tenantId: tenant }],
+    ["hanya peran tambahan", { role: null, customRoleId: "role-1", tenantId: tenant }],
+    ["tanpa peran sama sekali", { tenantId: tenant }],
+  ]) {
+    const hasil = legacyRoleCleanupDecision(input);
+    check(
+      `baris ${label} tidak disentuh pembersihan`,
+      hasil.action === "none" && hasil.reason === "sudah-satu-peran",
+      JSON.stringify(hasil),
+    );
+  }
+
+  const berdiriSendiri = legacyRoleCleanupDecision({
+    role: "cashier",
+    customRoleId: "role-1",
+    tenantId: tenant,
+    customRole: roleSah,
+  });
+  check(
+    "peran tambahan yang sah melepas peran bawaan yang menumpang di belakangnya",
+    berdiriSendiri.action === "drop-base-role" &&
+      berdiriSendiri.reason === "peran-tambahan-berdiri-sendiri",
+    JSON.stringify(berdiriSendiri),
+  );
+
+  for (const [label, customRole, reason] of [
+    ["sudah dihapus", null, "peran-tambahan-hilang"],
+    ["dinonaktifkan", { tenantId: tenant, active: false }, "peran-tambahan-nonaktif"],
+    ["milik tenant lain", { tenantId: "tenant-b", active: true }, "peran-tambahan-tenant-lain"],
+  ]) {
+    const hasil = legacyRoleCleanupDecision({
+      role: "cashier",
+      customRoleId: "role-1",
+      tenantId: tenant,
+      customRole,
+    });
+    check(
+      `peran tambahan yang ${label} dilepas, peran bawaan tetap berlaku`,
+      hasil.action === "drop-custom-role" && hasil.reason === reason,
+      JSON.stringify(hasil),
+    );
+  }
+
+  // Pemilik harus selalu memegang seluruh izin; yang dilepas peran tambahannya,
+  // bukan peran Pemiliknya — kalau tidak, workspace bisa kehilangan pemilik aktif
+  // terakhir sekaligus terkunci dari langganannya sendiri.
+  const pemilik = legacyRoleCleanupDecision({
+    role: "owner",
+    customRoleId: "role-1",
+    tenantId: tenant,
+    customRole: roleSah,
+  });
+  check(
+    "anggotanya Pemilik: peran tambahan yang dilepas, peran Pemilik dipertahankan",
+    pemilik.action === "drop-custom-role" && pemilik.reason === "pemilik-tetap-pemilik",
+    JSON.stringify(pemilik),
+  );
+  const pemilikTanpaPeranTambahan = legacyRoleCleanupDecision({
+    role: "owner",
+    customRoleId: "role-1",
+    tenantId: tenant,
+    customRole: null,
+  });
+  check(
+    "Pemilik dengan peran tambahan yang sudah hilang juga tetap Pemilik",
+    pemilikTanpaPeranTambahan.action === "drop-custom-role" &&
+      pemilikTanpaPeranTambahan.reason === "pemilik-tetap-pemilik",
+    JSON.stringify(pemilikTanpaPeranTambahan),
   );
 }
 

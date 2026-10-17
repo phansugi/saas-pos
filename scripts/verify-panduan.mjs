@@ -215,7 +215,7 @@ for (let index = 0; index < coverRuns.length; index += 1) {
     tocEntries.push({ number: Number(match[1]), title: match[2], page: Number(pageNumber) });
   }
 }
-check("Daftar isi memuat 18 bagian", tocEntries.length === 18, `${tocEntries.length} entri`);
+check("Daftar isi memuat 19 bagian", tocEntries.length === 19, `${tocEntries.length} entri`);
 
 const badToc = tocEntries.filter((entry) => {
   const page = pages[entry.page - 1];
@@ -234,8 +234,8 @@ check(
 
 const numbering = tocEntries.map((entry) => entry.number).join(",");
 check(
-  "Nomor bagian berurutan 1..18",
-  numbering === "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18",
+  "Nomor bagian berurutan 1..19",
+  numbering === "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19",
   numbering,
 );
 
@@ -267,6 +267,9 @@ const REQUIRED = [
   ["belum ada gambar", 9],
   ["Layar penuh", 9],
   ["Buka shift", 10],
+  // Bagian 10: gerbang kasir — tanpa shift terbuka, kasir tidak bisa menjual.
+  ["Kasir terkunci", 10],
+  ["shift (kas) belum dibuka", 10],
   // Bagian 11: merapikan produk yang sudah tersimpan.
   ["Harga beli", 11],
   ["Nonaktifkan saja", 11],
@@ -300,6 +303,21 @@ const REQUIRED = [
   ["pos.sell", 18],
   ["WHATSAPP_ACCESS_TOKEN", 18],
   ["Bagikan gambar struk", 18],
+  // Bagian 10: izin halaman Shift & Kas berdiri sendiri (`shift.manage`).
+  ["shift.manage", 10],
+  // Bagian 13: tabel peran & izin memuat izin dapur dan kas.
+  ["kds.manage", 13],
+  ["Membuka & menutup shift kas", 13],
+  // Bagian 19: jam operasional & kabar ke pemilik toko (kas belum dibuka /
+  // shift belum ditutup).
+  ["Jam buka toko", 19],
+  ["Jam tutup toko", 19],
+  ["Pemberitahuan ke pemilik toko", 19],
+  ["Kas belum dibuka padahal toko sudah buka", 19],
+  ["Toko sudah tutup, shift belum ditutup", 19],
+  ["Tandai ditangani", 19],
+  ["shift.alert", 19],
+  ["alamat email pemilik", 19],
 ];
 const missingSteps = REQUIRED.filter(([needle, section]) => {
   const sectionPage = tocEntries.find((entry) => entry.number === section)?.page;

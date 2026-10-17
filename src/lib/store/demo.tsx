@@ -14,12 +14,20 @@
  * is no server to assign them.
  */
 
-import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   API_KEYS,
   CATEGORIES,
   CUSTOMERS,
   CUSTOM_ROLES,
+  ROLE_SETTINGS,
   FRANCHISE_OUTLETS,
   MEMBERS,
   OPNAME_SESSIONS,
@@ -41,6 +49,7 @@ import {
   type DemoApiKey,
   type DemoCustomer,
   type DemoCustomRole,
+  type DemoRoleSetting,
   type DemoMember,
   type DemoOpnameSession,
   type DemoOrder,
@@ -104,6 +113,24 @@ import {
   validateFnbTaxProfile,
   type FnbTaxProfile,
 } from "@/lib/fnbTax";
+import {
+  DEFAULT_SHIFT_SETTING,
+  EMPTY_SHIFT_STATE,
+  SHIFT_STORAGE_KEY,
+  isShiftDayKey,
+  parseShiftState,
+  sameShiftSetting,
+  serializeShiftState,
+  shiftClockText,
+  shiftOpenedAt,
+  shiftOperatingLabel,
+  shiftOwnerAlert,
+  shiftSettingOf,
+  shiftSettingSentence,
+  validateShiftSetting,
+  type ShiftSetting,
+  type ShiftState,
+} from "@/lib/shift";
 import {
   DEFAULT_RECEIPT_SETTING,
   receiptSettingOf,
@@ -217,6 +244,9 @@ import {
   tableDeletionCheck,
   tableLabel,
   tableNameTaken,
+  tableOccupiedReason,
+  ticketPaidLabel,
+  type OpenOrderRef,
   type TableUsage,
 } from "@/lib/fnb";
 import {
@@ -363,18 +393,34 @@ import { useOutbox } from "@/lib/offline/useOutbox";
 import {
   assignmentError,
   effectivePermissions,
-  lackingPermissions,
+  lackingFromPermissions,
   MAX_CUSTOM_ROLES,
   roleAssignments,
   sanitizePermissions,
   validateCustomRole,
 } from "@/lib/rbac";
-import type { Permission } from "@/lib/authz";
+import {
+  isLockedRole,
+  OWNER_ROLE_LOCK_REASON,
+  rolePermissions,
+  rolePermissionsCustomized,
+  roleState,
+  summarizeRoleSettings,
+  validateRoleSetting,
+} from "@/lib/roleSettings";
+import {
+  permissionsFor,
+  ROLES,
+  ROLE_LABELS,
+  type Permission,
+  type Role,
+} from "@/lib/authz";
 import {
   maskPhone,
   receiptWhatsappRecipient,
   type ReceiptWhatsappSendResult,
 } from "@/lib/receiptWhatsapp";
+import { cancelledRegistrationSentence } from "@/lib/account";
 import { actingPermissions, useSession } from "@/lib/session";
 import {
   EMPTY_INVITE_DELIVERY,
@@ -385,6 +431,12 @@ import {
   validateTeamMemberRemoval,
 } from "@/lib/team";
 import { StoreContext } from "./context";
+import type {
+  ShiftAlertReportInput,
+  ShiftAlertReportResult,
+  StoreShiftAlert,
+  StoreTill,
+} from "./types";
 import { modulesFor } from "./modules";
 import {
   EMPTY_AR_SUMMARY,
@@ -464,6 +516,7 @@ import {
   type UpdateWebhookEndpointInput,
   type WebhookTestResult,
   type StoreArSummary,
+  type StoreBuiltinRole,
   type StoreCustomRole,
   type StoreCustomer,
   type StoreLogo,
@@ -479,6 +532,7 @@ import {
   type InvitedTeamMember,
   type UpdateTeamMemberInput,
   type UpdateCustomRoleInput,
+  type UpdateBuiltinRoleInput,
   type UpdateMemberInput,
   type SendReceiptWhatsappInput,
   type UpdateProductInput,
@@ -489,6 +543,8 @@ import {
   type UpdatedFnbTax,
   type UpdateReceiptInput,
   type UpdatedReceipt,
+  type UpdateShiftInput,
+  type UpdatedShift,
   type StoreFnbTaxMonth,
   type StoreFnbTaxMonthSummary,
   type ActDigitalChargeInput,
@@ -1318,6 +1374,21 @@ function summarise(sales: StoreSale[]): StoreSummary {
   };
 }
 
+/**
+ * Keadaan kas di mode demo: tidak ada server yang menyimpannya, jadi hidup di
+ * perangkat ini — bentuk data & kuncinya sama dengan mode Convex (`@/lib/shift`),
+ * sehingga halaman Kasir yang membaca kunci itu tetap sepakat dengan halaman
+ * Shift & Kas. Di mode Convex fungsi yang sama datang dari `pos.till`.
+ */
+function readDeviceTill(): ShiftState {
+  if (typeof window === "undefined") return EMPTY_SHIFT_STATE;
+  try {
+    return parseShiftState(window.localStorage.getItem(SHIFT_STORAGE_KEY));
+  } catch {
+    return EMPTY_SHIFT_STATE;
+  }
+}
+
 export function DemoStoreProvider({ children }: { children: ReactNode }) {
   const {
     session,
@@ -1326,9 +1397,11 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
     setTaxSetting,
     setFnbTaxProfile,
     setReceiptSetting,
+    setShiftSetting,
     setLogoUrl,
     setUserProfile,
     setTenantProfile,
+    setRolePermissions,
   } = useSession();
   const [products, setProducts] = useState<StoreProduct[]>(seedProducts);
   const [sales, setSales] = useState<StoreSale[]>(seedSales);
@@ -1337,6 +1410,13 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
     seedAnalyticsSales(DEFAULT_TAX_RATE_PCT),
   );
   const [analyticsDays, setAnalyticsDays] = useState(DEFAULT_ANALYTICS_DAYS);
+  /**
+   * Pemberitahuan shift yang tercatat di sesi ini (versi demo `shiftAlerts`).
+   * Hidup di memori seperti state demo lain — dan memang hanya tercatat: mode demo
+   * tidak punya kanal email server maupun endpoint webhook, jadi “dikirim ke pemilik” di sini berarti
+   * “sudah tercatat”, yang juga dikatakan apa adanya di halaman Shift & Kas.
+   */
+  const [shiftAlerts, setShiftAlerts] = useState<StoreShiftAlert[]>([]);
   const [tables, setTables] = useState<StoreTable[]>(seedTables);
   /**
    * Denah yang dilihat UI: urutannya urutan tersimpan (`sortTablesByOrder`).
@@ -1345,6 +1425,15 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
    */
   const storeTables = useMemo(() => sortTablesByOrder(tables), [tables]);
   const [heldOrders, setHeldOrders] = useState<HeldOrder[]>([]);
+  /**
+   * Penjualan **lunas** yang dikirim ke dapur pada momen pembayarannya (modul
+   * F&B). Dipisahkan dari `heldOrders` karena artinya memang berbeda: pesanan
+   * tertahan belum dibayar siapa pun **dan** stoknya belum bergerak, sedangkan
+   * tiket ini sudah keduanya — dapur hanya perlu menandainya beres. Meja yang
+   * ditempatinya tetap terkunci sampai dapur menekan Selesai (sama seperti server,
+   * `tableHolders`), karena tamunya masih duduk menunggu pesanannya.
+   */
+  const [kitchenFiredOrders, setKitchenFiredOrders] = useState<HeldOrder[]>([]);
   /** Pesanan QR meja (modul F&B): tagihan dulu, penjualan menyusul. */
   const [mejaOrderRecords, setMejaOrderRecords] = useState<DemoMejaOrderRecord[]>([]);
   const [categoryRows, setCategoryRows] = useState<DemoCategoryRow[]>(seedCategories);
@@ -1352,6 +1441,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
   const [members, setMembers] = useState<DemoMember[]>(seedMembers);
   /** Peran kustom + anggota tim (`rbac.custom`, Phase 4). */
   const [customRoles, setCustomRoles] = useState<DemoCustomRole[]>(CUSTOM_ROLES);
+  const [roleSettings, setRoleSettings] = useState<DemoRoleSetting[]>(ROLE_SETTINGS);
   const [teamMembers, setTeamMembers] = useState<DemoTeamMember[]>(TEAM_MEMBERS);
   /** Kunci API + webhook keluar (`api.access`, Phase 4). */
   const [apiKeys, setApiKeys] = useState<DemoApiKeyRecord[]>(seedApiKeys);
@@ -1591,6 +1681,108 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
 
   const summary = useMemo(() => summarise(sales), [sales]);
 
+  /*
+    Kas **toko** versi demo (padanan `pos.till`): satu keadaan yang dibaca halaman
+    Kasir & halaman Shift & Kas, bukan dua salinan. Perpindahan tab/perangkat
+    tetap terbaca lewat peristiwa `storage`.
+  */
+  const [tillState, setTillState] = useState<ShiftState>(readDeviceTill);
+  useEffect(() => {
+    function onStorage(event: StorageEvent) {
+      if (event.key && event.key !== SHIFT_STORAGE_KEY) return;
+      setTillState(readDeviceTill());
+    }
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  const writeTill = useCallback((next: ShiftState) => {
+    setTillState(next);
+    try {
+      window.localStorage.setItem(SHIFT_STORAGE_KEY, serializeShiftState(next));
+    } catch {
+      /* penyimpanan tidak tersedia — keadaan tetap hidup di memori */
+    }
+  }, []);
+
+  const till = useMemo<StoreTill>(
+    () => ({
+      current: tillState.current
+        ? {
+            id: tillState.current.id,
+            openedAt: shiftOpenedAt(tillState.current),
+            openingCash: tillState.current.openingCash,
+          }
+        : null,
+      history: tillState.history.map((row) => ({
+        id: row.id,
+        openedAt: shiftOpenedAt(row),
+        closedAt: row.closedAt ? Date.parse(row.closedAt) : shiftOpenedAt(row),
+        openingCash: row.openingCash,
+        countedCash: row.countedCash ?? 0,
+        expectedCash: row.expectedCash ?? 0,
+        variance: row.variance ?? 0,
+      })),
+    }),
+    [tillState],
+  );
+
+  const openTill = useCallback(
+    async (input: { openingCash: number }): Promise<void> => {
+      if (tillState.current) {
+        // Satu kas per toko — sama dengan penjagaan `pos.openShift` di server.
+        throw new Error(
+          "Kas toko ini masih terbuka — tutup dulu shift yang berjalan sebelum membuka yang baru.",
+        );
+      }
+      writeTill({
+        ...tillState,
+        current: {
+          id: `shift-${Date.now()}`,
+          openedAt: new Date().toISOString(),
+          openingCash: input.openingCash,
+          cashSales: summary.byMethod.Tunai,
+          totalSales: summary.revenue,
+          saleCount: summary.transactions,
+          closedAt: null,
+          countedCash: null,
+          expectedCash: null,
+          variance: null,
+        },
+      });
+    },
+    [summary, tillState, writeTill],
+  );
+
+  const closeTill = useCallback(
+    async (input: { countedCash: number }): Promise<void> => {
+      const current = tillState.current;
+      if (!current) {
+        throw new Error("Kas belum dibuka; tidak ada shift yang bisa ditutup.");
+      }
+      // Angka penjualannya dibaca saat kasnya **ditutup**, bukan dari catatan
+      // waktu dibuka: transaksi yang terjadi selama shift ikut terhitung.
+      const expectedCash = current.openingCash + summary.byMethod.Tunai;
+      writeTill({
+        current: null,
+        history: [
+          {
+            ...current,
+            cashSales: summary.byMethod.Tunai,
+            totalSales: summary.revenue,
+            saleCount: summary.transactions,
+            closedAt: new Date().toISOString(),
+            countedCash: input.countedCash,
+            expectedCash,
+            variance: input.countedCash - expectedCash,
+          },
+          ...tillState.history,
+        ].slice(0, 10),
+      });
+    },
+    [summary, tillState, writeTill],
+  );
+
   /**
    * Katalog penjualan: hanya produk **aktif** — sama seperti `products.listByStore`
    * di server. Produk nonaktif tetap ada di `catalogProducts` supaya halaman Produk
@@ -1651,24 +1843,41 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
     [planKey, activeVerticals],
   );
 
+  /**
+   * Meja yang sedang ditempati di mode demo — cermin `tableHolders` di server:
+   * pesanan tertahan, **dan** penjualan yang sudah dibayar tetapi tiketnya belum
+   * ditandai selesai oleh dapur (`kitchenFiredOrders`). Meja tamu yang uangnya
+   * sudah masuk karena itu tetap terkunci sampai dapurnya menekan Selesai.
+   */
+  const seatedOrders = useMemo<OpenOrderRef[]>(
+    () => [
+      ...heldOrders.map((order) => ({
+        id: order.id,
+        number: order.number,
+        createdAt: order.createdAt,
+        tableId: order.tableId,
+        settled: false,
+      })),
+      ...kitchenFiredOrders.map((order) => ({
+        id: order.id,
+        number: order.number,
+        createdAt: order.createdAt,
+        tableId: order.tableId,
+        settled: true,
+      })),
+    ],
+    [heldOrders, kitchenFiredOrders],
+  );
+
   /** Aturan "satu meja satu pesanan terbuka", dipakai demo dan server. */
   const requireFreeTable = useCallback(
     (tableId: string | undefined) => {
       if (!tableId) return;
       requireModuleFeature("pos.table");
-      const seat = seatTable(
-        tables,
-        heldOrders.map((order) => ({
-          id: order.id,
-          number: order.number,
-          createdAt: order.createdAt,
-          tableId: order.tableId,
-        })),
-        tableId,
-      );
+      const seat = seatTable(tables, seatedOrders, tableId);
       if (!seat.ok) throw new Error(seat.reason);
     },
-    [heldOrders, requireModuleFeature, tables],
+    [seatedOrders, requireModuleFeature, tables],
   );
 
   /**
@@ -1823,6 +2032,158 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       return { changed, setting: after, sentence: receiptSettingSentence(after) };
     },
     [receipt, setReceiptSetting],
+  );
+
+  /**
+   * Setelan pengingat tutup shift: kolom `tenants.shift` yang sama dengan server.
+   * Workspace yang belum menyimpannya dibaca sebagai bawaan (aktif, 21:00, 14 jam),
+   * jadi perilaku pengingatnya tidak berubah dengan sendirinya.
+   */
+  const shift = useMemo<ShiftSetting>(
+    () => shiftSettingOf(session?.tenant?.shift ?? DEFAULT_SHIFT_SETTING),
+    [session],
+  );
+
+  /**
+   * Menyimpan setelan pengingat tutup shift. Validasi & kalimatnya memakai aturan
+   * murni `@/lib/shift`, jadi pesan yang dilihat pemilik toko di mode demo sama
+   * dengan yang datang dari `tenants.updateShift` di server (termasuk penolakan
+   * jam di luar 0–23 atau ambang di luar 1–24 jam).
+   */
+  const setShift = useCallback(
+    async (input: UpdateShiftInput): Promise<UpdatedShift> => {
+      const decision = validateShiftSetting(input);
+      if (!decision.ok) throw new Error(decision.reason);
+
+      const after = decision.value;
+      const changed = !sameShiftSetting(shift, after);
+      if (changed) setShiftSetting(after);
+
+      return { changed, setting: after, sentence: shiftSettingSentence(after) };
+    },
+    [shift, setShiftSetting],
+  );
+
+  /**
+   * Pemberitahuan shift ke pemilik toko di mode demo. Aturannya **sama** dengan
+   * server — `shiftOwnerAlert` dengan jam lokal yang dilaporkan, saklar
+   * `notifyOwner` yang mematikan, hari yang sama tidak dikabarkan dua kali, dan
+   * jenis laporan yang tidak cocok keadaan ditolak (`throw`, sama seperti
+   * `shiftAlerts.report`) — karena halaman yang memakainya tidak boleh berperilaku
+   * berbeda tergantung mode.
+   *
+   * Satu bedanya dikatakan apa adanya: mode demo tidak punya kanal email server
+   * maupun endpoint webhook, jadi kabarnya **tercatat** tanpa terkirim
+   * (`notifiedEndpoints: 0`, `emailVia: "demo"`) dan kalimatnya menyebut itu,
+   * bukan mengaku sudah sampai ke pemilik.
+   */
+  const reportShiftAlert = useCallback(
+    async (input: ShiftAlertReportInput): Promise<ShiftAlertReportResult> => {
+      const clock = input.clock;
+      const kosong = (notice: string): ShiftAlertReportResult => ({
+        recorded: false,
+        duplicate: false,
+        alertId: null,
+        kind: null,
+        reason: null,
+        dayKey: null,
+        notifiedEndpoints: 0,
+        emailRecipients: [],
+        notice,
+      });
+
+      if (!shift.notifyOwner) {
+        return kosong(
+          "Pemberitahuan ke pemilik toko dimatikan di halaman Pengaturan, jadi tidak ada kabar yang dikirim.",
+        );
+      }
+      if (!isShiftDayKey(clock.dayKey)) {
+        throw new Error("Hari laporan shift tidak terbaca (harus berbentuk YYYY-MM-DD).");
+      }
+
+      const alert = shiftOwnerAlert({
+        current: input.openedAt ? { openedAt: input.openedAt } : null,
+        setting: shift,
+        clock,
+      });
+      if (!alert) {
+        return kosong(
+          "Keadaan kas ini tidak (lagi) perlu diberitahukan ke pemilik toko menurut jam operasional workspace.",
+        );
+      }
+      if (alert.kind !== input.kind) {
+        throw new Error(
+          `Laporan “${input.kind}” tidak cocok dengan keadaan kas saat ini (yang berlaku: ${alert.kind}).`,
+        );
+      }
+
+      const sudahAda = shiftAlerts.find(
+        (row) => row.kind === alert.kind && row.dayKey === alert.dayKey,
+      );
+      if (sudahAda) {
+        return {
+          ...kosong(
+            `Pemilik toko sudah diberitahukan soal ini hari ini (pukul ${sudahAda.localClock}), jadi tidak ada kabar kedua.`,
+          ),
+          duplicate: true,
+          alertId: sudahAda.id,
+          kind: sudahAda.kind,
+          dayKey: sudahAda.dayKey,
+        };
+      }
+
+      const row: StoreShiftAlert = {
+        id: `alert-${Date.now()}`,
+        kind: alert.kind,
+        reason: alert.reason,
+        dayKey: alert.dayKey,
+        title: alert.title,
+        message: alert.message,
+        localClock: shiftClockText(clock),
+        openedAt: input.openedAt ?? null,
+        notifiedEndpoints: 0,
+        emailRecipients: [],
+        /*
+          Mode demo tidak punya server: tidak ada penyedia email yang bisa
+          dihubungi dari sini, jadi keadaannya ditandai `demo` — bukan dibiarkan
+          kosong seolah-olah emailnya masih dalam perjalanan.
+        */
+        emailVia: "demo",
+        emailDeliveredAt: null,
+        emailError: null,
+        reportedAt: Date.now(),
+        resolvedAt: null,
+      };
+      setShiftAlerts((current) => [row, ...current].slice(0, 50));
+
+      return {
+        recorded: true,
+        duplicate: false,
+        alertId: row.id,
+        kind: alert.kind,
+        reason: alert.reason,
+        dayKey: alert.dayKey,
+        notifiedEndpoints: 0,
+        emailRecipients: [],
+        notice:
+          `Pemberitahuan “${alert.title}” tercatat, tetapi mode demo tidak punya kanal email server ` +
+          `maupun endpoint webhook — pemilik toko belum menerima kabarnya. Jam operasional yang ` +
+          `dipakai: ${shiftOperatingLabel(shift)}.`,
+      };
+    },
+    [shift, shiftAlerts, setShiftAlerts],
+  );
+
+  /** Menandai satu kabar shift sudah ditangani (versi demo `shiftAlerts.resolve`). */
+  const resolveShiftAlert = useCallback(
+    async (alertId: string): Promise<void> => {
+      setShiftAlerts((current) =>
+        current.map((row) =>
+          row.id === alertId && !row.resolvedAt ? { ...row, resolvedAt: Date.now() } : row,
+        ),
+      );
+    },
+    [setShiftAlerts],
   );
 
   /**
@@ -2021,7 +2382,12 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
 
   /** The optimistic local commit — this is what the cashier sees immediately. */
   const applySale = useCallback(
-    (input: CreateSaleInput): { number: string; total: number; memberDiscount: number } => {
+    (input: CreateSaleInput): {
+      number: string;
+      total: number;
+      memberDiscount: number;
+      kitchenFired: boolean;
+    } => {
       if (input.items.length === 0) throw new Error("Keranjang kosong.");
       requireFreeTable(input.tableId);
 
@@ -2168,10 +2534,49 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
         },
       ]);
 
+      /*
+        Dapur (modul F&B): penjualan yang **sudah lunas** langsung masuk antrean
+        dapur pada momen pembayarannya — tunai, QRIS, atau VA sama saja, karena
+        yang menentukan hanya "uangnya sudah tercatat". Ini langkah yang sama
+        dengan `pos.createSale` di server (`fireKitchenOnSale`), jadi mode demo
+        tidak menjanjikan antrean yang berbeda dari produksi.
+      */
+      const fireKitchen = isFeatureEnabled(
+        entitlementFor(planKey),
+        activeVerticals,
+        "pos.kds",
+      );
+      if (fireKitchen) {
+        setKitchenFiredOrders((current) => [
+          ...current,
+          {
+            id: `fired-${soldAt}`,
+            number,
+            createdAt: soldAt,
+            method: input.method,
+            tableId: input.tableId,
+            total: taxed.gross,
+            tax: taxed.tax,
+            serviceCharge: totals.serviceCharge,
+            lines: lines.map((line) => ({
+              productId: line.product.id,
+              name: line.product.name,
+              quantity: line.baseQty,
+              lineTotal: line.lineTotal,
+              modifiers:
+                line.modifierLabels.length > 0
+                  ? line.modifierLabels
+                  : undefined,
+            })),
+          },
+        ]);
+      }
+
       return {
         number,
         total: taxed.gross,
         memberDiscount: breakdown.memberDiscount,
+        kitchenFired: fireKitchen,
       };
     },
     [
@@ -2179,6 +2584,8 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       sales,
       heldOrders,
       customers,
+      planKey,
+      activeVerticals,
       memberBreakdown,
       commitReceivables,
       commitDigitalCharges,
@@ -2309,6 +2716,27 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
     [heldOrders, products],
   );
 
+  /**
+   * Tombol **Selesai** di layar dapur, satu jalan untuk kedua jenis tiket.
+   *
+   * Tiket yang lahir dari pembayaran sudah lunas dan stoknya sudah bergerak saat
+   * `applySale` mencatat penjualannya, jadi yang perlu dikerjakan hanya
+   * mengeluarkannya dari antrean — bukan menyelesaikan penjualannya lagi (itu
+   * akan mengurangi stok dua kali). Pesanan tertahan tetap lewat `completeHeld`.
+   */
+  const finishKitchenTicket = useCallback(
+    async (saleId: string): Promise<void> => {
+      if (kitchenFiredOrders.some((order) => order.id === saleId)) {
+        setKitchenFiredOrders((current) =>
+          current.filter((order) => order.id !== saleId),
+        );
+        return;
+      }
+      await completeHeld(saleId);
+    },
+    [kitchenFiredOrders, completeHeld],
+  );
+
   /** Tambah meja ke denah (modul F&B + aturan validasi yang sama dengan server). */
   const createTable = useCallback(
     async (input: CreateTableInput): Promise<void> => {
@@ -2389,19 +2817,15 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       if (!table) throw new Error("Meja tidak ditemukan untuk tenant ini.");
 
       if (!active) {
-        const occupied = heldOrders.find((order) => order.tableId === tableId);
-        if (occupied) {
-          throw new Error(
-            `Meja ${table.name} masih terisi pesanan ${occupied.number}. Selesaikan atau batalkan dulu.`,
-          );
-        }
+        const occupied = seatedOrders.find((order) => order.tableId === tableId);
+        if (occupied) throw new Error(tableOccupiedReason(table.name, occupied));
       }
 
       setTables((current) =>
         current.map((t) => (t.id === tableId ? { ...t, active } : t)),
       );
     },
-    [requireModuleFeature, tables, heldOrders],
+    [requireModuleFeature, tables, seatedOrders],
   );
 
   /**
@@ -2562,20 +2986,41 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
   const kdsTickets = useMemo(
     () =>
       kdsQueue(
-        heldOrders.map((order) => ({
-          id: order.id,
-          number: order.number,
-          createdAt: order.createdAt,
-          tableId: order.tableId,
-          items: order.lines.map((line) => ({
-            name: line.name,
-            quantity: line.quantity,
-            modifiers: line.modifiers,
+        [
+          ...heldOrders.map((order) => ({
+            id: order.id,
+            number: order.number,
+            createdAt: order.createdAt,
+            tableId: order.tableId,
+            settled: false,
+            items: order.lines.map((line) => ({
+              name: line.name,
+              quantity: line.quantity,
+              modifiers: line.modifiers,
+            })),
           })),
-        })),
+          // Tiket yang lahir dari pembayaran: dibedakan `settled` supaya tombol
+          // Selesai-nya tidak menyelesaikan penjualan untuk kedua kalinya.
+          ...kitchenFiredOrders.map((order) => ({
+            id: order.id,
+            number: order.number,
+            createdAt: order.createdAt,
+            tableId: order.tableId,
+            settled: true,
+            paidLabel: ticketPaidLabel({
+              method: methodKeyFor(order.method),
+              firedAt: order.createdAt,
+            }),
+            items: order.lines.map((line) => ({
+              name: line.name,
+              quantity: line.quantity,
+              modifiers: line.modifiers,
+            })),
+          })),
+        ],
         tables,
       ),
-    [heldOrders, tables],
+    [heldOrders, kitchenFiredOrders, tables],
   );
 
   /**
@@ -2604,6 +3049,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
         total: applied.total,
         queued: result === null,
         memberDiscount: applied.memberDiscount,
+        kitchenFired: applied.kitchenFired,
       };
     },
     [applySale, outbox],
@@ -3655,6 +4101,8 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       previousSales: reportEnabled ? analyticsSales : [],
       range,
       timezoneOffsetMinutes: offset,
+      // “Hari ini” ikut dihitung dari jam peramban, sama seperti batas harinya.
+      now: Date.now(),
     });
   }, [analyticsSales, analyticsDays, planKey, activeVerticals]);
 
@@ -4743,7 +5191,16 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
   );
 
   // -------------------- Phase 4: peran kustom (`rbac.custom`) -------------
-  const actingBaseRole = session?.tenant?.role ?? "owner";
+  /*
+    Peran **bawaan** pengguna aktif; `null` kalau ia memakai peran tambahan yang
+    berdiri sendiri. Sengaja bukan “pemilik secara bawaan”: sesi tanpa peran
+    bawaan tidak boleh mewarisi izin peran mana pun.
+  */
+  const actingBaseRole: Role | null = session?.tenant?.role ?? null;
+  /** Label peran aktif untuk pesan galat & notis. */
+  const actingBaseRoleLabel = actingBaseRole
+    ? ROLE_LABELS[actingBaseRole]
+    : "peran tambahan";
 
   const storeCustomRoles: StoreCustomRole[] = useMemo(
     () =>
@@ -4760,6 +5217,36 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
     [customRoles, teamMembers],
   );
 
+  /**
+   * Penyesuaian satu peran bawaan; `null` = belum diatur (bawaan).
+   *
+   * Dibaca lewat satu fungsi supaya daftar, izin efektif anggota, dan pagar
+   * aksinya tidak pernah memakai baris yang berbeda.
+   */
+  const settingOf = useCallback(
+    (role: Role) => roleSettings.find((row) => row.role === role) ?? null,
+    [roleSettings],
+  );
+
+  const storeBuiltinRoles: StoreBuiltinRole[] = useMemo(
+    () =>
+      ROLES.map((role) => {
+        const setting = settingOf(role);
+        const state = roleState(setting);
+        return {
+          role,
+          label: ROLE_LABELS[role],
+          permissions: rolePermissions(role, setting),
+          basePermissions: sanitizePermissions(permissionsFor(role)),
+          active: state === "aktif",
+          removed: state === "dihapus",
+          customized: rolePermissionsCustomized(setting),
+          memberCount: teamMembers.filter((member) => member.role === role).length,
+        };
+      }),
+    [settingOf, teamMembers],
+  );
+
   const roleSummary: StoreRoleSummary = useMemo(
     () => ({
       total: storeCustomRoles.length,
@@ -4767,8 +5254,9 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       assignedMembers: storeCustomRoles.reduce((sum, row) => sum + row.memberCount, 0),
       limit: MAX_CUSTOM_ROLES,
       canCreate: storeCustomRoles.length < MAX_CUSTOM_ROLES,
+      builtin: { ...summarizeRoleSettings(roleSettings), total: ROLES.length },
     }),
-    [storeCustomRoles],
+    [roleSettings, storeCustomRoles],
   );
 
   const storeTeamMembers: StoreTeamMember[] = useMemo(
@@ -4779,6 +5267,12 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
         // Peran kustom yang nonaktif tidak berlaku lagi — anggota kembali ke
         // peran bawaannya, sama seperti resolusi di backend.
         const effective = role && role.active ? role : null;
+        // Izin peran bawaan anggota ini = izin bawaan ± penyesuaian workspace,
+        // lalu **digantikan** peran kustom kalau ada yang berlaku. Anggota
+        // berperan tambahan tidak punya peran bawaan sama sekali.
+        const base = member.role
+          ? rolePermissions(member.role, settingOf(member.role))
+          : [];
         return {
           membershipId: member.membershipId,
           userId: member.userId,
@@ -4787,7 +5281,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
           role: member.role,
           customRoleId: effective ? effective.id : null,
           customRoleName: effective ? effective.name : null,
-          permissions: effectivePermissions(member.role, effective?.permissions ?? null),
+          permissions: effectivePermissions(member.role, effective?.permissions ?? base),
           active: member.active,
           invite: member.invite
             ? {
@@ -4803,7 +5297,142 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
             : EMPTY_WA_INVITE,
         };
       }),
-    [customRoles, teamMembers],
+    [customRoles, settingOf, teamMembers],
+  );
+
+  // ---------------- Peran bawaan yang bisa diatur (`roleSettings`) --------
+  /**
+   * Izin efektif pengguna aktif, **sudah termasuk penyesuaian peran bawaan**.
+   *
+   * Dihitung dari state `roleSettings`, bukan dari sesi, supaya aksi berikutnya
+   * dalam satu tick tidak memakai izin yang basi — pagar eskalasi harus memakai
+   * wewenang yang benar-benar dimiliki saat itu.
+   */
+  const actingNowPermissions = useMemo(() => {
+    const setting = actingBaseRole ? settingOf(actingBaseRole) : null;
+    return effectivePermissions(
+      actingBaseRole,
+      session?.tenant?.customRole?.permissions ??
+        (actingBaseRole ? rolePermissions(actingBaseRole, setting) : null),
+    );
+  }, [actingBaseRole, session, settingOf]);
+
+  /**
+   * Menulis satu baris penyesuaian peran bawaan. Baris yang tidak menyimpan apa
+   * pun dibuang, bukan dibiarkan kosong: “tanpa baris” berarti bawaan.
+   */
+  const writeRoleSetting = useCallback((next: DemoRoleSetting) => {
+    const kosong =
+      next.permissions === undefined &&
+      next.active === undefined &&
+      next.removed === undefined;
+    setRoleSettings((current) => [
+      ...current.filter((row) => row.role !== next.role),
+      ...(kosong ? [] : [next]),
+    ]);
+  }, []);
+
+  /**
+   * Sesi menyusul keadaan store: anggota yang peran bawaannya disesuaikan harus
+   * melihat menu & rute yang sama dengan yang akan diizinkan server.
+   */
+  useEffect(() => {
+    const setting = actingBaseRole ? settingOf(actingBaseRole) : null;
+    const customized = setting ? rolePermissionsCustomized(setting) : false;
+    setRolePermissions(
+      customized && actingBaseRole
+        ? rolePermissions(actingBaseRole, setting)
+        : null,
+    );
+  }, [actingBaseRole, setRolePermissions, settingOf]);
+
+  const updateBuiltinRole = useCallback(
+    async (
+      input: UpdateBuiltinRoleInput,
+    ): Promise<{ role: Role; permissions: Permission[]; active: boolean }> => {
+      const before = settingOf(input.role);
+      const editingPermissions = input.permissions !== undefined;
+      // Menyunting izin = membuka akses baru → butuh fiturnya. Menonaktifkan/
+      // mengaktifkan selalu boleh (kebalikannya: mencabut akses).
+      if (editingPermissions) requireModuleFeature("rbac.custom");
+
+      const validation = validateRoleSetting(
+        { permissions: input.permissions, active: input.active },
+        { role: input.role, actingPermissions: actingNowPermissions },
+      );
+      if (!validation.ok) throw new Error(validation.reason);
+      const draft = validation.value;
+
+      const next: DemoRoleSetting = {
+        role: input.role,
+        permissions: draft.permissions ?? before?.permissions,
+        active: draft.active ?? before?.active,
+        removed: before?.removed,
+      };
+      writeRoleSetting(next);
+      return {
+        role: input.role,
+        permissions: rolePermissions(input.role, next),
+        active: roleState(next) === "aktif",
+      };
+    },
+    [actingNowPermissions, requireModuleFeature, settingOf, writeRoleSetting],
+  );
+
+  const deleteBuiltinRole = useCallback(
+    async (role: Role): Promise<void> => {
+      if (isLockedRole(role)) throw new Error(OWNER_ROLE_LOCK_REASON);
+      const used = teamMembers.filter((row) => row.role === role).length;
+      if (used > 0) {
+        throw new Error(
+          `Peran "${ROLE_LABELS[role]}" masih dipakai ${used} anggota; pindahkan mereka ke peran lain dulu.`,
+        );
+      }
+      const before = settingOf(role);
+      writeRoleSetting({
+        role,
+        permissions: before?.permissions,
+        active: before?.active,
+        removed: true,
+      });
+    },
+    [settingOf, teamMembers, writeRoleSetting],
+  );
+
+  const restoreBuiltinRole = useCallback(
+    async (role: Role): Promise<void> => {
+      if (isLockedRole(role)) throw new Error(OWNER_ROLE_LOCK_REASON);
+      const before = settingOf(role);
+      writeRoleSetting({
+        role,
+        permissions: before?.permissions,
+        active: before?.active,
+        removed: undefined,
+      });
+    },
+    [settingOf, writeRoleSetting],
+  );
+
+  const resetBuiltinRole = useCallback(
+    async (role: Role): Promise<void> => {
+      if (isLockedRole(role)) throw new Error(OWNER_ROLE_LOCK_REASON);
+      requireModuleFeature("rbac.custom");
+      // Izin bawaan tetap melewati pagar eskalasi: “kembalikan ke bawaan” juga
+      // bisa menambah izin orang lain.
+      const validation = validateRoleSetting(
+        { permissions: permissionsFor(role) },
+        { role, actingPermissions: actingNowPermissions },
+      );
+      if (!validation.ok) throw new Error(validation.reason);
+      const before = settingOf(role);
+      writeRoleSetting({
+        role,
+        permissions: undefined,
+        active: before?.active,
+        removed: before?.removed,
+      });
+    },
+    [actingNowPermissions, requireModuleFeature, settingOf, writeRoleSetting],
   );
 
   const createCustomRole = useCallback(
@@ -4811,6 +5440,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       requireModuleFeature("rbac.custom");
       const validation = validateCustomRole(input, {
         actingRole: actingBaseRole,
+        actingPermissions: actingNowPermissions,
         existingNames: customRoles.map((row) => row.name),
         count: customRoles.length,
       });
@@ -4820,7 +5450,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       setCustomRoles((current) => [...current, { id, ...draft, active: true }]);
       return { id, name: draft.name };
     },
-    [actingBaseRole, customRoles, requireModuleFeature],
+    [actingBaseRole, actingNowPermissions, customRoles, requireModuleFeature],
   );
 
   const updateCustomRole = useCallback(
@@ -4852,6 +5482,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
         },
         {
           actingRole: actingBaseRole,
+          actingPermissions: actingNowPermissions,
           existingNames: customRoles
             .filter((row) => row.id !== input.roleId)
             .map((row) => row.name),
@@ -4868,7 +5499,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
         ),
       );
     },
-    [actingBaseRole, customRoles, requireModuleFeature],
+    [actingBaseRole, actingNowPermissions, customRoles, requireModuleFeature],
   );
 
   const deleteCustomRole = useCallback(
@@ -4912,20 +5543,30 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
         );
       }
 
-      const lacking = lackingPermissions(actingBaseRole, role.permissions);
+      // Pagar eskalasi memakai izin efektif penugasnya, termasuk penyesuaian
+      // peran bawaan workspace ini.
+      const lacking = lackingFromPermissions(actingNowPermissions, role.permissions);
       if (lacking.length > 0) {
         throw new Error(
           `Anda tidak bisa menugaskan peran yang punya izin di luar wewenang Anda (${lacking.join(", ")}).`,
         );
       }
 
+      /*
+        Peran tambahan **menggantikan** peran yang sedang dipakai, bukan menumpang
+        di atasnya: peran bawaan yang tersimpan dilepas (`role: null`) supaya
+        anggota itu benar-benar hanya memakai peran ini — sama seperti
+        `roles.assign` di server.
+      */
       setTeamMembers((current) =>
         current.map((row) =>
-          row.membershipId === membershipId ? { ...row, customRoleId: role.id } : row,
+          row.membershipId === membershipId
+            ? { ...row, customRoleId: role.id, role: null }
+            : row,
         ),
       );
     },
-    [actingBaseRole, customRoles, requireModuleFeature, teamMembers],
+    [actingNowPermissions, customRoles, requireModuleFeature, teamMembers],
   );
 
   // -------------------- Phase 4: akses API & webhook (`api.access`) -------
@@ -4952,12 +5593,22 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
     async (input: InviteTeamMemberInput): Promise<InvitedTeamMember> => {
       if (!actingEffectivePermissions.includes("team.manage")) {
         throw new Error(
-          `Akses ditolak: peran ${actingBaseRole} tidak memiliki izin team.manage.`,
+          `Akses ditolak: ${actingBaseRoleLabel} tidak memiliki izin team.manage.`,
         );
       }
+    /*
+      Peran tambahan berdiri sendiri: tidak ada peran bawaan yang ikut ditulis,
+      jadi status peran bawaan mana pun tidak dipakai sebagai pagar — pagar
+      sebenarnya adalah peran tambahannya (aktif, fitur, tidak melebihi
+      wewenang) yang diperiksa di bawah.
+    */
       const invite = validateTeamInvite(
-        { email: input.email, name: input.name, role: input.role },
-        { actingRole: actingBaseRole },
+        { email: input.email, name: input.name, role: input.role ?? null },
+        {
+          actingRole: actingBaseRole,
+          roleSettings: input.customRoleId ? [] : roleSettings,
+          standaloneCustomRole: Boolean(input.customRoleId),
+        },
       );
       if (!invite.ok) throw new Error(invite.reason);
       const { email, name, role } = invite.value;
@@ -4972,6 +5623,38 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
         phone = nomor.value;
       }
 
+      /*
+        Peran kustom boleh dipilih sejak undangan pertama — pagar yang sama
+        dengan `roles.assign` (dan dengan `members.add` di server): fitur
+        `rbac.custom` harus dimuat, perannya harus aktif, izinnya tidak boleh
+        melebihi wewenang pengundang, dan pemilik tenant tidak bisa diberinya.
+      */
+      let customRoleId: string | null = null;
+      if (input.customRoleId) {
+        const blocked = assignmentError(role);
+        if (blocked) throw new Error(blocked);
+        requireModuleFeature("rbac.custom");
+        const customRole = customRoles.find((row) => row.id === input.customRoleId);
+        if (!customRole) {
+          throw new Error("Peran kustom tidak ditemukan untuk tenant ini.");
+        }
+        if (!customRole.active) {
+          throw new Error(
+            `Peran "${customRole.name}" sedang nonaktif; aktifkan dulu sebelum ditugaskan.`,
+          );
+        }
+        const lacking = lackingFromPermissions(
+          actingEffectivePermissions,
+          customRole.permissions,
+        );
+        if (lacking.length > 0) {
+          throw new Error(
+            `Anda tidak bisa menugaskan peran yang punya izin di luar wewenang Anda (${lacking.join(", ")}).`,
+          );
+        }
+        customRoleId = customRole.id;
+      }
+
       const existing = teamMembers.find((row) => row.email === email);
       if (existing) {
         // Undangan untuk email yang sudah jadi anggota = perubahan peran, bukan
@@ -4979,7 +5662,22 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
         setTeamMembers((current) =>
           current.map((row) =>
             row.membershipId === existing.membershipId
-              ? { ...row, name, role, active: true, phone: phone ?? row.phone }
+              ? {
+                  ...row,
+                  name,
+                  // Satu anggota = satu peran: undangan ini menggantikan peran
+                  // lama seutuhnya, termasuk melepas peran tambahan bila yang
+                  // dipilih sekarang peran bawaan.
+                  role: customRoleId ? null : role,
+                  active: true,
+                  phone: phone ?? row.phone,
+                  customRoleId:
+                    input.customRoleId === undefined
+                      ? role
+                        ? null
+                        : row.customRoleId
+                      : customRoleId,
+                }
               : row,
           ),
         );
@@ -4987,7 +5685,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
           membershipId: existing.membershipId,
           userId: existing.userId,
           email,
-          role,
+          role: customRoleId ? null : role,
           created: false,
           invite: existing.invite ?? EMPTY_INVITE_DELIVERY,
         };
@@ -5014,16 +5712,31 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
           userId,
           name,
           email,
-          role,
-          customRoleId: null,
+          // Peran tambahan berdiri sendiri: tidak ada peran bawaan yang menemani.
+          role: customRoleId ? null : role,
+          customRoleId,
           active: true,
           invite: inviteState,
           phone,
         },
       ]);
-      return { membershipId, userId, email, role, created: true, invite: inviteState };
+      return {
+        membershipId,
+        userId,
+        email,
+        role: customRoleId ? null : role,
+        created: true,
+        invite: inviteState,
+      };
     },
-    [actingBaseRole, actingEffectivePermissions, teamMembers],
+    [
+      actingBaseRole,
+      actingEffectivePermissions,
+      customRoles,
+      requireModuleFeature,
+      roleSettings,
+      teamMembers,
+    ],
   );
 
   /**
@@ -5054,7 +5767,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
     ): Promise<{ email: string; changed: string[] }> => {
       if (!actingEffectivePermissions.includes("team.manage")) {
         throw new Error(
-          `Akses ditolak: peran ${actingBaseRole} tidak memiliki izin team.manage.`,
+          `Akses ditolak: ${actingBaseRoleLabel} tidak memiliki izin team.manage.`,
         );
       }
       const target = teamMembers.find((row) => row.membershipId === input.membershipId);
@@ -5081,6 +5794,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
           actorMembershipId: actingMembershipId,
           activeOwners: teamMembers.filter((row) => row.role === "owner" && row.active)
             .length,
+          roleSettings,
           otherEmails: teamMembers
             .filter((row) => row.membershipId !== input.membershipId)
             .map((row) => row.email.trim().toLowerCase()),
@@ -5101,13 +5815,18 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
                 role: decision.value.role,
                 phone: decision.value.phone,
                 active: decision.value.active,
+                // Satu anggota = satu peran: begitu peran bawaan dikirim secara
+                // eksplisit, peran tambahan yang menempel dilepas — sama seperti
+                // `members.update` di server.
+                customRoleId:
+                  input.role === undefined ? row.customRoleId : null,
               }
             : row,
         ),
       );
       return { email: decision.value.email, changed: decision.changed };
     },
-    [actingBaseRole, actingEffectivePermissions, actingMembershipId, teamMembers],
+    [actingBaseRole, actingEffectivePermissions, actingMembershipId, roleSettings, teamMembers],
   );
 
   /** Menghapus anggota dari tim (mode demo) — keanggotaan saja, bukan akunnya. */
@@ -5115,7 +5834,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
     async (membershipId: string): Promise<{ email: string }> => {
       if (!actingEffectivePermissions.includes("team.manage")) {
         throw new Error(
-          `Akses ditolak: peran ${actingBaseRole} tidak memiliki izin team.manage.`,
+          `Akses ditolak: ${actingBaseRoleLabel} tidak memiliki izin team.manage.`,
         );
       }
       const target = teamMembers.find((row) => row.membershipId === membershipId);
@@ -5145,7 +5864,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
     async (membershipId: string): Promise<void> => {
       if (!actingEffectivePermissions.includes("team.manage")) {
         throw new Error(
-          `Akses ditolak: peran ${actingBaseRole} tidak memiliki izin team.manage.`,
+          `Akses ditolak: ${actingBaseRoleLabel} tidak memiliki izin team.manage.`,
         );
       }
       const target = teamMembers.find((row) => row.membershipId === membershipId);
@@ -5180,7 +5899,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
     async (membershipId: string): Promise<{ email: string }> => {
       if (!actingEffectivePermissions.includes("team.manage")) {
         throw new Error(
-          `Akses ditolak: peran ${actingBaseRole} tidak memiliki izin team.manage.`,
+          `Akses ditolak: ${actingBaseRoleLabel} tidak memiliki izin team.manage.`,
         );
       }
       const target = teamMembers.find((row) => row.membershipId === membershipId);
@@ -5295,7 +6014,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
           publicId: minted.publicId,
           secretHash: minted.secretHash,
           scopes: draft.scopes,
-          creatorRole: actingBaseRole,
+          creatorRole: actingBaseRole ?? null,
           active: true,
           expiresAt: draft.expiresAt,
           revokedAt: null,
@@ -6622,6 +7341,22 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
     [commitSyncChanges],
   );
 
+  /**
+   * Membatalkan pendaftaran di mode demo.
+   *
+   * Demo tidak punya akun di server, jadi tidak ada baris `users` yang bisa
+   * dihapus — yang dikembalikan hanya email sesi dan kalimat yang sama dengan
+   * jawaban server, supaya halaman onboarding tidak perlu tahu backend mana yang
+   * aktif. `signOut` di halaman tetap mengembalikan pengguna ke beranda.
+   */
+  const cancelRegistration = useCallback(async () => {
+    const email = session?.user.email ?? "";
+    if (!email) {
+      throw new Error("Tidak ada akun aktif yang pendaftarannya bisa dibatalkan.");
+    }
+    return { email, sentence: cancelledRegistrationSentence(email) };
+  }, [session]);
+
   const value = useMemo<StoreApi>(
     () => ({
       source: "demo",
@@ -6629,6 +7364,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       // Tidak ada server di mode demo: tidak ada identitas bisnis yang perlu
       // dipulihkan, jadi onboarding langsung boleh menampilkan formulirnya.
       workspacePending: false,
+      cancelRegistration,
       error: null,
       // Katalog penjualan hanya yang aktif; halaman Produk & Stok memakai
       // `catalogProducts` supaya produk nonaktif tetap bisa dikelola.
@@ -6651,6 +7387,14 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       fnbTaxMonth,
       receipt,
       setReceipt,
+      shift,
+      setShift,
+      shiftAlerts,
+      reportShiftAlert,
+      resolveShiftAlert,
+      till,
+      openTill,
+      closeTill,
       logo,
       setLogo,
       removeLogo,
@@ -6698,6 +7442,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       cancelGuestOrder,
       holdSale,
       completeHeld,
+      finishKitchenTicket,
       warehouses: storeWarehouses,
       stock,
       warehouseCapacity: warehouseCapacityValue,
@@ -6765,6 +7510,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       pullSync,
       resolveSyncChange,
       customRoles: storeCustomRoles,
+      builtinRoles: storeBuiltinRoles,
       roleSummary,
       teamMembers: storeTeamMembers,
       addTeamMember,
@@ -6776,6 +7522,10 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       updateCustomRole,
       deleteCustomRole,
       assignCustomRole,
+      updateBuiltinRole,
+      deleteBuiltinRole,
+      restoreBuiltinRole,
+      resetBuiltinRole,
       apiKeys: storeApiKeys,
       apiKeySummary,
       webhookEndpoints: storeWebhookEndpoints,
@@ -6811,6 +7561,14 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       fnbTaxMonth,
       receipt,
       setReceipt,
+      shift,
+      setShift,
+      shiftAlerts,
+      reportShiftAlert,
+      resolveShiftAlert,
+      till,
+      openTill,
+      closeTill,
       logo,
       setLogo,
       removeLogo,
@@ -6858,6 +7616,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       cancelGuestOrder,
       holdSale,
       completeHeld,
+      finishKitchenTicket,
       storeWarehouses,
       stock,
       warehouseCapacityValue,
@@ -6925,6 +7684,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       pullSync,
       resolveSyncChange,
       storeCustomRoles,
+      storeBuiltinRoles,
       roleSummary,
       storeTeamMembers,
       addTeamMember,
@@ -6936,6 +7696,10 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       updateCustomRole,
       deleteCustomRole,
       assignCustomRole,
+      updateBuiltinRole,
+      deleteBuiltinRole,
+      restoreBuiltinRole,
+      resetBuiltinRole,
       storeApiKeys,
       apiKeySummary,
       storeWebhookEndpoints,
@@ -6950,6 +7714,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       createSale,
       adjustStock,
       offline,
+      cancelRegistration,
     ],
   );
 

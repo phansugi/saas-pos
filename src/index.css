@@ -16,6 +16,13 @@
     --muted-foreground: 215 16% 47%;
     --accent: 38 92% 50%;
     --accent-foreground: 20 90% 10%;
+    /*
+      Warna “bahaya” (galat, peringatan keras, tombol hapus). Dibuat lebih
+      gelap di tema terang supaya teks merahnya terbaca di atas latar putih,
+      dan lebih terang di tema gelap supaya tidak hilang di atas latar hitam.
+    */
+    --destructive: 0 74% 42%;
+    --destructive-foreground: 0 0% 100%;
     --border: 214 32% 91%;
     --input: 214 32% 91%;
     --ring: 158 74% 34%;
@@ -54,6 +61,8 @@
     --muted-foreground: 215 20% 65%;
     --accent: 38 92% 52%;
     --accent-foreground: 20 90% 8%;
+    --destructive: 0 72% 60%;
+    --destructive-foreground: 0 0% 100%;
     --border: 217 33% 18%;
     --input: 217 33% 18%;
     --ring: 158 72% 45%;

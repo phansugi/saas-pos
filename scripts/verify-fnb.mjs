@@ -9,7 +9,9 @@
  */
 import {
   clockOfDay,
+  fireKitchenOnSale,
   isKdsAlertFlashing,
+  isKitchenTicket,
   isTicketLate,
   kdsAlertLabel,
   kdsQueue,
@@ -27,11 +29,15 @@ import {
   sortTablesByOrder,
   splitTableImportRow,
   tableDeletionCheck,
+  tableHolders,
   tableLabel,
   tableNameTaken,
+  tableOccupiedReason,
   tableStates,
+  ticketPaidLabel,
   ticketPaymentLabel,
   ticketSummary,
+  ticketTableHolders,
   waitingMinutes,
 } from "../src/convex/lib/fnb.ts";
 
@@ -179,6 +185,128 @@ check(
     JSON.stringify(blocked),
   );
   check("meja lain tetap boleh ditempati", seatTable(tables, orders, "t2").ok === true, "ditolak");
+}
+
+// ------------------------------- meja terkunci sampai dapur menekan Selesai
+{
+  /*
+    Meja tamu yang uangnya sudah masuk **tetap** milik tamunya: makanannya belum
+    datang, jadi kasir tidak boleh menempatkan pesanan lain di situ. Yang
+    menentukan adalah tiket dapurnya (`tableHolders`), bukan status bayarnya.
+  */
+  const lunas = {
+    id: "s-lunas",
+    number: "A-00042",
+    createdAt: NOW - 4 * MINUTE,
+    tableId: "t1",
+    status: "completed",
+    kitchenFiredAt: NOW - 4 * MINUTE,
+    kitchenDoneAt: null,
+  };
+  const tertahan = {
+    id: "s-tahan",
+    number: "A-00043",
+    createdAt: NOW - 9 * MINUTE,
+    tableId: "t2",
+    status: "held",
+  };
+  const sudahBeres = { ...lunas, id: "s-beres", number: "A-00044", kitchenDoneAt: NOW - MINUTE };
+  const punyaMeja = (id, tableId) => ({
+    id,
+    number: `A-${id}`,
+    createdAt: NOW - MINUTE,
+    tableId,
+    status: "completed",
+  });
+
+  const holders = tableHolders([
+    lunas,
+    tertahan,
+    sudahBeres,
+    punyaMeja("00045", "t3"),
+    { ...punyaMeja("00046", "t3"), status: "void" },
+    { ...tertahan, id: "s-bungkus", tableId: undefined },
+  ]);
+  check(
+    "meja ditempati tiket dapur: tertahan + lunas yang belum ditandai selesai",
+    holders.map((row) => row.id).join(",") === "s-lunas,s-tahan",
+    JSON.stringify(holders),
+  );
+  check(
+    "tiket lunas ditandai `settled` saat menempati meja",
+    holders[0].settled === true && holders[1].settled === false,
+    JSON.stringify(holders),
+  );
+  check(
+    "tiket yang sudah ditandai selesai melepas mejanya",
+    !holders.some((row) => row.id === "s-beres"),
+    JSON.stringify(holders.map((row) => row.id)),
+  );
+  check(
+    "penjualan yang tidak pernah ke dapur & yang dibatalkan tidak menahan meja",
+    holders.length === 2,
+    JSON.stringify(holders.map((row) => row.id)),
+  );
+
+  const ditolak = seatTable(tables, holders, "t1");
+  check(
+    "meja yang sudah dibayar menolak kasir dengan alasan menunggu dapur",
+    ditolak.ok === false &&
+      ditolak.reason.includes("sudah dibayar") &&
+      ditolak.reason.includes("Selesai"),
+    JSON.stringify(ditolak),
+  );
+  const ditolakTertahan = seatTable(tables, holders, "t2");
+  check(
+    "pesanan tertahan tetap dijawab selesaikan/batalkan",
+    ditolakTertahan.ok === false &&
+      ditolakTertahan.reason.includes("Selesaikan atau batalkan"),
+    JSON.stringify(ditolakTertahan),
+  );
+  check("meja yang tidak ditempati tetap boleh dipakai", seatTable(tables, holders, "t3").ok === true, "ditolak");
+
+  const states = tableStates(tables, holders, NOW);
+  const a1 = states.find((state) => state.id === "t1");
+  const a2 = states.find((state) => state.id === "t2");
+  check(
+    "denah menandai meja tiket lunas terisi & sudah dibayar",
+    a1.status === "occupied" && a1.paid === true && a1.orderNumber === "A-00042",
+    JSON.stringify(a1),
+  );
+  check(
+    "denah membedakan pesanan tertahan (belum dibayar)",
+    a2.status === "occupied" && a2.paid === false,
+    JSON.stringify(a2),
+  );
+  check(
+    "kalimat penolakan menyebut nomor pesanannya",
+    tableOccupiedReason("A1", holders[0]).includes("A-00042"),
+    tableOccupiedReason("A1", holders[0]),
+  );
+}
+
+{
+  /*
+    Denah kasir & layar dapur membacanya dari **antrean dapur** yang sama, jadi
+    tiket lunas yang masih menunggu pun terkunci di kedua layar itu.
+  */
+  const antrean = [
+    { saleId: "s1", number: "A-00001", createdAt: NOW - 3 * MINUTE, tableId: "t1", settled: true },
+    { saleId: "s2", number: "A-00002", createdAt: NOW - MINUTE, tableId: undefined, settled: true },
+  ];
+  const holders = ticketTableHolders(antrean);
+  check(
+    "tiket lunas di antrean menahan mejanya",
+    holders.length === 1 && holders[0].id === "s1" && holders[0].settled === true,
+    JSON.stringify(holders),
+  );
+  check("tiket bungkus tidak menahan meja", seatTable(tables, holders, "t2").ok === true, "ditolak");
+  check(
+    "antrean kosong mengosongkan semua meja",
+    tableStates(tables, ticketTableHolders([])).filter((state) => state.status === "occupied")
+      .length === 0,
+    "masih ada meja terisi",
+  );
 }
 
 // ------------------------------------------------------- waktu & antrean
@@ -622,6 +750,133 @@ check("zona lain tampil di label", tableLabel({ name: "B1", zone: "Teras" }) ===
       ticketPaymentLabel(undefined) === null &&
       ticketPaymentLabel(null) === null,
     String(ticketPaymentLabel({ method: "qris", paidAt: null })),
+  );
+}
+
+// ------------------------ tiket dari penjualan yang sudah lunas di kasir
+//
+// Dua sumber tiket, dan aturannya satu tempat (`isKitchenTicket`): pesanan
+// tertahan, dan penjualan lunas yang sudah dikirim ke dapur tetapi belum
+// ditandai selesai. Yang menentukan bukan tombolnya, melainkan data penjualannya —
+// jadi tiket lunas tidak pernah "diselesaikan" dua kali (stok bergerak sekali).
+{
+  const tertahan = { status: "held" };
+  check("pesanan tertahan selalu tiket dapur", isKitchenTicket(tertahan) === true, "bukan tiket");
+  check(
+    "penjualan lunas yang sudah dikirim ke dapur jadi tiket",
+    isKitchenTicket({ status: "completed", kitchenFiredAt: NOW }) === true,
+    "bukan tiket",
+  );
+  check(
+    "penjualan lunas tanpa kiriman ke dapur bukan tiket",
+    isKitchenTicket({ status: "completed" }) === false,
+    "dianggap tiket",
+  );
+  check(
+    "tiket yang sudah ditandai selesai keluar dari antrean",
+    isKitchenTicket({ status: "completed", kitchenFiredAt: NOW, kitchenDoneAt: NOW + 1000 }) ===
+      false,
+    "masih dianggap tiket",
+  );
+  check(
+    "penjualan yang dibatalkan tidak pernah menunggu di dapur",
+    isKitchenTicket({
+      status: "void",
+      kitchenFiredAt: NOW,
+      kitchenDoneAt: null,
+    }) === false,
+    "dianggap tiket",
+  );
+
+  check(
+    "penjualan lunas langsung dikirim ke dapur saat dapurnya ada",
+    fireKitchenOnSale({ kdsFeatureOn: true, status: "completed" }) === true,
+    "tidak dikirim",
+  );
+  check(
+    "tanpa layar dapur tidak ada yang menerima tiketnya",
+    fireKitchenOnSale({ kdsFeatureOn: false, status: "completed" }) === false,
+    "dikirim",
+  );
+  check(
+    "pesanan tertahan tidak dikirim dua kali (sudah tiket sejak disimpan)",
+    fireKitchenOnSale({ kdsFeatureOn: true, status: "held" }) === false,
+    "dikirim",
+  );
+}
+
+{
+  const siang = new Date(2026, 9, 14, 13, 42, 30).getTime();
+  check(
+    "tiket dari kasir menyebut metode bayarnya & momen kirimnya",
+    ticketPaidLabel({ method: "cash", firedAt: siang }) ===
+      "Lunas Tunai · diterima dapur pukul 13:42",
+    ticketPaidLabel({ method: "cash", firedAt: siang }),
+  );
+  check(
+    "QRIS & VA terbaca sebagai metode yang memang dipakai",
+    ticketPaidLabel({ method: "qris", firedAt: siang }) ===
+      "Lunas QRIS · diterima dapur pukul 13:42" &&
+      ticketPaidLabel({ method: "transfer", firedAt: siang }) ===
+        "Lunas Transfer · diterima dapur pukul 13:42",
+    String(ticketPaidLabel({ method: "qris", firedAt: siang })),
+  );
+  check(
+    "tiket lunas tanpa momen kirim tetap punya penanda metode",
+    ticketPaidLabel({ method: "card", firedAt: null }) === "Lunas Kartu",
+    String(ticketPaidLabel({ method: "card", firedAt: null })),
+  );
+  check(
+    "metode yang belum dikenal tidak dihilangkan diam-diam",
+    ticketPaidLabel({ method: "ewallet", firedAt: null }) === "Lunas ewallet",
+    String(ticketPaidLabel({ method: "ewallet", firedAt: null })),
+  );
+  check(
+    "tanpa pembayaran tidak ada penanda (pesanan tertahan)",
+    ticketPaidLabel(null) === null && ticketPaidLabel(undefined) === null,
+    String(ticketPaidLabel(null)),
+  );
+}
+
+{
+  // Satu antrean berisi kedua jenis tiket: yang tertahan (uangnya belum masuk)
+  // dan yang lunas (uangnya sudah masuk). Penandanya ikut ke kartu dapur.
+  const tickets = kdsQueue(
+    [
+      {
+        id: "s1",
+        number: "A-00001",
+        createdAt: NOW - 10 * MINUTE,
+        items: [{ name: "Kopi Susu", quantity: 1 }],
+      },
+      {
+        id: "s2",
+        number: "A-00002",
+        createdAt: NOW - 2 * MINUTE,
+        tableId: "t1",
+        settled: true,
+        paidLabel: "Lunas Tunai · diterima dapur pukul 13:42",
+        items: [{ name: "Nasi Goreng Spesial", quantity: 2 }],
+      },
+    ],
+    tables,
+    NOW,
+  );
+  check(
+    "pesanan tertahan tidak diklaim sudah lunas",
+    tickets[0].settled === false && tickets[0].paidLabel === null,
+    JSON.stringify(tickets[0]),
+  );
+  check(
+    "tiket lunas membawa penanda pembayarannya",
+    tickets[1].settled === true &&
+      tickets[1].paidLabel === "Lunas Tunai · diterima dapur pukul 13:42",
+    JSON.stringify(tickets[1]),
+  );
+  check(
+    "tiket lunas tetap membawa meja & itemnya",
+    tickets[1].tableName === "A1" && tickets[1].itemCount === 2,
+    JSON.stringify(tickets[1]),
   );
 }
 

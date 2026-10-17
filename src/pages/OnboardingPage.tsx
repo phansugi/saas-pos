@@ -42,8 +42,12 @@ const VERTICAL_ICONS: Record<Vertical, typeof Store> = {
  * karena sesi perangkat ini kosong.
  */
 export function OnboardingPage() {
-  const { session, ready, createTenant } = useSession();
-  const { workspacePending, error: storeError } = useStore();
+  const { session, ready, createTenant, signOut } = useSession();
+  const {
+    workspacePending,
+    error: storeError,
+    cancelRegistration,
+  } = useStore();
   const navigate = useNavigate();
   const [params] = useSearchParams();
   // Tujuan setelah selesai diambil dari URL (`RequireTenant` mengirimnya), tapi
@@ -58,6 +62,18 @@ export function OnboardingPage() {
   const [storeName, setStoreName] = useState("");
   const [vertical, setVertical] = useState<Vertical>("umkm");
   const [planKey, setPlanKey] = useState<PlanKey>("starter");
+  /** Keadaan tautan “Batalkan” — sedang menghapus, atau alasan penolakannya. */
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  /**
+   * Pendaftaran sudah dihapus dan halaman ini sedang menuju beranda.
+   *
+   * Perpindahan rute berjalan sebagai transisi, sedangkan pelepasan sesi adalah
+   * pembaruan mendesak — jadi sesaat halaman ini masih terpasang dengan sesi
+   * kosong. Tanpa penanda ini, penjaga “belum masuk” di bawah akan melempar
+   * pengguna ke `/auth` dan mengalahkan tujuan yang sudah dipilih: beranda.
+   */
+  const [cancelled, setCancelled] = useState(false);
 
   /** Only plans whose verticals include the chosen module can be picked. */
   const availablePlans = useMemo(
@@ -72,6 +88,9 @@ export function OnboardingPage() {
 
   if (!ready) return null;
   if (!session) {
+    // Sedang ditinggalkan menuju beranda setelah pendaftaran dibatalkan: jangan
+    // diarahkan ke halaman masuk, dan jangan dirender sebagai formulir kosong.
+    if (cancelled) return null;
     return <Navigate to="/auth?returnTo=/onboarding" replace />;
   }
   /*
@@ -100,6 +119,34 @@ export function OnboardingPage() {
       planKey: effectivePlan,
     });
     navigate(returnTo, { replace: true });
+  };
+
+  /*
+    “Batalkan” **menghapus akun** yang baru dibuat — email yang tadi dipakai
+    mendaftar keluar dari daftar akun, bukan hanya sesi perangkat ini yang
+    ditutup. Urutannya penting: server dihubungi lebih dulu. Kalau server menolak
+    (mis. akun ternyata sudah punya workspace), sesinya tidak disentuh dan alasan
+    penolakannya ditampilkan apa adanya.
+  */
+  const batalkan = async () => {
+    setCancelBusy(true);
+    setCancelError(null);
+    try {
+      await cancelRegistration();
+      /*
+        Beranda **dulu**, baru sesi dilepas — dan penanda `cancelled` dipasang
+        sebelum sesinya hilang. Perpindahan rute adalah transisi, sedangkan
+        pelepasan sesi mendesak: tanpa penanda itu, penjaga “belum masuk” sempat
+        berjalan lebih dulu dan melempar pengguna ke `/auth`.
+      */
+      setCancelled(true);
+      navigate("/", { replace: true });
+      signOut();
+    } catch (cause) {
+      setCancelError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setCancelBusy(false);
+    }
   };
 
   return (
@@ -331,6 +378,47 @@ export function OnboardingPage() {
             Anda bisa menambah cabang lain nanti sesuai paket.
           </p>
         )}
+
+        {/*
+          Jalan keluar yang jujur untuk pendaftaran yang belum jadi: akunnya
+          dihapus, bukan dibiarkan terdaftar. Hanya ada di halaman ini karena
+          di sinilah akun baru belum punya workspace — server tetap menolak
+          pembatalan kalau ternyata sudah punya.
+        */}
+        <div className="mt-8 rounded-lg border border-dashed border-border p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium">
+                Berubah pikiran di tengah pendaftaran?
+              </div>
+              <p
+                data-testid="batalkan-catatan"
+                className="mt-1 text-xs text-muted-foreground"
+              >
+                Email {session.user.email} akan dihapus dari sistem, jadi bisa
+                dipakai mendaftar lagi kapan saja. Anda kembali ke beranda.
+              </p>
+            </div>
+            <button
+              type="button"
+              data-testid="batalkan-pendaftaran"
+              onClick={() => void batalkan()}
+              disabled={cancelBusy}
+              className="shrink-0 text-sm font-semibold text-destructive underline-offset-4 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+            >
+              {cancelBusy ? "Menghapus email…" : "Batalkan"}
+            </button>
+          </div>
+          {cancelError && (
+            <p
+              role="alert"
+              data-testid="batalkan-galat"
+              className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+            >
+              {cancelError}
+            </p>
+          )}
+        </div>
       </div>
     </div>
   );

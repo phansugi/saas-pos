@@ -116,6 +116,17 @@ export const API_RESOURCES: ApiResource[] = [
     label: "Hutang usaha yang masih terbuka",
     write: false,
   },
+  {
+    // Penerimaan barang ikut dibaca platform supaya pembelian di MesinPOS bisa
+    // dicocokkan dengan pembelian di sana. Sifatnya baca-saja: MesinPOS adalah
+    // sumber utama, jadi platform tidak menulis pembelian lewat API ini.
+    resource: "purchases",
+    method: "GET",
+    path: "/api/v1/purchases",
+    scope: "purchase.view",
+    label: "Penerimaan barang (GRN) terbaru",
+    write: false,
+  },
 ];
 
 /** Endpoint tulis; dipakai halaman untuk menandai & mendokumentasikan. */
@@ -434,10 +445,14 @@ export function validateApiKeyInput(
  * benar. Peran tak dikenal otomatis gagal karena `can` mengembalikan `false`.
  */
 export function scopeAllowed(
-  creatorRole: Role,
+  creatorRole: Role | null | undefined,
   keyScopes: readonly Permission[],
   scope: Permission,
 ): boolean {
+  // Pembuat yang memakai peran tambahan tidak punya peran bawaan: jalur cadangan
+  // ini tidak bisa memutuskan apa pun. Izinnya dibaca dari `createdById`
+  // (`verifyApiKey`), yang selalu tersedia untuk kunci baru.
+  if (!creatorRole) return false;
   return sanitizeApiScopes(keyScopes).includes(scope) && can(creatorRole, scope);
 }
 

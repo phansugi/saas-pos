@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { Link } from "react-router-dom";
 import {
+  AlarmClock,
   AlertTriangle,
   BadgeCheck,
+  BellRing,
   ChefHat,
   ChevronUp,
   CloudOff,
@@ -14,6 +17,8 @@ import {
   Lock,
   MessageCircle,
   Minus,
+  Pause,
+  Play,
   Plus,
   Printer,
   QrCode,
@@ -39,7 +44,7 @@ import {
   isFeatureEnabled,
 } from "@/lib/billing";
 import { formatPctPlain, orderTotal } from "@/lib/fnbTax";
-import { tableLabel, tableStates } from "@/lib/fnb";
+import { tableLabel, tableStates, ticketTableHolders } from "@/lib/fnb";
 import { posCategoryChips } from "@/lib/categories";
 import { decideCredit, rupiah } from "@/lib/ar";
 import { ESC_POS_TRANSPORTS, type EscposTransport } from "@/lib/escpos";
@@ -55,14 +60,26 @@ import {
   qrPayload,
   validateCartCharge,
   type DigitalMethod,
-} from "@/lib/payments";
-import {
-  SCAN_BEEP_VOLUME_MAX,
+} from "@/lib/payments";import { SCAN_BEEP_VOLUME_MAX,
   SCAN_BEEP_VOLUME_MIN,
   playScanBeep,
   scanBeepVolumeLabel,
 } from "@/lib/scanBeep";
 import { useSession } from "@/lib/session";
+/*
+  Shift kas dibaca dari perangkat yang sama dengan halaman Shift & Kas.
+  Aturannya — bentuk data, jam pengingat, dan kalimatnya — ada di `@/lib/shift`,
+  supaya kedua halaman tidak pernah berbeda cerita.
+*/
+import {
+  EMPTY_SHIFT_STATE,
+  SHIFT_STORAGE_KEY,
+  parseShiftState,
+  posShiftGate,
+  shiftClockLabel,
+  shiftReminder,
+  type ShiftState,
+} from "@/lib/shift";
 import {
   receiptCopiesLabel,
   receiptDocument,
@@ -91,6 +108,17 @@ import {
   type StoreProduct,
 } from "@/lib/store";
 import { useCan } from "@/lib/usePermission";
+/*
+  Pemberitahuan ke **pemilik toko** (`@/lib/useShiftOwnerAlert`): kas yang belum
+  dibuka di jam operasional, dan shift yang belum ditutup padahal toko sudah tutup
+  atau shiftnya terlalu lama. Laporannya dikirim dari perangkat ini — hanya di sini
+  keadaan shiftnya diketahui — lalu server memutuskan ulang & mengirim kabarnya ke
+  langganan webhook pemilik.
+*/
+import {
+  shiftOwnerAlertStatusLabel,
+  useShiftOwnerAlert,
+} from "@/lib/useShiftOwnerAlert";
 import { cn, formatIDR } from "@/lib/utils";
 import { priceLine } from "@/lib/wholesale";
 
@@ -103,6 +131,38 @@ interface CartLine {
   unitCode?: string;
   /** Pilihan modifier item (level pedas, topping). Modul F&B. */
   modifiers?: StoreModifierSelection[];
+}
+
+/**
+ * Satu transaksi yang **ditahan sementara** (tombol **Hold**).
+ *
+ * Isinya adalah keranjang yang belum dibayar: uang belum masuk, stok belum
+ * bergerak, dan dapur belum menerima apa pun — jadi ini urusan layar kasir,
+ * bukan penjualan di server. Karena itu `total`/`itemCount` di sini hanya
+ * catatan **saat ditahan** untuk ditampilkan di daftarnya; begitu transaksinya
+ * dilanjutkan, angkanya dihitung ulang dari katalog yang berlaku sekarang.
+ */
+interface HeldCart {
+  id: string;
+  heldAt: number;
+  cart: CartLine[];
+  discount: number;
+  tableId?: string;
+  /** Nama meja **saat ditahan** — denah bisa berubah (meja diganti nama/dihapus). */
+  tableName?: string;
+  memberId?: string;
+  customerId?: string;
+  total: number;
+  itemCount: number;
+}
+
+/**
+ * Sebutan singkat satu transaksi yang ditahan, dipakai di daftarnya dan di notis
+ * hasil Hold/Lanjutkan: `Meja A1 · 3 item · Rp 45.000`.
+ */
+function heldLabel(row: HeldCart): string {
+  const where = row.tableName ? `Meja ${row.tableName}` : "Tanpa meja (bungkus)";
+  return `${where} · ${row.itemCount} item · ${formatIDR(row.total)}`;
 }
 
 /**
@@ -168,6 +228,23 @@ function formatClock(timestamp: number): string {
   });
 }
 
+/**
+ * Shift kas dibuka & ditutup dari halaman Shift & Kas dan disimpan di
+ * **perangkat ini** (`@/lib/shift`). Halaman Kasir membacanya sendiri saat
+ * dibuka: badge “Shift terbuka” dulu tulisan tetap (“Kasir: Rani · buka 08:00”)
+ * yang sama sekali tidak melihat keadaan kas, dan tidak ada peringatan apa pun
+ * bahwa kas masih terbuka padahal hari sudah berakhir. Berpindah halaman
+ * me-remount halaman ini, jadi membacanya sekali sudah cukup.
+ */
+function readShiftState(): ShiftState {
+  if (typeof window === "undefined") return EMPTY_SHIFT_STATE;
+  try {
+    return parseShiftState(window.localStorage.getItem(SHIFT_STORAGE_KEY));
+  } catch {
+    return EMPTY_SHIFT_STATE;
+  }
+}
+
 export function PosPage() {
   const {
     products,
@@ -175,11 +252,11 @@ export function PosPage() {
     sales,
     createSale,
     source,
+    ready,
     offline,
     modules,
     tables,
     kdsTickets,
-    holdSale,
     customers,
     receivables,
     members,
@@ -198,6 +275,16 @@ export function PosPage() {
     receipt,
     // Logo toko yang tercetak di atas nama usaha (`tenants.logo`).
     logo,
+    // Setelan pengingat tutup shift workspace (`tenants.shift`, diatur di halaman
+    // Pengaturan). Dinamai `shiftSetting` karena `shift` di halaman ini adalah
+    // keadaan shift **perangkat** yang sedang berjalan (lihat `readShiftState`).
+    shift: shiftSetting,
+    /*
+      Kas **toko** (`pos.till` di server): shift yang dibuka pemilik di perangkat
+      mana pun. Inilah yang membuat kasir bisa melayani pembeli tanpa memegang
+      izin `shift.manage` dan tanpa membuka kasnya sendiri.
+    */
+    till,
   } = useStore();
   const { session } = useSession();
   const can = useCan();
@@ -212,6 +299,104 @@ export function PosPage() {
   */
   const escpos = useEscpos();
 
+  /*
+    Shift kas perangkat ini: badge di bawah memakai keadaannya yang sebenarnya,
+    dan `reminder` memberi tahu kasir kalau kasnya masih terbuka sementara hari
+    sudah berakhir / toko mau tutup. Kalau belum pernah dibuka sama sekali,
+    keadaannya dijelaskan apa adanya — bukan lagi diklaim “Shift terbuka”.
+  */
+  const [shift, setShift] = useState<ShiftState>(readShiftState);
+  /*
+    Dua sumber keadaan kas, dan halaman ini memakai yang mana pun lebih dulu ada:
+    kas **toko** dari server (`till`, dibuka pemilik di perangkatnya) dan shift
+    yang tersimpan di perangkat ini (cadangan saat store belum siap / mode demo,
+    tempat keduanya memang sama-sama hidup di perangkat). Sebelumnya hanya yang
+    kedua yang dibaca — akibatnya kasir di perangkat lain tetap melihat “Kas
+    belum dibuka” walau pemilik sudah membuka kasnya, dan laporan itu yang
+    dikeluhkan.
+  */
+  /*
+    Dibungkus `useMemo` bukan hiasan: objeknya dipakai hook pengingat pemilik
+    (`useShiftOwnerAlert`) yang bereaksi pada identitas `current` — objek baru di
+    setiap render akan membuatnya melapor berulang kali tanpa henti.
+  */
+  const openShift = useMemo(
+    () =>
+      till.current
+        ? {
+            id: till.current.id,
+            openedAt: till.current.openedAt,
+            openingCash: till.current.openingCash,
+          }
+        : shift.current
+          ? {
+              id: shift.current.id,
+              openedAt: Date.parse(shift.current.openedAt),
+              openingCash: shift.current.openingCash,
+            }
+          : null,
+    [till.current, shift.current],
+  );
+  const shiftOpenedMs = openShift ? openShift.openedAt : Number.NaN;
+  /*
+    Gerbang kasir (`posShiftGate`): tanpa kas yang terbuka (di toko maupun di
+    perangkat ini), pekerjaan menjual dimatikan — produk tidak bisa masuk
+    keranjang, meja tidak bisa dipilih, transaksi tidak bisa ditahan/dilanjutkan,
+    dan pembayaran tidak bisa dibuka. Yang tertinggal hanya jalan menuju halaman
+    Shift & Kas, supaya tidak ada penjualan yang tercatat tanpa pemilik kas.
+  */
+  const shiftGate = posShiftGate(openShift);
+  const posLocked = shiftGate.locked;
+  /**
+   * Shift & kas punya izinnya sendiri (`shift.manage`). Kalau kasir memegang
+   * `pos.sell` tanpa izin itu, tautan “Buka shift” di gerbang di bawah akan
+   * menabrak rute yang memang tertutup untuknya — jadi pesannya diganti dengan
+   * sebab yang sebenarnya (minta izin/beri tahu pemilik), bukan tombol mati.
+   */
+  const canManageShift = can("shift.manage");
+  /*
+    Keadaan kasinya juga bisa berubah dari tab/perangkat lain (kasir lain menutup
+    shiftnya di halaman Shift & Kas). Pendengar `storage` membacanya ulang supaya
+    gerbangnya ikut menutup begitu shiftnya ditutup — bukan tetap menjual dari
+    tab yang keadaannya sudah basi. Kunci yang tidak dikenal (peristiwa tanpa
+    `key`) tetap dibaca ulang; ruginya hanya satu pembacaan.
+  */
+  useEffect(() => {
+    function onStorage(event: StorageEvent) {
+      if (event.key && event.key !== SHIFT_STORAGE_KEY) return;
+      setShift(readShiftState());
+    }
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+  /*
+    Ambang pengingatnya milik workspace (`shiftSetting`): jam pengingatnya, ambang
+    shift lama, dan saklarnya diatur pemilik toko di halaman Pengaturan — bukan
+    lagi angka tetap di kode. Pengingat yang dimatikan berarti `null` di sini,
+    walaupun kasnya masih terbuka.
+  */
+  const shiftNotice = Number.isFinite(shiftOpenedMs)
+    ? shiftReminder({ openedAt: shiftOpenedMs, setting: shiftSetting })
+    : null;
+  /*
+    Pemberitahuan ke pemilik toko: keadaan yang sama-sama dibaca dari perangkat
+    ini, tetapi kabarnya untuk orang yang mungkin tidak ada di toko. Hook-nya yang
+    melaporkan (sekali per hari per jenis) dan mengembalikan apa yang benar-benar
+    terjadi — termasuk saat emailnya belum bisa berangkat atau workspace itu belum
+    punya endpoint webhook yang menerimanya.
+  */
+  const ownerAlert = useShiftOwnerAlert({
+    current: openShift,
+    setting: shiftSetting,
+    /*
+      Laporan baru dikirim setelah store-nya siap: sebelum itu setelan workspace
+      (`tenants.shift`) belum terbaca, jadi jam operasionalnya masih bawaan — dan
+      melapor dengan setelan yang belum pasti hanya menghasilkan laporan yang
+      ditolak server.
+    */
+    enabled: ready,
+  });
+
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<string>(ALL_CATEGORIES);
   const [cart, setCart] = useState<CartLine[]>([]);
@@ -225,9 +410,10 @@ export function PosPage() {
     /** Baris keranjang yang sedang diubah; `null` berarti produk baru. */
     lineIndex: number | null;
   } | null>(null);
-  const [sending, setSending] = useState(false);
   const [holdNotice, setHoldNotice] = useState<string | null>(null);
   const [holdError, setHoldError] = useState<string | null>(null);
+  /** Transaksi yang ditahan sementara — daftar **Transaksi ditahan**. */
+  const [heldCarts, setHeldCarts] = useState<HeldCart[]>([]);
   const [payOpen, setPayOpen] = useState(false);
   const [method, setMethod] = useState<PaymentLabel>("Tunai");
   const [cash, setCash] = useState(0);
@@ -247,6 +433,13 @@ export function PosPage() {
     number: string | null;
     total: number;
     queued: boolean;
+    /**
+     * Penjualan ini langsung masuk antrean dapur pada momen pembayarannya (modul
+     * F&B yang punya layar dapur). Ditampilkan di dialog struk yang terbuka
+     * otomatis — jadi kasir tahu dapurnya sudah menerima, tanpa berjalan ke
+     * belakang untuk memeriksa.
+     */
+    kitchenFired?: boolean;
     /**
      * Member yang diskonnya dipakai penjualan ini — sekaligus **penerima utama**
      * struknya kalau dikirim lewat WhatsApp. Kosong = pembeli umum: tidak ada data
@@ -385,20 +578,32 @@ export function PosPage() {
    * Denah meja dari aturan bersama `@/lib/fnb`: meja terisi berasal dari pesanan
    * yang masih terbuka, jadi tidak ada status tersimpan yang bisa basi.
    */
+  /*
+    Meja ditempati selama masih ada **tiket dapur** yang menunjuknya — termasuk
+    tiket yang penjualannya sudah lunas. Jadi meja tamu yang uangnya sudah masuk
+    tetap terkunci sampai dapur menekan **Selesai**, sama seperti yang ditolak
+    server di `pos.createSale` (`ticketTableHolders` = daftar yang sama dengan
+    aturan `tableHolders` di sana).
+  */
   const tableStatesNow = useMemo(
-    () =>
-      tableStates(
-        tables,
-        kdsTickets.map((ticket) => ({
-          id: ticket.saleId,
-          number: ticket.number,
-          createdAt: ticket.createdAt,
-          tableId: ticket.tableId,
-        })),
-      ),
+    () => tableStates(tables, ticketTableHolders(kdsTickets)),
     [tables, kdsTickets],
   );
   const selectedTable = tableStatesNow.find((state) => state.id === tableId);
+  /**
+   * Meja yang ditahan transaksi **belum dibayar** (tombol Hold). Meja itu tetap
+   * milik tamunya selama transaksinya ditahan, jadi denah menandainya juga —
+   * tanpa itu kasir bisa menyusun keranjang kedua untuk meja yang sama.
+   */
+  const parkedTables = useMemo(
+    () =>
+      new Map(
+        heldCarts
+          .filter((row) => row.tableId)
+          .map((row) => [row.tableId as string, row] as const),
+      ),
+    [heldCarts],
+  );
 
   const available = useMemo(
     () => new Map(products.map((p) => [p.id, p.stock])),
@@ -680,6 +885,11 @@ export function PosPage() {
   }, [offline]);
 
   function addToCart(productId: string, name: string, price: number) {
+    // Gerbang kasir: tanpa shift terbuka tidak ada barang yang masuk keranjang.
+    // Tombolnya memang sudah dimatikan saat terkunci — penjagaan ini yang membuat
+    // jalur lain (mis. keranjang lama yang masih tersimpan di layar) tetap tidak
+    // bisa memulai penjualan baru.
+    if (posLocked) return;
     const product = productById.get(productId);
     const stockLeft = available.get(productId) ?? 0;
     const inCart = cart.find(
@@ -814,39 +1024,88 @@ export function PosPage() {
   }
 
   /**
-   * Kirim pesanan ke dapur (modul F&B): status `held`, stok belum bergerak, dan
-   * mejanya jadi terisi. Meja opsional — pesanan bungkus tetap muncul di
-   * antrean dapur yang sama.
+   * Menahan transaksi yang sedang berjalan (tombol **Hold**).
+   *
+   * Yang ditahan adalah keranjang yang **belum dibayar**: uang belum masuk, stok
+   * belum bergerak, dan dapur belum menerima apa pun — jadi tahanannya cukup
+   * hidup di layar kasir (perangkat ini), bukan sebagai penjualan di server.
+   * Keranjangnya pindah utuh ke daftar **Transaksi ditahan** berikut meja, member,
+   * dan diskonnya, lalu layar kasir siap untuk pembeli berikutnya.
    */
-  async function sendToKitchen() {
-    if (cart.length === 0 || sending) return;
-    setSending(true);
+  function holdCart() {
+    if (cart.length === 0 || posLocked) return;
+    const held: HeldCart = {
+      id: `hold-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      heldAt: Date.now(),
+      cart,
+      discount,
+      tableId,
+      tableName: selectedTable?.name,
+      memberId,
+      customerId,
+      total,
+      itemCount,
+    };
+    setHeldCarts((prev) => [...prev, held]);
     setHoldError(null);
-    setHoldNotice(null);
-    try {
-      const result = await holdSale({
-        items: cart.map((l) => ({
-          productId: l.productId,
-          quantity: l.qty,
-          unitCode: l.unitCode,
-          modifiers: l.modifiers,
-        })),
-        discount: discountApplied,
-        method,
-        tableId,
-        memberId,
-      });
-      setHoldNotice(
-        result.number
-          ? `Pesanan ${result.number} dikirim ke dapur · ${formatIDR(result.total)}`
-          : `Pesanan dikirim ke dapur · ${formatIDR(result.total)}`,
+    setHoldNotice(
+      `Transaksi ${heldLabel(held)} ditahan tadi pukul ${formatClock(held.heldAt)} — lanjutkan dari daftar Transaksi ditahan, atau layani pembeli berikutnya dulu.`,
+    );
+    resetSale();
+  }
+
+  /**
+   * Melanjutkan transaksi yang ditahan: keranjang, meja, member, dan diskonnya
+   * kembali seperti saat ditahan. Harganya dihitung ulang dari katalog sekarang
+   * (harga bisa sudah berubah), dan baris yang produknya sudah tidak ada lagi
+   * dibuang — kasir tidak bisa menjual barang yang tidak ada di katalog.
+   */
+  function resumeHeld(id: string) {
+    const held = heldCarts.find((row) => row.id === id);
+    // Keranjang yang sedang berjalan tidak boleh tertimpa diam-diam: kasir harus
+    // menahannya (Hold) atau menyelesaikannya dulu. Saat gerbang kasir tertutup,
+    // transaksi yang ditahan juga tidak dilanjutkan — tidak ada gunanya mengisi
+    // keranjang yang belum bisa dibayar.
+    if (!held || cart.length > 0 || posLocked) return;
+    const lines = held.cart.filter((line) => productById.has(line.productId));
+    const dropped = held.cart.length - lines.length;
+
+    /*
+      Mejanya hanya kembali kalau masih bebas. Meja yang sudah terisi tiket lain
+      (mis. tamu lain sempat membayar di situ) dilepas, bukan dipaksakan — server
+      tetap akan menolaknya, dan kasir lebih baik diberi tahu sekarang.
+    */
+    const seatTaken =
+      held.tableId !== undefined &&
+      tableStatesNow.some(
+        (state) => state.id === held.tableId && state.status === "occupied",
       );
-      resetSale();
-    } catch (error) {
-      setHoldError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setSending(false);
-    }
+
+    setCart(lines);
+    setDiscount(held.discount);
+    setTableId(seatTaken ? undefined : held.tableId);
+    setMemberId(held.memberId);
+    setCustomerId(held.customerId);
+    setHeldCarts((prev) => prev.filter((row) => row.id !== id));
+    setHoldError(null);
+    setHoldNotice(
+      `Transaksi ${heldLabel(held)} dilanjutkan.` +
+        (seatTaken
+          ? ` Mejanya sudah terisi pesanan lain, jadi transaksinya jalan tanpa meja — pilih meja lain kalau memang di situ.`
+          : "") +
+        (dropped > 0
+          ? ` ${dropped} baris dibuang karena produknya sudah tidak ada di katalog.`
+          : ""),
+    );
+  }
+
+  /** Membuang transaksi yang ditahan — tidak ada jejaknya di server, jadi cukup dibuang. */
+  function dropHeld(id: string) {
+    const held = heldCarts.find((row) => row.id === id);
+    if (!held) return;
+    setHeldCarts((prev) => prev.filter((row) => row.id !== id));
+    setHoldError(null);
+    setHoldNotice(`Transaksi ${heldLabel(held)} dibuang — tidak ada yang tercatat karena belum dibayar.`);
   }
 
   /**
@@ -1292,6 +1551,16 @@ export function PosPage() {
    */
   async function issueCartCharge() {
     if (cart.length === 0 || paying) return;
+    /*
+      Gerbang kasir diperiksa lagi di sini: shift bisa saja ditutup dari tab
+      lain sementara dialog pembayaran masih terbuka (`storage` di atas membaca
+      ulang keadaannya) — tagihan atas nama shift yang sudah tutup tidak boleh
+      diterbitkan.
+    */
+    if (posLocked) {
+      setPayError(shiftGate.message);
+      return;
+    }
     setPayError(null);
 
     const draft = validateCartCharge(
@@ -1337,6 +1606,12 @@ export function PosPage() {
    */
   async function settleCartCharge() {
     if (!cartCharge || paying) return;
+    // Sama seperti dua jalur pembayaran lain: shift yang sudah tutup menutup
+    // jalan menyimpan penjualannya — walau tagihannya sudah terlanjur lunas.
+    if (posLocked) {
+      setPayError(shiftGate.message);
+      return;
+    }
     setPayError(null);
 
     // Keranjang yang berubah setelah tagihan terbit harus dibuatkan tagihan baru;
@@ -1382,6 +1657,7 @@ export function PosPage() {
         draft: saleDraft(receipt),
         memberId,
         digital: cartCharge.number,
+        kitchenFired: receipt.kitchenFired,
       });
       resetSale();
       openReceiptDialog();
@@ -1421,6 +1697,12 @@ export function PosPage() {
     // QRIS pada tenant dengan kanal tagih digital tidak lewat sini: tombolnya
     // digantikan alur tagihan (`issueCartCharge`/`settleCartCharge`).
     if (showDigitalFlow) return;
+    // Shift yang ditutup dari tab lain ikut menutup pembayaran ini (lihat
+    // `issueCartCharge`): penjualan tanpa shift terbuka tidak boleh tersimpan.
+    if (posLocked) {
+      setPayError(shiftGate.message);
+      return;
+    }
     setPaying(true);
     setPayError(null);
     try {
@@ -1449,6 +1731,7 @@ export function PosPage() {
         credit: creditAmount > 0 ? creditAmount : undefined,
         customerName:
           creditAmount > 0 ? (selectedCustomer?.name ?? undefined) : undefined,
+        kitchenFired: receipt.kitchenFired,
       });
       resetSale();
       /*
@@ -1466,7 +1749,15 @@ export function PosPage() {
   }
 
   return (
-    <div className="grid gap-6 xl:grid-cols-[1fr_380px]">
+    /*
+      `grid-cols-1` **wajib**, bukan hiasan: tanpa kolom eksplisit, grid memakai
+      satu kolom implisit ber-ukuran `auto` yang melebar sampai `max-content`
+      isinya. Di HP, keranjang (header “Pesanan” + baris tombol) lebih lebar dari
+      layar, jadi kolomnya ikut melebar dan isi halaman terpotong di tepi kanan
+      (kasir meluap 28 px di lebar 360 px). Dengan `grid-cols-1` kolomnya `1fr`
+      yang tidak pernah melewati wadahnya; kolom 380 px tetap dipakai dari `xl`.
+    */
+    <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_380px]">
       {/*
         Kertas printer struk, diatur **otomatis** dari setelan workspace: lebar
         kertasnya (58/76/80/241 mm) dan tinggi notanya ditulis sebagai aturan
@@ -1479,12 +1770,21 @@ export function PosPage() {
       <div className="min-w-0">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2">
-            <Badge className="gap-1.5">
-              <span className="size-1.5 rounded-full bg-primary" />
-              Shift terbuka
-            </Badge>
+            {openShift ? (
+              <Badge className="gap-1.5">
+                <span className="size-1.5 rounded-full bg-primary" />
+                Shift terbuka
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="gap-1.5">
+                <Lock className="size-3" />
+                Kas belum dibuka
+              </Badge>
+            )}
             <span className="text-xs text-muted-foreground">
-              Kasir: Rani · buka 08:00
+              {openShift
+                ? `Kasir: ${session?.user?.name ?? "—"} · buka ${shiftClockLabel(shiftOpenedMs)}`
+                : "Buka shift di halaman Shift & Kas untuk membuka kasir: uang kembalian & setoran harinya tercatat."}
             </span>
             {offlineLabel && (
               <button
@@ -1608,6 +1908,119 @@ export function PosPage() {
           </div>
         </div>
 
+        {/*
+          Gerbang kasir (`posShiftGate` di `@/lib/shift`). Ini yang dibaca kasir
+          lebih dulu saat kasnya belum dibuka: tanpa shift terbuka seluruh
+          pekerjaan menjual di halaman ini mati, jadi jalan keluarnya (buka
+          shift) ditawarkan di pesan yang sama — bukan tersembunyi di balik
+          tombol-tombol yang mati. Peran yang tidak memegang `shift.manage`
+          mendapat pesan lain: jalan keluarnya bukan halaman itu, melainkan
+          izinnya.
+        */}
+        {posLocked && (
+          <div
+            data-testid="pos-gerbang-shift"
+            data-level="locked"
+            role="alert"
+            className="mt-4 flex flex-wrap items-start gap-3 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-destructive"
+          >
+            <Lock className="mt-0.5 size-4 shrink-0" />
+            <div className="min-w-0 flex-1 space-y-1">
+              <p className="text-sm font-medium">{shiftGate.title}</p>
+              <p className="text-xs opacity-90">
+                {canManageShift
+                  ? shiftGate.message
+                  : "Buka shift dilakukan dari halaman Shift & Kas, dan Anda belum memegang izin “Membuka & menutup shift kas”. Minta pemilik atau manajer memberi izin itu (Tim & Peran), atau minta ia membuka shift untuk kas ini."}
+              </p>
+            </div>
+            {/*
+              Di layar HP, tautannya turun ke barisnya sendiri (`w-full`): kalau
+              dipaksa sebaris, kolom teksnya yang terjepit jadi segelintir kata
+              per baris — dan pesan gerbang ini justru yang paling perlu dibaca.
+              Tanpa izin, tautannya tidak dipasang sama sekali.
+            */}
+            {canManageShift && (
+              <Button asChild variant="accent" size="sm" className="w-full shrink-0 sm:w-auto">
+                <Link to="/app/shift">{shiftGate.cta} →</Link>
+              </Button>
+            )}
+          </div>
+        )}
+
+        {/*
+          Jangan-lupa-tutup-shift. Kasir yang menutup toko adalah orang yang sama
+          yang memegang kasnya, jadi peringatannya ditaruh di layar tempat ia
+          bekerja: begitu jam tutup yang diatur pemilik toko terlewat, ia
+          diingatkan menutup shift sebelum pulang supaya uang fisiknya dicocokkan
+          dan Z-report hari itu tidak hilang. Ambang & kalimatnya dari
+          `@/lib/shift`, setelannya dari halaman Pengaturan — sama dengan yang
+          tampil di halaman Shift & Kas.
+        */}
+        {shiftNotice && (
+          <div
+            data-testid="kasir-ingat-tutup-shift"
+            data-level={shiftNotice.level}
+            className={cn(
+              "mt-4 flex flex-wrap items-start gap-3 rounded-lg border px-4 py-3",
+              shiftNotice.level === "late"
+                ? "border-destructive/40 bg-destructive/10 text-destructive"
+                : "border-accent/40 bg-accent/10 text-accent",
+            )}
+          >
+            <AlarmClock className="mt-0.5 size-4 shrink-0" />
+            <div className="min-w-0 flex-1 space-y-1">
+              <p className="text-sm font-medium">{shiftNotice.title}</p>
+              <p className="text-xs opacity-90">{shiftNotice.message}</p>
+            </div>
+            <Link
+              to="/app/shift"
+              className="w-full shrink-0 pl-7 text-xs font-medium underline underline-offset-4 sm:w-auto sm:pl-0"
+            >
+              {shiftNotice.cta} →
+            </Link>
+          </div>
+        )}
+
+        {/*
+          Kabar yang pergi ke **pemilik toko** (`useShiftOwnerAlert`): kas belum
+          dibuka di jam operasional, atau shift belum ditutup padahal toko sudah
+          tutup. Kasir melihatnya karena ia yang memegang kasnya — dan supaya ia
+          tahu apa yang benar-benar terjadi dengan kabarnya: terkirim, hari itu
+          sudah pernah, atau belum sampai karena endpoint webhook pemilik belum ada.
+        */}
+        {ownerAlert.alert && (
+          <div
+            data-testid="pos-pemberitahuan-pemilik"
+            data-status={ownerAlert.status}
+            role="status"
+            className={cn(
+              "mt-4 flex flex-wrap items-start gap-3 rounded-lg border px-4 py-3",
+              ownerAlert.alert.kind === "shift-open"
+                ? "border-destructive/40 bg-destructive/10 text-destructive"
+                : "border-accent/40 bg-accent/10 text-accent",
+            )}
+          >
+            <BellRing className="mt-0.5 size-4 shrink-0" />
+            <div className="min-w-0 flex-1 space-y-1">
+              <p className="text-sm font-medium">
+                {ownerAlert.alert.title} · {shiftOwnerAlertStatusLabel(ownerAlert.status)}
+              </p>
+              <p className="text-xs opacity-90">{ownerAlert.alert.message}</p>
+              {ownerAlert.notice && (
+                <p data-testid="pos-pemberitahuan-pemilik-catatan" className="text-xs opacity-75">
+                  {ownerAlert.notice}
+                </p>
+              )}
+            </div>
+            <Link
+              to="/app/shift"
+              className="w-full shrink-0 pl-7 text-xs font-medium underline underline-offset-4 sm:w-auto sm:pl-0"
+            >
+              Buka Shift & Kas →
+            </Link>
+          </div>
+        )}
+
         <div className="mt-4 flex flex-wrap gap-2">
           {categoryChips.map((c) => (
             <button
@@ -1652,11 +2065,16 @@ export function PosPage() {
                 key={p.id}
                 type="button"
                 onClick={() => addToCart(p.id, p.name, p.price)}
-                disabled={out}
+                /*
+                  Dua sebab tombolnya mati: stoknya habis, atau kasirnya masih
+                  terkunci karena shiftnya belum dibuka (`posShiftGate`).
+                */
+                disabled={out || posLocked}
+                title={posLocked ? shiftGate.hint : undefined}
                 className={cn(
                   "flex flex-col rounded-lg border border-border/70 bg-card text-left transition-colors",
                   adaGambar ? "overflow-hidden" : "justify-between p-3",
-                  out
+                  out || posLocked
                     ? "cursor-not-allowed opacity-50"
                     : "hover:border-primary/50 hover:bg-primary/5",
                 )}
@@ -1753,11 +2171,15 @@ export function PosPage() {
                   <button
                     type="button"
                     onClick={() => setTableId(undefined)}
+                    disabled={posLocked}
+                    title={posLocked ? shiftGate.hint : undefined}
                     className={cn(
                       "rounded-lg border px-3 py-2 text-left text-sm transition-colors",
-                      tableId === undefined
-                        ? "border-primary/50 bg-primary/12 text-primary"
-                        : "border-border text-muted-foreground hover:text-foreground",
+                      posLocked
+                        ? "cursor-not-allowed border-border/60 bg-secondary/30 text-muted-foreground opacity-60"
+                        : tableId === undefined
+                          ? "border-primary/50 bg-primary/12 text-primary"
+                          : "border-border text-muted-foreground hover:text-foreground",
                     )}
                   >
                     <span className="font-medium">Tanpa meja</span>
@@ -1766,30 +2188,50 @@ export function PosPage() {
                   {tableStatesNow
                     .filter((state) => state.active)
                     .map((state) => {
-                      const taken = state.status === "occupied";
+                      // Meja terkunci karena dua sebab: ada tiket dapur yang
+                      // menunggu di situ, atau transaksi yang sedang ditahan
+                      // memakai meja itu. Keduanya berarti tamunya masih duduk.
+                      const parked = parkedTables.get(state.id);
+                      const taken = state.status === "occupied" || Boolean(parked);
                       return (
                         <button
                           key={state.id}
+                          data-testid={`pos-meja-${state.id}`}
+                          data-meja-terkunci={taken ? "true" : "false"}
                           type="button"
                           onClick={() => setTableId(state.id)}
-                          disabled={taken}
+                          disabled={taken || posLocked}
                           title={
-                            taken
-                              ? `Terisi ${state.orderNumber}`
-                              : tableLabel(state)
+                            posLocked
+                              ? shiftGate.hint
+                              : parked
+                                ? `Meja ${state.name} dipakai transaksi yang ditahan (${heldLabel(parked)}) — lanjutkan atau buang transaksinya dulu`
+                                : state.status === "occupied"
+                                  ? `Terisi ${state.orderNumber}${
+                                      state.paid
+                                        ? " · sudah dibayar, tunggu dapur menekan Selesai"
+                                        : ""
+                                    }`
+                                  : tableLabel(state)
                           }
                           className={cn(
                             "rounded-lg border px-3 py-2 text-left text-sm transition-colors",
-                            taken
-                              ? "cursor-not-allowed border-border/60 bg-secondary/30 text-muted-foreground"
-                              : tableId === state.id
-                                ? "border-primary/50 bg-primary/12 text-primary"
-                                : "border-border text-muted-foreground hover:text-foreground",
+                            posLocked
+                              ? "cursor-not-allowed border-border/60 bg-secondary/30 text-muted-foreground opacity-60"
+                              : taken
+                                ? "cursor-not-allowed border-border/60 bg-secondary/30 text-muted-foreground"
+                                : tableId === state.id
+                                  ? "border-primary/50 bg-primary/12 text-primary"
+                                  : "border-border text-muted-foreground hover:text-foreground",
                           )}
                         >
                           <span className="font-medium">{state.name}</span>
                           <span className="block font-mono text-[11px]">
-                            {taken ? state.orderNumber : `${state.seats} kursi`}
+                            {parked
+                              ? "ditahan"
+                              : state.status === "occupied"
+                                ? state.orderNumber
+                                : `${state.seats} kursi`}
                           </span>
                         </button>
                       );
@@ -1816,6 +2258,20 @@ export function PosPage() {
                         <span className="ml-2 text-xs text-muted-foreground">
                           {ticket.tableName ? `Meja ${ticket.tableName}` : "Bungkus"}
                         </span>
+                        {/*
+                          Pesanan yang sudah lunas tetap terlihat di sini — kasir
+                          perlu tahu pesanannya sudah diterima dapur — tetapi
+                          ditandai, supaya tidak terbaca sebagai tagihan yang masih
+                          menunggu uang.
+                        */}
+                        {ticket.settled && (
+                          <span
+                            data-testid={`pos-dapur-lunas-${ticket.saleId}`}
+                            className="ml-2 text-xs text-primary"
+                          >
+                            sudah lunas
+                          </span>
+                        )}
                       </span>
                       <span className="shrink-0 text-xs text-muted-foreground">
                         {ticket.waitingMinutes} mnt
@@ -1825,6 +2281,73 @@ export function PosPage() {
                 </ul>
               )}
             </div>
+          </section>
+        )}
+
+        {/*
+          Transaksi yang ditahan (tombol **Hold**). Bagian ini tidak digerbangi
+          modul F&B: menahan transaksi adalah cara kerja kasir di semua jenis
+          usaha — yang ditahan adalah keranjang yang belum dibayar, bukan pesanan
+          dapur.
+        */}
+        {heldCarts.length > 0 && (
+          <section className="mt-6" data-testid="pos-ditahan">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold">Transaksi ditahan</h2>
+              <span className="text-xs text-muted-foreground">
+                {heldCarts.length} transaksi
+              </span>
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Keranjang yang ditahan belum dibayar dan belum masuk dapur — stok
+              belum bergerak. Meja yang dipilihnya ikut ditahan selama transaksinya
+              ada di sini.
+            </p>
+            <ul className="mt-3 grid gap-2 sm:grid-cols-2">
+              {heldCarts.map((row) => (
+                <li
+                  key={row.id}
+                  className="rounded-lg border border-border bg-card p-3"
+                >
+                  <div className="text-sm font-medium">
+                    {row.tableName ? `Meja ${row.tableName}` : "Tanpa meja (bungkus)"}
+                  </div>
+                  <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">
+                    {row.itemCount} item · {formatIDR(row.total)} · ditahan{" "}
+                    {formatClock(row.heldAt)}
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      data-testid={`pos-lanjutkan-${row.id}`}
+                      onClick={() => resumeHeld(row.id)}
+                      disabled={cart.length > 0 || posLocked}
+                      title={
+                        posLocked
+                          ? shiftGate.hint
+                          : cart.length > 0
+                            ? "Keranjang yang sekarang masih berisi — tahan (Hold) atau selesaikan dulu sebelum melanjutkan transaksi lain"
+                            : "Kembalikan transaksi ini ke keranjang kasir"
+                      }
+                    >
+                      <Play className="size-4" />
+                      Lanjutkan
+                    </Button>
+                    <button
+                      type="button"
+                      data-testid={`pos-buang-${row.id}`}
+                      onClick={() => dropHeld(row.id)}
+                      title="Buang transaksi yang ditahan ini — tidak ada yang tercatat karena belum dibayar"
+                      className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-destructive"
+                    >
+                      <Trash2 className="size-3.5" />
+                      Buang
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
           </section>
         )}
       </div>
@@ -2086,7 +2609,15 @@ export function PosPage() {
           )}
           <div className="flex items-baseline justify-between border-t border-dashed border-border pt-2">
             <span className="font-medium">Total</span>
-            <span className="font-mono text-xl font-bold text-primary">
+            {/*
+              Total keranjang punya alamatnya sendiri (`data-testid`): angka ini
+              yang dibandingkan harness dengan transaksi yang dilanjutkan dari
+              daftar **Transaksi ditahan**.
+            */}
+            <span
+              data-testid="keranjang-total"
+              className="font-mono text-xl font-bold text-primary"
+            >
               {formatIDR(total)}
             </span>
           </div>
@@ -2133,18 +2664,25 @@ export function PosPage() {
 
         <div className="border-t border-border/70 p-4">
           <div className="grid grid-cols-2 gap-2">
+            {/*
+              **Hold**: transaksi yang sedang berjalan ditahan sementara supaya
+              pembeli berikutnya bisa dilayani lebih dulu, lalu dilanjutkan dari
+              daftar Transaksi ditahan. Isinya masih murni keranjang — belum ada
+              uang, stok, atau tiket dapur yang tercatat.
+            */}
             <Button
               variant="outline"
-              onClick={() => void sendToKitchen()}
-              disabled={cart.length === 0 || sending || !canSendToKitchen}
+              data-testid="pos-hold"
+              onClick={holdCart}
+              disabled={cart.length === 0 || posLocked}
               title={
-                canSendToKitchen
-                  ? "Kirim ke dapur (pesanan tertahan)"
-                  : "Butuh modul F&B aktif"
+                posLocked
+                  ? shiftGate.hint
+                  : "Tahan transaksi ini sementara supaya pembeli berikutnya bisa dilayani lebih dulu — lanjutkan dari daftar Transaksi ditahan"
               }
             >
-              <ChefHat className="size-4" />
-              {sending ? "Kirim…" : "Ke dapur"}
+              <Pause className="size-4" />
+              Hold
             </Button>
             {/*
               Cetak & kirim baru ditawarkan **sesudah pembayarannya lunas**: struk
@@ -2187,10 +2725,42 @@ export function PosPage() {
                 </Button>
               </>
             )}
-            <Button onClick={() => setPayOpen(true)} disabled={cart.length === 0}>
+            <Button
+              data-testid="pos-bayar"
+              onClick={() => setPayOpen(true)}
+              disabled={cart.length === 0 || posLocked}
+              title={posLocked ? shiftGate.hint : undefined}
+            >
               Bayar
             </Button>
           </div>
+          {/*
+            Catatan gerbang di panel keranjang: di ponsel, banner di atas daftar
+            produk mudah tergulir keluar layar, sedangkan tombol Bayar yang mati
+            selalu terlihat — penjelasan singkatnya ikut diletakkan di sini
+            berikut tautan jalan keluarnya.
+          */}
+          {posLocked && (
+            <p
+              data-testid="pos-gerbang-shift-catatan"
+              className="mt-2 text-center text-[11px] text-muted-foreground"
+            >
+              {shiftGate.title} —{" "}
+              <Link to="/app/shift" className="font-medium text-primary hover:underline">
+                {shiftGate.cta}
+              </Link>
+            </p>
+          )}
+          {heldCarts.length > 0 && cart.length === 0 && (
+            <p
+              data-testid="pos-ditahan-hint"
+              className="mt-2 text-center text-[11px] text-muted-foreground"
+            >
+              {heldCarts.length} transaksi ditahan menunggu dilanjutkan — tekan{" "}
+              <strong className="font-medium text-foreground">Lanjutkan</strong> di
+              daftar Transaksi ditahan.
+            </p>
+          )}
           {strukSiap && (
             <p
               data-testid="struk-lunas-catatan"
@@ -2204,10 +2774,18 @@ export function PosPage() {
         </div>
       </aside>
 
+      {/*
+        Kartunya dibatasi setinggi layar dan **isinya sendiri yang digulir**: di
+        ponsel, dialog ini bisa jadi lebih tinggi dari layar (jalur QRIS/VA
+        menambah blok tagihan, dan papan tombol yang terbuka saat kasir mengetik
+        uang diterima memangkas layarnya lagi), sedangkan lapisan luar yang
+        `fixed` tidak bisa menggulir apa pun. Judul + tombol tutupnya dibuat
+        menempel di atas supaya selalu terjangkau.
+      */}
       {payOpen && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-background/80 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-2xl">
-            <div className="flex items-center justify-between">
+          <div className="max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto overscroll-contain rounded-xl border border-border bg-card p-6 shadow-2xl">
+            <div className="sticky top-0 z-10 -mx-6 -mt-6 flex items-center justify-between rounded-t-xl bg-card px-6 pb-3 pt-6">
               <h3 className="text-lg font-semibold">Pembayaran</h3>
               {/* Tombol berikon: yang dibaca pembaca layar (dan dipakai harness)
                   adalah labelnya, bukan gambar silangnya. */}
@@ -2509,14 +3087,22 @@ export function PosPage() {
         ada jalur yang membukanya untuk keranjang yang belum dibayar. Yang di sisi
         server hanya pengiriman WhatsApp-nya, karena nomor tujuannya ada di data
         member.
+
+        Kartunya dibatasi setinggi layar dan **isinya sendiri yang digulir**.
+        Dialog ini yang paling panjang — printer, tiga jalan struk, kolom nomor
+        WhatsApp, daftar PDF, dan notis — dan di ponsel ia lebih tinggi dari
+        layar, sedangkan lapisan luarnya `fixed` sehingga tidak bisa menggulir
+        apa pun: laporan pemilik repo, bagian bawahnya (daftar PDF, tombol Tutup)
+        tidak pernah bisa dibaca. Judul + tombol tutupnya ditempel di atas
+        supaya kasir selalu bisa menutupnya.
       */}
       {receiptOpen && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-background/80 p-4 backdrop-blur-sm">
           <div
             data-testid="struk-dialog"
-            className="w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-2xl"
+            className="max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto overscroll-contain rounded-xl border border-border bg-card p-6 shadow-2xl"
           >
-            <div className="flex items-start justify-between gap-3">
+            <div className="sticky top-0 z-10 -mx-6 -mt-6 flex items-start justify-between gap-3 rounded-t-xl bg-card px-6 pb-3 pt-6">
               <div>
                 <h3 className="text-lg font-semibold">Struk belanja</h3>
                 <p className="mt-1 text-sm text-muted-foreground">
@@ -2531,6 +3117,23 @@ export function PosPage() {
                     {receiptMember.phone
                       ? `WhatsApp ${maskPhone(receiptMember.phone)}`
                       : "belum ada nomor WhatsApp"}
+                  </p>
+                )}
+                {/*
+                  Konfirmasi satu baris bahwa dapurnya sudah menerima pesanan ini.
+                  Dialog struk terbuka otomatis sesudah pembayaran, jadi kalimatnya
+                  terbaca di tempat kasir memang sedang menatap — bukan di halaman
+                  lain yang harus dicari. Hanya muncul kalau penjualannya memang
+                  dikirim ke dapur (modul F&B dengan layar dapur).
+                */}
+                {lastReceipt?.kitchenFired && (
+                  <p
+                    data-testid="struk-dapur"
+                    className="mt-1 flex items-start gap-1.5 text-xs text-primary"
+                  >
+                    <ChefHat className="mt-0.5 size-3.5 shrink-0" />
+                    Pesanan sudah dikirim ke dapur bersamaan dengan pembayaran ini —
+                    statusnya ada di halaman Dapur &amp; Meja.
                   </p>
                 )}
               </div>

@@ -20,7 +20,7 @@ import { ConvexHttpClient } from "convex/browser";
 import { api } from "../src/convex/_generated/api.js";
 // Aturan murni yang sama dipakai server dan klien; dipakai di sini untuk
 // memeriksa denah meja dari data yang benar-benar disimpan backend.
-import { tableStates } from "../src/convex/lib/fnb.ts";
+import { tableStates, ticketTableHolders } from "../src/convex/lib/fnb.ts";
 // Aturan webhook keluar yang sama dipakai aksi kirim uji; dipakai di sini untuk
 // memastikan tanda tangan yang dikirim server bisa diverifikasi penerima.
 import {
@@ -45,6 +45,12 @@ import {
   receiptSettingOf,
   sameReceiptSetting,
 } from "../src/convex/lib/struk.ts";
+import {
+  DEFAULT_SHIFT_SETTING,
+  sameShiftSetting,
+  shiftDayKey,
+  shiftSettingOf,
+} from "../src/convex/lib/shift.ts";
 
 const url = process.env.VITE_CONVEX_URL;
 if (!url) {
@@ -160,6 +166,83 @@ async function main() {
     JSON.stringify({ status: tenant?.status, tax: tenant?.taxRatePct }),
   );
   check("tenant menyimpan 2 modul", tenant?.verticals?.length === 2, JSON.stringify(tenant?.verticals));
+
+  // ------------------------------------------------ batalkan pendaftaran
+  // Tautan “Batalkan” di onboarding menjanjikan **email yang dipakai mendaftar
+  // dihapus**, bukan hanya sesinya ditutup. Jadi yang diuji di sini: baris `users`
+  // benar-benar pergi, email yang sama bisa mendaftar lagi sebagai akun **baru**,
+  // dan akun yang sudah punya workspace tidak bisa dihapus lewat jalur ini.
+  const cancelEmail = `batal+${runId}@mesinpos.test`;
+  const { userId: cancelId } = await client.mutation(api.users.createOrGet, {
+    email: cancelEmail,
+    name: "Calon Pengguna",
+  });
+  const sebelumBatal = await client.mutation(api.users.createOrGet, {
+    email: cancelEmail,
+    name: "Calon Pengguna",
+  });
+  check(
+    "pendaftaran yang sama belum digandakan sebelum dibatalkan",
+    sebelumBatal.userId === cancelId && sebelumBatal.created === false,
+    JSON.stringify(sebelumBatal),
+  );
+
+  const cancelled = await client.mutation(api.users.cancelRegistration, {
+    userId: cancelId,
+  });
+  check(
+    "cancelRegistration menghapus email yang dipakai mendaftar",
+    cancelled.deleted === true && cancelled.email === cancelEmail,
+    JSON.stringify(cancelled),
+  );
+  check(
+    "jawaban pembatalan menyebut email yang dibebaskan",
+    cancelled.sentence.includes(cancelEmail) &&
+      cancelled.sentence.includes("dihapus") &&
+      cancelled.sentence.includes("mendaftar lagi"),
+    cancelled.sentence,
+  );
+  const hilang = await client.query(api.users.get, { userId: cancelId });
+  check(
+    "baris akun hasil pembatalan benar-benar tidak ada",
+    hilang === null,
+    JSON.stringify(hilang),
+  );
+
+  const daftarLagi = await client.mutation(api.users.createOrGet, {
+    email: cancelEmail,
+    name: "Calon Pengguna",
+  });
+  check(
+    "email bekas pembatalan bisa mendaftar lagi sebagai akun baru",
+    daftarLagi.created === true && daftarLagi.userId !== cancelId,
+    JSON.stringify(daftarLagi),
+  );
+
+  let tolakWorkspace = null;
+  try {
+    await client.mutation(api.users.cancelRegistration, { userId });
+  } catch (error) {
+    tolakWorkspace = error?.message ?? String(error);
+  }
+  check(
+    "pembatalan akun yang sudah punya workspace ditolak",
+    typeof tolakWorkspace === "string" &&
+      tolakWorkspace.includes("sudah punya workspace"),
+    String(tolakWorkspace),
+  );
+
+  let tolakDuaKali = null;
+  try {
+    await client.mutation(api.users.cancelRegistration, { userId: cancelId });
+  } catch (error) {
+    tolakDuaKali = error?.message ?? String(error);
+  }
+  check(
+    "akun yang sudah dihapus tidak bisa dibatalkan dua kali",
+    typeof tolakDuaKali === "string" && tolakDuaKali.includes("sudah tidak ada"),
+    String(tolakDuaKali),
+  );
 
   // --------------------------------------------------------------- catalogue
   // `products.create` mengembalikan id **dan** SKU final (server bisa membuat SKU
@@ -961,10 +1044,22 @@ async function main() {
     storeId,
     actorId: userId,
   });
+  /*
+    Antrean diperiksa **per penjualan**, bukan lewat jumlahnya: di workspace F&B
+    yang layar dapurnya hidup, setiap penjualan lunas juga menjadi tiket (itu
+    perilaku yang diminta), jadi jumlah tiket bergantung pada berapa penjualan
+    yang dibuat harness ini sebelumnya — dan tenant uji dipakai ulang antar-run.
+  */
+  const tiketHeld = antrean0.find((ticket) => ticket.saleId === held.saleId);
   check(
     "antrean dapur memuat pesanan tertahan tanpa meja",
-    antrean0.length === 1 && antrean0[0].tableName === undefined,
+    Boolean(tiketHeld) && tiketHeld.tableName === undefined,
     JSON.stringify(antrean0),
+  );
+  check(
+    "pesanan tertahan tidak diklaim sudah lunas",
+    tiketHeld?.settled === false && tiketHeld.paidLabel === null,
+    JSON.stringify(tiketHeld),
   );
 
   const mejaSale = await client.mutation(api.pos.createSale, {
@@ -988,11 +1083,19 @@ async function main() {
     storeId,
     actorId: userId,
   });
-  check("antrean dapur memuat dua tiket", antrean1.length === 2, String(antrean1.length));
+  const tertahanSemua = antrean1.filter((ticket) => !ticket.settled);
+  check(
+    "antrean dapur memuat kedua pesanan tertahan",
+    [held.saleId, mejaSale.saleId].every((saleId) =>
+      antrean1.some((ticket) => ticket.saleId === saleId),
+    ),
+    antrean1.map((t) => t.number).join(","),
+  );
   check(
     "antrean diurutkan paling lama menunggu di depan",
-    antrean1[0].saleId === held.saleId,
-    antrean1.map((t) => t.number).join(","),
+    antrean1.findIndex((ticket) => ticket.saleId === held.saleId) <
+      antrean1.findIndex((ticket) => ticket.saleId === mejaSale.saleId),
+    tertahanSemua.map((t) => t.number).join(","),
   );
   const tiketMeja = antrean1.find((t) => t.saleId === mejaSale.saleId);
   check("tiket menyebut meja pesanan", tiketMeja?.tableName === "A1", JSON.stringify(tiketMeja));
@@ -1134,6 +1237,347 @@ async function main() {
     ).find((state) => state.name === "A1")?.status === "free",
     "meja masih terisi",
   );
+
+  // ------------- pembayaran di kasir langsung dikirim ke dapur (modul F&B)
+  // Inti alur F&B yang diminta pemilik repo: pembeli membayar (tunai, QRIS, atau
+  // VA), pesanannya berangkat ke dapur pada momen itu juga, dan dapur cukup
+  // menandainya beres — bukan menyelesaikan penjualannya lagi, karena stoknya
+  // sudah bergerak saat uangnya dicatat.
+  /*
+    Produk khusus untuk blok ini: tenant uji dipakai ulang antar-run, jadi memakai
+    produk yang sama dengan uji lain bisa menghabiskan stoknya di tengah harness
+    (uji lain berhenti karena "stok tidak cukup", bukan karena aturannya salah).
+  */
+  const produkDapur = await client.mutation(api.products.create, {
+    tenantId,
+    storeId,
+    actorId: userId,
+    name: "Kudapan Dapur Uji",
+    price: 10000,
+    cost: 4000,
+    openingStock: 50,
+  });
+
+  const stokSebelumKirim = (
+    await client.query(api.products.listByStore, { tenantId, storeId, actorId: userId })
+  ).find((p) => p._id === produkDapur.productId)?.stock;
+
+  const bayarLunas = await client.mutation(api.pos.createSale, {
+    tenantId,
+    storeId,
+    cashierId: userId,
+    items: [{ productId: produkDapur.productId, quantity: 1 }],
+    // Tunai tepat sebesar total yang dihitung server (harga + PPN) — jumlahnya
+    // tidak ditebak harness, seperti pemanggil API lain yang memakai jalur ini.
+    payments: [{ method: "cash", amount: 10000 }],
+    payExactTotal: true,
+    idempotencyKey: `bayar-dapur-${runId}`,
+    tableId: meja.tableId,
+  });
+  check(
+    "penjualan lunas melaporkan dirinya sudah dikirim ke dapur",
+    bayarLunas.kitchenFired === true,
+    JSON.stringify(bayarLunas),
+  );
+
+  const stokSetelahKirim = (
+    await client.query(api.products.listByStore, { tenantId, storeId, actorId: userId })
+  ).find((p) => p._id === produkDapur.productId)?.stock;
+  check(
+    "stok bergerak sekali saat uangnya dicatat",
+    stokSetelahKirim === stokSebelumKirim - 1,
+    `${stokSebelumKirim} → ${stokSetelahKirim}`,
+  );
+
+  const antrean3 = await client.query(api.pos.kdsTickets, {
+    tenantId,
+    storeId,
+    actorId: userId,
+  });
+  const tiketLunas = antrean3.find((ticket) => ticket.saleId === bayarLunas.saleId);
+  check(
+    "tiket penjualan lunas muncul di antrean dapur",
+    Boolean(tiketLunas),
+    antrean3.map((t) => t.number).join(","),
+  );
+  check(
+    "tiket dapur tahu penjualannya sudah lunas",
+    tiketLunas?.settled === true,
+    JSON.stringify(tiketLunas),
+  );
+  check(
+    "tiket menyebut metode bayarnya",
+    typeof tiketLunas?.paidLabel === "string" &&
+      tiketLunas.paidLabel.startsWith("Lunas Tunai"),
+    String(tiketLunas?.paidLabel),
+  );
+  check(
+    "tiket lunas tetap membawa meja & itemnya",
+    tiketLunas?.tableName === "A1" && tiketLunas?.itemCount === 1,
+    JSON.stringify(tiketLunas),
+  );
+  const mejaTerkunci = tableStates(denah2, ticketTableHolders(antrean3)).find(
+    (state) => state.name === "A1",
+  );
+  check(
+    "meja tetap terkunci selama tiket lunasnya menunggu di dapur",
+    mejaTerkunci?.status === "occupied" && mejaTerkunci?.paid === true,
+    JSON.stringify(mejaTerkunci),
+  );
+
+  // Kasir tidak bisa menaruh pesanan kedua di meja itu — pagar servernya menyebut
+  // bahwa yang perlu ditunggu adalah dapur, bukan pembatalan.
+  {
+    let blocked = false;
+    let message = "";
+    try {
+      await client.mutation(api.pos.createSale, {
+        tenantId,
+        storeId,
+        cashierId: userId,
+        items: [{ productId: produkDapur.productId, quantity: 1 }],
+        payments: [{ method: "cash", amount: 10000 }],
+        payExactTotal: true,
+        idempotencyKey: `meja-terkunci-${runId}`,
+        tableId: meja.tableId,
+      });
+    } catch (error) {
+      blocked = true;
+      message = error?.message ?? String(error);
+    }
+    check(
+      "pesanan kedua di meja yang sudah dibayar ditolak server",
+      blocked &&
+        message.includes("sudah dibayar") &&
+        message.includes("Tunggu dapur menekan Selesai"),
+      message || "DITERIMA — meja yang sudah dibayar masih bisa ditempati",
+    );
+  }
+
+  // Meja yang sedang menunggu dapur juga tidak bisa dimatikan dari denah: dia
+  // masih dipakai tamunya, sama seperti aturan saat kasir memilihnya.
+  {
+    let blocked = false;
+    let message = "";
+    try {
+      await client.mutation(api.tables.setActive, {
+        tenantId,
+        tableId: meja.tableId,
+        actorId: userId,
+        active: false,
+      });
+    } catch (error) {
+      blocked = true;
+      message = error?.message ?? String(error);
+    }
+    check(
+      "meja yang menunggu dapur tidak bisa dinonaktifkan",
+      blocked && message.includes("sudah dibayar"),
+      message || "DITERIMA — meja yang masih dipakai bisa dimatikan",
+    );
+  }
+
+  // Dapur menekan Selesai: tiketnya keluar dari antrean, penjualannya tetap utuh,
+  // dan stoknya **tidak** bergerak untuk kedua kalinya.
+  await client.mutation(api.pos.kitchenDone, {
+    saleId: bayarLunas.saleId,
+    actorId: userId,
+  });
+  const antrean4 = await client.query(api.pos.kdsTickets, {
+    tenantId,
+    storeId,
+    actorId: userId,
+  });
+  check(
+    "tiket lunas keluar dari antrean setelah ditandai selesai",
+    !antrean4.some((ticket) => ticket.saleId === bayarLunas.saleId),
+    antrean4.map((t) => t.number).join(","),
+  );
+  check(
+    "menandai selesai tidak mengurangi stok dua kali",
+    (
+      await client.query(api.products.listByStore, { tenantId, storeId, actorId: userId })
+    ).find((p) => p._id === produkDapur.productId)?.stock === stokSetelahKirim,
+    String(
+      (await client.query(api.products.listByStore, { tenantId, storeId, actorId: userId })).find(
+        (p) => p._id === produkDapur.productId,
+      )?.stock,
+    ),
+  );
+  check(
+    "penjualannya tetap tercatat selesai",
+    (
+      await client.query(api.pos.recent, { tenantId, storeId, actorId: userId, limit: 5 })
+    ).some((sale) => sale._id === bayarLunas.saleId && sale.status === "completed"),
+    "penjualan tidak ditemukan sebagai completed",
+  );
+
+  {
+    let blocked = false;
+    let message = "";
+    try {
+      await client.mutation(api.pos.kitchenDone, {
+        saleId: bayarLunas.saleId,
+        actorId: userId,
+      });
+    } catch (error) {
+      blocked = true;
+      message = error?.message ?? String(error);
+    }
+    check(
+      "menandai selesai dua kali ditolak dengan kalimatnya",
+      blocked && message.includes("tidak sedang menunggu di dapur"),
+      message || "DITERIMA — tiket yang sudah beres masih bisa ditandai lagi",
+    );
+  }
+
+  /*
+    Meja itu benar-benar bebas lagi setelah dapur selesai — bukan hanya di layar:
+    penjualan berikutnya di meja yang sama **diterima server**. Penjualan uji itu
+    lalu ditandai selesai juga supaya sisa harness ini tidak meninggalkan tiket
+    menggantung yang mengunci meja A1 sepanjang uji berikutnya.
+  */
+  const antreanBebas = await client.query(api.pos.kdsTickets, {
+    tenantId,
+    storeId,
+    actorId: userId,
+  });
+  check(
+    "meja bebas lagi setelah dapur menekan Selesai",
+    tableStates(denah2, ticketTableHolders(antreanBebas)).find((state) => state.name === "A1")
+      ?.status === "free",
+    JSON.stringify(
+      tableStates(denah2, ticketTableHolders(antreanBebas)).find((state) => state.name === "A1"),
+    ),
+  );
+  const pakaiLagi = await client.mutation(api.pos.createSale, {
+    tenantId,
+    storeId,
+    cashierId: userId,
+    items: [{ productId: produkDapur.productId, quantity: 1 }],
+    payments: [{ method: "cash", amount: 10000 }],
+    payExactTotal: true,
+    idempotencyKey: `meja-bebas-${runId}`,
+    tableId: meja.tableId,
+  });
+  check(
+    "kasir bisa menaruh pesanan baru di meja yang sudah dibebaskan",
+    typeof pakaiLagi.saleId === "string" && pakaiLagi.kitchenFired === true,
+    JSON.stringify(pakaiLagi),
+  );
+  await client.mutation(api.pos.kitchenDone, {
+    saleId: pakaiLagi.saleId,
+    actorId: userId,
+  });
+  const antreanBersih = await client.query(api.pos.kdsTickets, {
+    tenantId,
+    storeId,
+    actorId: userId,
+  });
+  check(
+    "setelah tiket itu ditandai selesai juga, mejanya kosong lagi",
+    tableStates(denah2, ticketTableHolders(antreanBersih)).find(
+      (state) => state.name === "A1",
+    )?.status === "free",
+    "meja masih terisi",
+  );
+
+  // Tombol yang sama untuk pesanan tertahan: yang berlaku adalah penyelesaian
+  // penjualannya (stok bergerak di situ), bukan sekadar penanda di layar.
+  const tertahanDapur = await client.mutation(api.pos.createSale, {
+    tenantId,
+    storeId,
+    cashierId: userId,
+    items: [{ productId: produkDapur.productId, quantity: 1 }],
+    payments: [{ method: "cash", amount: 10000 }],
+    idempotencyKey: `dapur-tertahan-${runId}`,
+    status: "held",
+  });
+  check(
+    "pesanan tertahan tidak diklaim sudah lunas",
+    tertahanDapur.kitchenFired === false,
+    JSON.stringify(tertahanDapur),
+  );
+  const stokSebelumSelesai = (
+    await client.query(api.products.listByStore, { tenantId, storeId, actorId: userId })
+  ).find((p) => p._id === produkDapur.productId)?.stock;
+  await client.mutation(api.pos.kitchenDone, {
+    saleId: tertahanDapur.saleId,
+    actorId: userId,
+  });
+  check(
+    "menyelesaikan pesanan tertahan menggerakkan stok di situ",
+    (
+      await client.query(api.products.listByStore, { tenantId, storeId, actorId: userId })
+    ).find((p) => p._id === produkDapur.productId)?.stock === stokSebelumSelesai - 1,
+    `${stokSebelumSelesai} → stok tidak berubah`,
+  );
+  check(
+    "pesanan tertahan yang selesai keluar dari antrean",
+    !(
+      await client.query(api.pos.kdsTickets, { tenantId, storeId, actorId: userId })
+    ).some((ticket) => ticket.saleId === tertahanDapur.saleId),
+    "tiketnya masih menunggu",
+  );
+
+  /*
+    Metode pembayaran tidak mengubah tujuan pesanannya: QRIS (dan VA di jalur
+    tagihan yang sama) berangkat ke dapur pada momen pembayarannya seperti tunai,
+    dan label tiketnya menyebut kanalnya — bukan "Lunas Tunai" yang akan
+    menyesatkan dapur soal uangnya masuk lewat apa.
+  */
+  const bayarQris = await client.mutation(api.pos.createSale, {
+    tenantId,
+    storeId,
+    cashierId: userId,
+    items: [{ productId: produkDapur.productId, quantity: 1 }],
+    payments: [{ method: "qris", amount: 10000 }],
+    payExactTotal: true,
+    idempotencyKey: `bayar-dapur-qris-${runId}`,
+  });
+  check(
+    "penjualan QRIS juga langsung dikirim ke dapur",
+    bayarQris.kitchenFired === true,
+    JSON.stringify(bayarQris),
+  );
+  const tiketQris = (
+    await client.query(api.pos.kdsTickets, { tenantId, storeId, actorId: userId })
+  ).find((ticket) => ticket.saleId === bayarQris.saleId);
+  check(
+    "tiket QRIS menyebut kanal & momen diterimanya, bukan label tunai",
+    tiketQris?.settled === true &&
+      String(tiketQris?.paidLabel).startsWith("Lunas QRIS · diterima dapur pukul"),
+    JSON.stringify({ settled: tiketQris?.settled, label: tiketQris?.paidLabel }),
+  );
+
+  // Tanpa layar dapur di paketnya, tidak ada yang menerima tiketnya — jadi
+  // penjualannya pun tidak diklaim "sudah ke dapur".
+  {
+    const starterStore = starterTenant.storeId;
+    const produkStarter = await client.mutation(api.products.create, {
+      tenantId: starterTenant.tenantId,
+      storeId: starterStore,
+      actorId: userId,
+      name: "Air Mineral Uji",
+      price: 5000,
+      cost: 2000,
+      openingStock: 10,
+    });
+    const saleStarter = await client.mutation(api.pos.createSale, {
+      tenantId: starterTenant.tenantId,
+      storeId: starterStore,
+      cashierId: userId,
+      items: [{ productId: produkStarter.productId, quantity: 1 }],
+      payments: [{ method: "cash", amount: 5000 }],
+      payExactTotal: true,
+      idempotencyKey: `starter-dapur-${runId}`,
+    });
+    check(
+      "workspace tanpa layar dapur tidak mengklaim pesanannya ke dapur",
+      saleStarter.kitchenFired === false,
+      JSON.stringify(saleStarter),
+    );
+  }
 
   // ------------------------- pesanan QR meja (`pos.table` + `payment.digital`)
   // Rantai yang diuji dari sisi server: kartu QR meja → menu publik **tanpa
@@ -5820,6 +6264,55 @@ async function main() {
       analitik.range.to - analitik.range.from === 30 * 86_400_000,
     JSON.stringify(analitik.range),
   );
+  // Bagian enterprise: proyeksi akhir periode & analisis keranjang. Angkanya
+  // dihitung server dari baris penjualan yang sama, jadi lajunya harus konsisten
+  // dengan yang sudah tercatat, dan keranjangnya harus cocok dengan ringkasan
+  // periode (tidak ada nota yang hilang atau dihitung dua kali).
+  check(
+    "proyeksi backend: hari penuh dipisahkan dari hari yang sedang berjalan",
+    analitik.forecast.hasBasis === true &&
+      analitik.forecast.elapsedDays === 29 &&
+      analitik.forecast.todayCounted === true &&
+      analitik.forecast.previousDays === 29 &&
+      analitik.forecast.netRunRate ===
+        Math.round(analitik.forecast.completedNet / 29),
+    JSON.stringify(analitik.forecast),
+  );
+  check(
+    "proyeksi backend: proyeksi omzet = hari penuh + hari ini pada lajunya",
+    analitik.forecast.projectedNet ===
+      analitik.forecast.completedNet +
+        Math.max(analitik.forecast.todayNet, analitik.forecast.netRunRate) &&
+      analitik.forecast.completedNet + analitik.forecast.todayNet ===
+        analitik.totals.netRevenue,
+    JSON.stringify({
+      proyeksi: analitik.forecast.projectedNet,
+      tercatat: analitik.forecast.completedNet + analitik.forecast.todayNet,
+      total: analitik.totals.netRevenue,
+    }),
+  );
+  check(
+    "keranjang backend: nota & barangnya cocok dengan ringkasan periode",
+    analitik.basket.receipts + analitik.basket.skippedReceipts ===
+      analitik.totals.transactions &&
+      analitik.basket.items === analitik.totals.itemCount &&
+      analitik.basket.sizes.reduce((sum, row) => sum + row.receipts, 0) ===
+        analitik.basket.receipts,
+    JSON.stringify({
+      nota: analitik.basket.receipts,
+      dilewati: analitik.basket.skippedReceipts,
+      barang: analitik.basket.items,
+    }),
+  );
+  check(
+    "keranjang backend: pasangan teratas diurutkan dari yang paling sering bersama",
+    analitik.basket.pairs.length <= 8 &&
+      analitik.basket.pairs.every(
+        (pair, index) =>
+          index === 0 || analitik.basket.pairs[index - 1].together >= pair.together,
+      ),
+    JSON.stringify(analitik.basket.pairs.map((pair) => pair.together)),
+  );
 
   const harianAnalitik = await client.query(api.reports.dailySummary, {
     tenantId,
@@ -6139,8 +6632,10 @@ async function main() {
     actorId: cashierId,
   });
   check(
-    "myAccess melaporkan peran kustom yang berlaku & peran bawaannya",
-    aksesKasir.customRole?.name === "Pengawas Stok" && aksesKasir.role === "cashier",
+    "myAccess melaporkan peran tambahan yang berdiri sendiri — tanpa peran bawaan",
+    aksesKasir.customRole?.name === "Pengawas Stok" &&
+      aksesKasir.role === null &&
+      JSON.stringify(aksesKasir.rolePermissions) === JSON.stringify([]),
     JSON.stringify(aksesKasir),
   );
   check(
@@ -6161,6 +6656,244 @@ async function main() {
     JSON.stringify(peranSetelahPakai.summary),
   );
 
+  /*
+    Peran kustom boleh dipilih **saat mendaftarkan anggota baru** — dulu peran
+    itu hanya bisa ditugaskan setelah orangnya ada di tim, dan dari situ keluhan
+    “peran kustom yang dibuat tidak muncul di pilihan pendaftaran” datang.
+    Yang dibuktikan di server: penugasannya benar-benar tersimpan pada
+    keanggotaan barunya, `null` melepasnya, dan seluruh pagar `roles.assign`
+    (fitur, peran nonaktif, pemilik, eskalasi) tetap berlaku di jalur ini.
+  */
+  {
+    const undanganKustom = await client.mutation(api.members.add, {
+      tenantId,
+      actorId: userId,
+      email: `kasir.malam+${runId}@mesinpos.test`,
+      name: "Kasir Malam",
+      role: "cashier",
+      customRoleId: peranGudang.roleId,
+    });
+    const daftar = await client.query(api.members.list, { tenantId, actorId: userId });
+    const baris = daftar.find((row) => row.membership._id === undanganKustom.membershipId);
+    check(
+      "anggota baru bisa langsung didaftarkan dengan peran kustom",
+      baris?.membership.customRoleId === peranGudang.roleId,
+      JSON.stringify(baris?.membership.customRoleId ?? null),
+    );
+
+    // Undangan ulang **tanpa** `customRoleId` membiarkan penugasan yang berlaku…
+    await client.mutation(api.members.add, {
+      tenantId,
+      actorId: userId,
+      email: `kasir.malam+${runId}@mesinpos.test`,
+      name: "Kasir Malam",
+      role: "cashier",
+    });
+    const daftarUlang = await client.query(api.members.list, { tenantId, actorId: userId });
+    const barisUlang = daftarUlang.find(
+      (row) => row.membership._id === undanganKustom.membershipId,
+    );
+    check(
+      "undangan ulang tanpa peran kustom membiarkan penugasan yang berlaku",
+      barisUlang?.membership.customRoleId === peranGudang.roleId,
+      JSON.stringify(barisUlang?.membership.customRoleId ?? null),
+    );
+
+    // …sedangkan `null` melepasnya.
+    await client.mutation(api.members.add, {
+      tenantId,
+      actorId: userId,
+      email: `kasir.malam+${runId}@mesinpos.test`,
+      name: "Kasir Malam",
+      role: "cashier",
+      customRoleId: null,
+    });
+    const daftarLepas = await client.query(api.members.list, { tenantId, actorId: userId });
+    const barisLepas = daftarLepas.find(
+      (row) => row.membership._id === undanganKustom.membershipId,
+    );
+    check(
+      "peran kustom bisa dilepas lewat undangan ulang (`null`)",
+      barisLepas?.membership.customRoleId == null,
+      JSON.stringify(barisLepas?.membership.customRoleId ?? null),
+    );
+
+    /*
+      **Peran tambahan berdiri sendiri.** Di baris keanggotaan ia memakai peran
+      dasar tersembunyi `cashier`, tetapi status peran bawaan itu tidak boleh ikut
+      menentukan: Kasir yang dinonaktifkan tetap harus bisa dilewati oleh undangan
+      berperan tambahan, sedangkan undangan berperan bawaan Kasir tetap ditolak.
+    */
+    await client.mutation(api.roles.setBuiltin, {
+      tenantId,
+      actorId: userId,
+      role: "cashier",
+      active: false,
+    });
+    let undanganBerdiriSendiri = "";
+    try {
+      await client.mutation(api.members.add, {
+        tenantId,
+        actorId: userId,
+        email: `berdiri-sendiri+${runId}@mesinpos.test`,
+        name: "Mandiri Uji",
+        role: "cashier",
+        customRoleId: peranGudang.roleId,
+      });
+    } catch (error) {
+      undanganBerdiriSendiri = error?.message ?? String(error);
+    }
+    let undanganKasirBiasa = "";
+    try {
+      await client.mutation(api.members.add, {
+        tenantId,
+        actorId: userId,
+        email: `kasir-biasa+${runId}@mesinpos.test`,
+        name: "Kasir Biasa Uji",
+        role: "cashier",
+      });
+    } catch (error) {
+      undanganKasirBiasa = error?.message ?? String(error);
+    }
+    await client.mutation(api.roles.setBuiltin, {
+      tenantId,
+      actorId: userId,
+      role: "cashier",
+      active: true,
+    });
+    check(
+      "status peran bawaan tidak memblokir penugasan peran tambahan",
+      undanganBerdiriSendiri === "" &&
+        undanganKasirBiasa.includes("Kasir") &&
+        undanganKasirBiasa.includes("nonaktif"),
+      `peran tambahan: ${undanganBerdiriSendiri || "DITERIMA"} | peran bawaan: ${undanganKasirBiasa}`,
+    );
+
+    /*
+      **Satu anggota = satu peran yang terlihat.** Mengangkat anggota berperan
+      tambahan menjadi Pemilik harus melepas peran tambahannya: Pemilik selalu
+      memegang seluruh izin, dan peran tambahan yang menempel berarti pemilik itu
+      kehilangan izin di luar daftar peran tambahannya.
+    */
+    /*
+      Anggotanya dicari dari **email undangan barusan**, bukan dari sembarang
+      anggota yang memakai peran itu: uji ini tidak boleh menyentuh anggota lain
+      (mis. kasir contoh yang sudah dipakai pemeriksaan berikutnya).
+    */
+    const anggotaMandiri = (
+      await client.query(api.members.list, { tenantId, actorId: userId })
+    ).find((row) => row.user?.email === `berdiri-sendiri+${runId}@mesinpos.test`);
+    check(
+      "anggota undangan berperan tambahan tercatat dengan penugasannya",
+      anggotaMandiri?.membership.customRoleId === peranGudang.roleId,
+      JSON.stringify(anggotaMandiri?.membership.customRoleId ?? null),
+    );
+    await client.mutation(api.members.update, {
+      tenantId,
+      actorId: userId,
+      membershipId: anggotaMandiri.membership._id,
+      role: "owner",
+    });
+    const jadiPemilik = (await client.query(api.members.list, {
+      tenantId,
+      actorId: userId,
+    })).find((row) => row.membership._id === anggotaMandiri.membership._id);
+    check(
+      "mengangkat pemilik melepas peran tambahan yang masih menempel",
+      jadiPemilik?.membership.role === "owner" &&
+        jadiPemilik?.membership.customRoleId == null,
+      JSON.stringify({
+        role: jadiPemilik?.membership.role,
+        customRoleId: jadiPemilik?.membership.customRoleId ?? null,
+      }),
+    );
+    await client.mutation(api.members.update, {
+      tenantId,
+      actorId: userId,
+      membershipId: anggotaMandiri.membership._id,
+      role: "cashier",
+    });
+
+    // Peran kustom yang sedang nonaktif tidak boleh dipakai lewat undangan.
+    const peranNonaktif = await client.mutation(api.roles.create, {
+      tenantId,
+      actorId: userId,
+      name: "Peran Nonaktif Uji",
+      permissions: ["pos.sell"],
+    });
+    await client.mutation(api.roles.update, {
+      tenantId,
+      actorId: userId,
+      roleId: peranNonaktif.roleId,
+      active: false,
+    });
+    let nonaktifPesan = "";
+    try {
+      await client.mutation(api.members.add, {
+        tenantId,
+        actorId: userId,
+        email: `nonaktif+${runId}@mesinpos.test`,
+        name: "Nonaktif Uji",
+        role: "cashier",
+        customRoleId: peranNonaktif.roleId,
+      });
+    } catch (error) {
+      nonaktifPesan = error?.message ?? String(error);
+    }
+    check(
+      "undangan dengan peran kustom nonaktif ditolak",
+      nonaktifPesan.includes("sedang nonaktif"),
+      nonaktifPesan || "DITERIMA — peran nonaktif bisa dipakai",
+    );
+
+    // Pemilik tenant selalu memegang seluruh izin — peran kustom tidak berlaku.
+    let pemilikPesan = "";
+    try {
+      await client.mutation(api.members.add, {
+        tenantId,
+        actorId: userId,
+        email: `pemilik.kedua+${runId}@mesinpos.test`,
+        name: "Pemilik Kedua",
+        role: "owner",
+        customRoleId: peranGudang.roleId,
+      });
+    } catch (error) {
+      pemilikPesan = error?.message ?? String(error);
+    }
+    check(
+      "undangan pemilik tidak bisa dibarengi peran kustom",
+      pemilikPesan.includes("Pemilik tenant selalu memegang seluruh izin"),
+      pemilikPesan || "DITERIMA — pemilik bisa dibatasi peran kustom",
+    );
+
+    // Pagar eskalasi berlaku juga di jalur undangan: peran yang memuat izin di
+    // luar wewenang pengundangnya ditolak sebelum keanggotaan ditulis.
+    const peranTagihan = await client.mutation(api.roles.create, {
+      tenantId,
+      actorId: userId,
+      name: "Penagih Uji",
+      permissions: ["billing.manage"],
+    });
+    let eskalasiPesan = "";
+    try {
+      await client.mutation(api.members.add, {
+        tenantId,
+        actorId: managerUserId,
+        email: `eskalasi+${runId}@mesinpos.test`,
+        name: "Eskalasi Uji",
+        role: "cashier",
+        customRoleId: peranTagihan.roleId,
+      });
+    } catch (error) {
+      eskalasiPesan = error?.message ?? String(error);
+    }
+    check(
+      "manajer ditolak mengundang dengan peran di luar wewenangnya",
+      eskalasiPesan.includes("di luar wewenang Anda"),
+      eskalasiPesan || "DITERIMA — eskalasi lewat undangan bocor",
+    );
+  }
+
   const efektifKasir = await client.query(api.roles.effective, {
     tenantId,
     actorId: userId,
@@ -6170,7 +6903,9 @@ async function main() {
     "roles.effective membedakan izin efektif dari izin bawaan",
     efektifKasir.customRoleName === "Pengawas Stok" &&
       efektifKasir.permissions.length === 3 &&
-      efektifKasir.basePermissions.includes("ar.view") &&
+      // Peran tambahan berdiri sendiri: tidak ada izin peran bawaan di baliknya.
+      efektifKasir.role === null &&
+      JSON.stringify(efektifKasir.basePermissions) === JSON.stringify([]) &&
       !efektifKasir.permissions.includes("ar.view"),
     JSON.stringify(efektifKasir),
   );
@@ -6273,16 +7008,42 @@ async function main() {
     JSON.stringify(dilepas),
   );
 
+  /*
+    Peran tambahan **berdiri sendiri**: melepasnya tidak menjatuhkan anggotanya ke
+    peran bawaan mana pun — tidak ada peran dasar yang tersimpan di baliknya. Ia
+    tanpa peran sampai pemilik menugaskan peran berikutnya, dan di situlah izin
+    Kasir kembali.
+  */
   const aksesKembali = await client.query(api.roles.myAccess, {
     tenantId,
     actorId: cashierId,
   });
   check(
-    "izin kasir kembali ke peran bawaannya setelah peran kustom dilepas",
+    "peran tambahan yang dilepas tidak jatuh ke peran bawaan",
     aksesKembali.customRole === null &&
-      aksesKembali.permissions.includes("ar.view") &&
-      !aksesKembali.permissions.includes("inventory.view"),
+      aksesKembali.role === null &&
+      JSON.stringify(aksesKembali.permissions) === JSON.stringify([]) &&
+      JSON.stringify(aksesKembali.rolePermissions) === JSON.stringify([]),
     JSON.stringify(aksesKembali),
+  );
+
+  await client.mutation(api.members.update, {
+    tenantId,
+    actorId: userId,
+    membershipId,
+    role: "cashier",
+  });
+  const aksesSetelahDitugaskan = await client.query(api.roles.myAccess, {
+    tenantId,
+    actorId: cashierId,
+  });
+  check(
+    "izin Kasir kembali setelah peran bawaan ditugaskan lagi",
+    aksesSetelahDitugaskan.customRole === null &&
+      aksesSetelahDitugaskan.role === "cashier" &&
+      aksesSetelahDitugaskan.permissions.includes("ar.view") &&
+      !aksesSetelahDitugaskan.permissions.includes("inventory.view"),
+    JSON.stringify(aksesSetelahDitugaskan),
   );
 
   {
@@ -6314,6 +7075,705 @@ async function main() {
       "pengguna luar ditolak membaca peran tenant",
       blocked && message.includes("bukan anggota aktif"),
       message || "DITERIMA — pengguna luar membaca peran",
+    );
+  }
+
+  // ---------- Phase 4: pengaturan peran bawaan (`roleSettings`) -----------
+  //
+  // Peran bawaan kini bisa diatur per workspace: izinnya disesuaikan, perannya
+  // dinonaktifkan/dihapus, dan **gerbang server ikut berubah** — bukan hanya
+  // tampilan di halaman Tim & Peran. Semua perubahan dikembalikan sebelum bagian
+  // berikutnya supaya uji lain tidak mewarisi datanya.
+  //
+  // Bagian sebelumnya sengaja menurunkan paket ke professional untuk menguji
+  // gerbang peran kustom; menyunting izin peran bawaan butuh fitur yang sama
+  // (`rbac.custom`, paket Enterprise), jadi paketnya dinaikkan lagi lebih dulu.
+  await client.mutation(api.billing.changePlan, {
+    tenantId,
+    newPlanKey: "enterprise",
+    actorId: userId,
+  });
+
+  const peranBawaanAwal = await client.query(api.roles.list, {
+    tenantId,
+    actorId: userId,
+  });
+  check(
+    "daftar peran memuat kelima peran bawaan",
+    peranBawaanAwal.builtin.length === 5 &&
+      peranBawaanAwal.builtin.map((row) => row.role).join(",") ===
+        "owner,manager,cashier,inventory,finance",
+    JSON.stringify(peranBawaanAwal.builtin.map((row) => row.role)),
+  );
+  const kasirBawaan = peranBawaanAwal.builtin.find((row) => row.role === "cashier");
+  check(
+    "peran bawaan mulai dari keadaannya sendiri (aktif, izin bawaan)",
+    kasirBawaan.active &&
+      !kasirBawaan.removed &&
+      !kasirBawaan.customized &&
+      JSON.stringify(kasirBawaan.permissions) ===
+        JSON.stringify(kasirBawaan.basePermissions),
+    JSON.stringify(kasirBawaan),
+  );
+  check(
+    "ringkasan peran bawaan ikut dilaporkan",
+    peranBawaanAwal.summary.builtin.total === 5 &&
+      peranBawaanAwal.summary.builtin.customized === 0 &&
+      peranBawaanAwal.summary.builtin.assignable === 5,
+    JSON.stringify(peranBawaanAwal.summary.builtin),
+  );
+
+  // Pemilik terkunci: izinnya tidak bisa diubah dan perannya tidak bisa hilang.
+  for (const [label, panggil] of [
+    [
+      "izin peran Pemilik tidak bisa diubah",
+      () =>
+        client.mutation(api.roles.setBuiltin, {
+          tenantId,
+          actorId: userId,
+          role: "owner",
+          permissions: ["pos.sell"],
+        }),
+    ],
+    [
+      "peran Pemilik tidak bisa dihapus",
+      () =>
+        client.mutation(api.roles.removeBuiltin, {
+          tenantId,
+          actorId: userId,
+          role: "owner",
+        }),
+    ],
+  ]) {
+    let blocked = false;
+    let message = "";
+    try {
+      await panggil();
+    } catch (error) {
+      blocked = true;
+      message = error?.message ?? String(error);
+    }
+    check(
+      label,
+      blocked && message.includes("Pemilik selalu memegang seluruh izin"),
+      message || "DITERIMA — pemilik bisa dikunci",
+    );
+  }
+
+  // Menyunting izin Kasir benar-benar mengubah gerbang server.
+  {
+    let blocked = false;
+    let message = "";
+    try {
+      await client.query(api.ar.list, { tenantId, actorId: cashierId });
+    } catch (error) {
+      blocked = true;
+      message = error?.message ?? String(error);
+    }
+    check(
+      "sebelum diatur, kasir memakai izin bawaan perannya",
+      !blocked && message === "",
+      message || "DITERIMA — kasir tidak bisa membaca piutang",
+    );
+  }
+
+  const izinKasirSempit = await client.mutation(api.roles.setBuiltin, {
+    tenantId,
+    actorId: userId,
+    role: "cashier",
+    permissions: ["pos.sell", "report.view"],
+  });
+  check(
+    "pemilik bisa menyunting izin peran bawaan",
+    JSON.stringify(izinKasirSempit.permissions) ===
+      JSON.stringify(["pos.sell", "report.view"]) &&
+      izinKasirSempit.active &&
+      izinKasirSempit.customized,
+    JSON.stringify(izinKasirSempit),
+  );
+
+  const aksesKasirSempit = await client.query(api.roles.myAccess, {
+    tenantId,
+    actorId: cashierId,
+  });
+  check(
+    "izin peran bawaan yang disesuaikan terbaca sesi klien",
+    JSON.stringify(aksesKasirSempit.rolePermissions) ===
+      JSON.stringify(["pos.sell", "report.view"]) &&
+      JSON.stringify(aksesKasirSempit.permissions) ===
+        JSON.stringify(["pos.sell", "report.view"]),
+    JSON.stringify(aksesKasirSempit),
+  );
+  {
+    let blocked = false;
+    let message = "";
+    try {
+      await client.query(api.ar.list, { tenantId, actorId: cashierId });
+    } catch (error) {
+      blocked = true;
+      message = error?.message ?? String(error);
+    }
+    check(
+      "izin yang dilepas dari peran bawaan ditolak server",
+      blocked && message.includes("tidak memiliki izin ar.view"),
+      message || "DITERIMA — izin yang dilepas masih berlaku",
+    );
+  }
+  const laporanKasirSempit = await client.query(api.reports.dailySummary, {
+    tenantId,
+    storeId,
+    actorId: cashierId,
+    from: runId - 600_000,
+    to: Date.now() + 600_000,
+  });
+  check(
+    "izin yang dipertahankan di peran bawaan tetap bekerja",
+    Array.isArray(laporanKasirSempit.byMethod ?? []) ||
+      typeof laporanKasirSempit.transactions === "number",
+    JSON.stringify(laporanKasirSempit).slice(0, 200),
+  );
+  {
+    const efektif = await client.query(api.roles.effective, {
+      tenantId,
+      actorId: userId,
+      membershipId,
+    });
+    check(
+      "izin bawaan yang berlaku ikut melaporkan penyesuaian workspace",
+      JSON.stringify(efektif.basePermissions) ===
+        JSON.stringify(["pos.sell", "report.view"]),
+      JSON.stringify(efektif.basePermissions),
+    );
+  }
+
+  /*
+    Kas itu **milik toko, bukan perangkat**. Kasir di sini hanya memegang
+    `pos.sell` + `report.view` (tanpa `shift.manage`), jadi yang dibuktikan:
+    ia **melihat** kas yang dibuka pemilik lewat `pos.till` — inilah yang dulu
+    tidak mungkin, karena keadaan kasnya hanya hidup di perangkat yang
+    membukanya — dan ia tetap tidak boleh membuka kasnya sendiri.
+  */
+  {
+    const tillId = await client.mutation(api.pos.openShift, {
+      tenantId,
+      storeId,
+      cashierId: userId,
+      openingCash: 50000,
+    });
+    const tillKasir = await client.query(api.pos.till, {
+      tenantId,
+      storeId,
+      actorId: cashierId,
+    });
+    check(
+      "kasir tanpa shift.manage melihat kas yang dibuka pemilik (kas toko, bukan perangkat)",
+      tillKasir.current?.id === tillId &&
+        tillKasir.current?.openingCash === 50000 &&
+        typeof tillKasir.current?.openedAt === "number",
+      JSON.stringify(tillKasir.current),
+    );
+    check(
+      "kas yang masih terbuka belum masuk riwayat Z-report",
+      !tillKasir.history.some((row) => row.id === tillId),
+      JSON.stringify(tillKasir.history).slice(0, 200),
+    );
+
+    /*
+      Satu kas per **toko**: manajer (kasir lain yang juga memegang
+      `shift.manage`) tidak boleh membuka shift kedua selama kas toko masih
+      terbuka — dua kas terbuka akan membelah Z-report.
+    */
+    let kasKedua = "";
+    try {
+      await client.mutation(api.pos.openShift, {
+        tenantId,
+        storeId,
+        cashierId: managerUserId,
+        openingCash: 20000,
+      });
+    } catch (error) {
+      kasKedua = error?.message ?? String(error);
+    }
+    check(
+      "kas kedua di toko yang kasnya masih terbuka ditolak (satu kas per toko)",
+      kasKedua.includes("Kas toko ini masih terbuka"),
+      kasKedua || "DITERIMA — dua kas terbuka di toko yang sama",
+    );
+
+    await client.mutation(api.pos.closeShift, {
+      shiftId: tillId,
+      actorId: userId,
+      closingCash: 50000,
+    });
+    const tillTutup = await client.query(api.pos.till, {
+      tenantId,
+      storeId,
+      actorId: cashierId,
+    });
+    check(
+      "setelah kas ditutup, kasir melihat kasnya tertutup lagi",
+      tillTutup.current === null,
+      JSON.stringify(tillTutup.current),
+    );
+    check(
+      "Z-report kas yang ditutup masuk riwayat kas toko",
+      tillTutup.history.some(
+        (row) => row.id === tillId && row.expectedCash === 50000 && row.variance === 0,
+      ),
+      JSON.stringify(tillTutup.history).slice(0, 240),
+    );
+
+    let outsiderTill = "";
+    try {
+      await client.query(api.pos.till, {
+        tenantId,
+        storeId,
+        actorId: outsiderId,
+      });
+    } catch (error) {
+      outsiderTill = error?.message ?? String(error);
+    }
+    check(
+      "pos.till menolak pembaca di luar tenant",
+      outsiderTill.includes("bukan anggota aktif"),
+      outsiderTill || "DITERIMA — keadaan kas terbaca orang luar",
+    );
+
+    let cashierOpen = "";
+    try {
+      await client.mutation(api.pos.openShift, {
+        tenantId,
+        storeId,
+        cashierId,
+        openingCash: 1000,
+      });
+    } catch (error) {
+      cashierOpen = error?.message ?? String(error);
+    }
+    check(
+      "kasir tetap tidak bisa membuka kasnya sendiri tanpa shift.manage",
+      cashierOpen.includes("shift.manage"),
+      cashierOpen || "DITERIMA — kasir bisa membuka kas tanpa izinnya",
+    );
+  }
+
+  /*
+    Dapur & kas tidak lagi menumpang `pos.sell` (kasir di sini hanya memegang
+    `pos.sell` + `report.view`). Dua arah yang dibuktikan: tanpa izinnya
+    pekerjaan itu **ditolak** dengan nama izin barunya, dan dengan peran kustom
+    yang berisi izin itu saja pekerjaannya **sampai ke aturan domain** (bukan
+    lagi ditolak izin) — jadi peran “dapur saja” / “kas saja” benar-benar bisa
+    dibuat, bukan cuma ada di tabel izin.
+  */
+  {
+    let blocked = false;
+    let message = "";
+    try {
+      await client.mutation(api.pos.openShift, {
+        tenantId,
+        storeId,
+        cashierId,
+        openingCash: 1000,
+      });
+    } catch (error) {
+      blocked = true;
+      message = error?.message ?? String(error);
+    }
+    check(
+      "kasir tanpa shift.manage ditolak membuka kas",
+      blocked && message.includes("shift.manage"),
+      message || "DITERIMA — kas tetap bisa dibuka lewat pos.sell",
+    );
+
+    let kdsBlocked = false;
+    let kdsMessage = "";
+    try {
+      await client.mutation(api.pos.kitchenDone, {
+        saleId: shiftSale.saleId,
+        actorId: cashierId,
+      });
+    } catch (error) {
+      kdsBlocked = true;
+      kdsMessage = error?.message ?? String(error);
+    }
+    check(
+      "kasir tanpa kds.manage ditolak menyelesaikan tiket dapur",
+      kdsBlocked && kdsMessage.includes("kds.manage"),
+      kdsMessage || "DITERIMA — tiket dapur tetap bisa ditutup lewat pos.sell",
+    );
+
+    const peranKas = await client.mutation(api.roles.create, {
+      tenantId,
+      actorId: userId,
+      name: "Kas Saja",
+      description: "Membuka & menutup kas tanpa melayani penjualan.",
+      permissions: ["shift.manage"],
+    });
+    await client.mutation(api.roles.assign, {
+      tenantId,
+      actorId: userId,
+      membershipId,
+      customRoleId: peranKas.roleId,
+    });
+    let pesanKas = "";
+    try {
+      await client.mutation(api.pos.closeShift, {
+        shiftId,
+        actorId: cashierId,
+        closingCash: 0,
+      });
+    } catch (error) {
+      pesanKas = error?.message ?? String(error);
+    }
+    check(
+      "peran berisi shift.manage saja sudah cukup untuk urusan kas",
+      pesanKas.includes("Shift sudah ditutup"),
+      pesanKas || "DITERIMA",
+    );
+    check(
+      "peran kas saja tidak ikut bisa menjual",
+      !(await client.query(api.roles.myAccess, { tenantId, actorId: cashierId }))
+        .permissions.includes("pos.sell"),
+      JSON.stringify(
+        (await client.query(api.roles.myAccess, { tenantId, actorId: cashierId }))
+          .permissions,
+      ),
+    );
+
+    const peranDapur = await client.mutation(api.roles.create, {
+      tenantId,
+      actorId: userId,
+      name: "Dapur Saja",
+      description: "Bekerja di antrean dapur tanpa menyentuh kasir.",
+      permissions: ["kds.manage"],
+    });
+    await client.mutation(api.roles.assign, {
+      tenantId,
+      actorId: userId,
+      membershipId,
+      customRoleId: peranDapur.roleId,
+    });
+    let pesanDapur = "";
+    try {
+      await client.mutation(api.pos.kitchenDone, {
+        saleId: shiftSale.saleId,
+        actorId: cashierId,
+      });
+    } catch (error) {
+      pesanDapur = error?.message ?? String(error);
+    }
+    /*
+      Yang dibuktikan bukan pesan domainnya (tiket ini bukan tiket dapur),
+      melainkan **gerbang izinnya lolos**: tanpa `kds.manage` pesannya berbunyi
+      “tidak memiliki izin kds.manage”, sedangkan dengan peran itu ia berhenti di
+      aturan berikutnya (modul F&B yang sedang tidak aktif di workspace uji, atau
+      keadaan tiketnya).
+    */
+    check(
+      "peran berisi kds.manage saja lolos gerbang izin dapur",
+      pesanDapur.length > 0 && !pesanDapur.includes("tidak memiliki izin"),
+      pesanDapur || "DITERIMA — tanpa izin pun lolos",
+    );
+
+    let dapurDitolak = "";
+    try {
+      await client.mutation(api.pos.openShift, {
+        tenantId,
+        storeId,
+        cashierId,
+        openingCash: 1000,
+      });
+    } catch (error) {
+      dapurDitolak = error?.message ?? String(error);
+    }
+    check(
+      "peran berisi kds.manage saja ditolak membuka kas",
+      dapurDitolak.includes("shift.manage"),
+      dapurDitolak || "DITERIMA — dapur bisa membuka kas",
+    );
+
+    /*
+      Dikembalikan supaya bagian berikutnya mulai dari keadaan semula. Peran
+      tambahan **berdiri sendiri**, jadi melepasnya saja tidak mengembalikan izin
+      Kasir — peran berikutnya ditugaskan lewat `members.update`, sama seperti yang
+      dilakukan halaman Tim & Peran saat pemilik memilih peran bawaan.
+    */
+    await client.mutation(api.roles.assign, {
+      tenantId,
+      actorId: userId,
+      membershipId,
+      customRoleId: null,
+    });
+    await client.mutation(api.members.update, {
+      tenantId,
+      actorId: userId,
+      membershipId,
+      role: "cashier",
+    });
+  }
+
+  // Pagar eskalasi memakai izin **efektif** penyunting: manajer yang izinnya
+  // sudah dipersempit tidak boleh memberi izin yang sudah tidak dia punya.
+  await client.mutation(api.roles.setBuiltin, {
+    tenantId,
+    actorId: userId,
+    role: "manager",
+    permissions: ["pos.sell", "team.manage", "report.view"],
+  });
+  {
+    let blocked = false;
+    let message = "";
+    try {
+      await client.mutation(api.roles.setBuiltin, {
+        tenantId,
+        actorId: managerUserId,
+        role: "finance",
+        permissions: ["api.manage"],
+      });
+    } catch (error) {
+      blocked = true;
+      message = error?.message ?? String(error);
+    }
+    check(
+      "manajer yang izinnya dipersempit tidak bisa memberi izin di luarnya",
+      blocked && message.includes("tidak punya"),
+      message || "DITERIMA — eskalasi wewenang bocor",
+    );
+  }
+  await client.mutation(api.roles.resetBuiltin, {
+    tenantId,
+    actorId: userId,
+    role: "manager",
+  });
+
+  // Menonaktifkan peran: tidak bisa ditugaskan lagi, tetapi selalu bisa dicabut.
+  await client.mutation(api.roles.setBuiltin, {
+    tenantId,
+    actorId: userId,
+    role: "inventory",
+    active: false,
+  });
+  {
+    let blocked = false;
+    let message = "";
+    try {
+      await client.mutation(api.members.add, {
+        tenantId,
+        actorId: userId,
+        email: `gudang+${runId}@mesinpos.test`,
+        role: "inventory",
+      });
+    } catch (error) {
+      blocked = true;
+      message = error?.message ?? String(error);
+    }
+    check(
+      "peran bawaan yang nonaktif ditolak saat mengundang",
+      blocked && message.includes("sedang nonaktif"),
+      message || "DITERIMA — peran nonaktif masih bisa ditugaskan",
+    );
+  }
+  await client.mutation(api.roles.setBuiltin, {
+    tenantId,
+    actorId: userId,
+    role: "inventory",
+    active: true,
+  });
+  {
+    const daftar = await client.query(api.roles.list, { tenantId, actorId: userId });
+    const gudang = daftar.builtin.find((row) => row.role === "inventory");
+    check(
+      "peran bawaan bisa diaktifkan kembali",
+      gudang.active && !gudang.removed,
+      JSON.stringify(gudang),
+    );
+  }
+
+  // Menghapus peran: ditolak selama masih dipakai, dan hilang dari penugasan
+  // setelah benar-benar bebas — kemudian bisa dipulihkan lagi.
+  {
+    let blocked = false;
+    let message = "";
+    try {
+      await client.mutation(api.roles.removeBuiltin, {
+        tenantId,
+        actorId: userId,
+        role: "cashier",
+      });
+    } catch (error) {
+      blocked = true;
+      message = error?.message ?? String(error);
+    }
+    check(
+      "peran bawaan yang masih dipakai tidak bisa dihapus",
+      blocked && message.includes("masih dipakai"),
+      message || "DITERIMA — peran yang dipakai bisa dihapus",
+    );
+  }
+  {
+    const daftar = await client.query(api.roles.list, { tenantId, actorId: userId });
+    const bebas = daftar.builtin.find(
+      (row) => row.role !== "owner" && row.memberCount === 0,
+    );
+    check(
+      "ada peran bawaan tanpa anggota untuk diuji hapus",
+      Boolean(bebas),
+      JSON.stringify(daftar.builtin.map((row) => [row.role, row.memberCount])),
+    );
+
+    await client.mutation(api.roles.removeBuiltin, {
+      tenantId,
+      actorId: userId,
+      role: bebas.role,
+    });
+    const setelahHapus = await client.query(api.roles.list, {
+      tenantId,
+      actorId: userId,
+    });
+    const dihapus = setelahHapus.builtin.find((row) => row.role === bebas.role);
+    check(
+      "peran bawaan bisa dihapus dari daftar penugasan",
+      dihapus.removed && setelahHapus.summary.builtin.removed === 1,
+      JSON.stringify(dihapus),
+    );
+
+    let blocked = false;
+    let message = "";
+    try {
+      await client.mutation(api.members.add, {
+        tenantId,
+        actorId: userId,
+        email: `bebas+${runId}@mesinpos.test`,
+        role: bebas.role,
+      });
+    } catch (error) {
+      blocked = true;
+      message = error?.message ?? String(error);
+    }
+    check(
+      "peran bawaan yang dihapus ditolak saat mengundang",
+      blocked && message.includes("sudah dihapus"),
+      message || "DITERIMA — peran yang dihapus masih bisa dipakai",
+    );
+
+    await client.mutation(api.roles.restoreBuiltin, {
+      tenantId,
+      actorId: userId,
+      role: bebas.role,
+    });
+    const dipulihkan = await client.query(api.roles.list, {
+      tenantId,
+      actorId: userId,
+    });
+    check(
+      "peran bawaan yang dihapus bisa dipulihkan & ditawarkan lagi",
+      dipulihkan.builtin.find((row) => row.role === bebas.role)?.removed === false &&
+        dipulihkan.summary.builtin.assignable === 5,
+      JSON.stringify(dipulihkan.summary.builtin),
+    );
+  }
+
+  // Menyunting izin butuh fitur `rbac.custom`; menonaktifkan selalu boleh.
+  await client.mutation(api.billing.changePlan, {
+    tenantId,
+    newPlanKey: "professional",
+    actorId: userId,
+  });
+  {
+    let blocked = false;
+    let message = "";
+    try {
+      await client.mutation(api.roles.setBuiltin, {
+        tenantId,
+        actorId: userId,
+        role: "cashier",
+        permissions: ["pos.sell"],
+      });
+    } catch (error) {
+      blocked = true;
+      message = error?.message ?? String(error);
+    }
+    check(
+      "menyunting izin peran bawaan ditolak di paket tanpa fiturnya",
+      blocked && message.includes("tidak termasuk paket"),
+      message || "DITERIMA — gerbang fitur bocor",
+    );
+    let gagal = "";
+    try {
+      await client.mutation(api.roles.setBuiltin, {
+        tenantId,
+        actorId: userId,
+        role: "cashier",
+        active: false,
+      });
+    } catch (error) {
+      gagal = error?.message ?? String(error);
+    }
+    check(
+      "menonaktifkan peran bawaan selalu boleh walau paketnya turun",
+      gagal === "",
+      gagal || "DITERIMA",
+    );
+    await client.mutation(api.roles.setBuiltin, {
+      tenantId,
+      actorId: userId,
+      role: "cashier",
+      active: true,
+    });
+  }
+  await client.mutation(api.billing.changePlan, {
+    tenantId,
+    newPlanKey: "enterprise",
+    actorId: userId,
+  });
+
+  // Izin `team.manage`, bukan hanya “anggota”: kasir tidak bisa mengatur peran.
+  {
+    let blocked = false;
+    let message = "";
+    try {
+      await client.mutation(api.roles.setBuiltin, {
+        tenantId,
+        actorId: cashierId,
+        role: "finance",
+        permissions: ["pos.sell"],
+      });
+    } catch (error) {
+      blocked = true;
+      message = error?.message ?? String(error);
+    }
+    check(
+      "kasir tidak boleh mengatur peran bawaan",
+      blocked && message.includes("team.manage"),
+      message || "DITERIMA — kasir bisa mengatur peran",
+    );
+  }
+
+  // Semua penyesuaian dikembalikan supaya bagian berikutnya mulai dari bawaan.
+  await client.mutation(api.roles.resetBuiltin, {
+    tenantId,
+    actorId: userId,
+    role: "cashier",
+  });
+  {
+    const akhir = await client.query(api.roles.list, { tenantId, actorId: userId });
+    const kasirAkhir = akhir.builtin.find((row) => row.role === "cashier");
+    check(
+      "peran bawaan kembali ke izin bawaannya setelah dikembalikan",
+      !kasirAkhir.customized &&
+        JSON.stringify(kasirAkhir.permissions) ===
+          JSON.stringify(kasirAkhir.basePermissions),
+      JSON.stringify(kasirAkhir),
+    );
+    const aksesKasirAkhir = await client.query(api.roles.myAccess, {
+      tenantId,
+      actorId: cashierId,
+    });
+    check(
+      "kasir kembali memakai izin bawaan perannya",
+      JSON.stringify(aksesKasirAkhir.rolePermissions) ===
+        JSON.stringify(kasirAkhir.permissions),
+      JSON.stringify(aksesKasirAkhir.rolePermissions),
     );
   }
 
@@ -8011,6 +9471,7 @@ async function main() {
       kasirSale.total === totalKeranjang && kasirSale.saleId !== undefined,
       JSON.stringify(kasirSale),
     );
+
 
     const daftarKasir = await client.query(api.payments.list, {
       tenantId,
@@ -11706,6 +13167,503 @@ async function main() {
         receiptSettingOf(strukKasirBaca.receipt).copies === 2 &&
           receiptSettingOf(strukKasirBaca.receipt).printerId === "dot_matrix",
         JSON.stringify(strukKasirBaca.receipt),
+      );
+
+      //
+      // Pengingat tutup shift (`tenants.shift`): jam pengingat, ambang “shift
+      // sudah terlalu lama”, dan saklarnya diatur pemilik toko dari halaman
+      // Pengaturan. Yang diuji di sini adalah sisi server-nya — izinnya, batas
+      // nilainya, dan apa yang benar-benar tersimpan di database.
+      const shiftAwal = await client.query(api.tenants.getMine, {
+        tenantId: fnbTenantId,
+        actorId: fnbOwnerId,
+      });
+      check(
+        "tenant baru belum menyimpan setelan pengingat, dan bawaannya aktif · 21:00 · 14 jam",
+        shiftAwal.shift === undefined &&
+          sameShiftSetting(shiftSettingOf(shiftAwal.shift), DEFAULT_SHIFT_SETTING),
+        JSON.stringify(shiftAwal.shift),
+      );
+
+      let shiftKasirPesan = "";
+      try {
+        await client.mutation(api.tenants.updateShift, {
+          tenantId: fnbTenantId,
+          actorId: fnbKasirId,
+          setting: { active: true, reminderHour: 21, longShiftHours: 14 },
+        });
+      } catch (error) {
+        shiftKasirPesan = error?.message ?? String(error);
+      }
+      check(
+        "kasir ditolak mengubah setelan pengingat shift karena izin billing.manage",
+        shiftKasirPesan.includes("izin billing.manage"),
+        shiftKasirPesan || "tidak ditolak sama sekali",
+      );
+
+      let shiftLuarPesan = "";
+      try {
+        await client.mutation(api.tenants.updateShift, {
+          tenantId: fnbTenantId,
+          actorId: outsiderId,
+          setting: { active: true, reminderHour: 21, longShiftHours: 14 },
+        });
+      } catch (error) {
+        shiftLuarPesan = error?.message ?? String(error);
+      }
+      check(
+        "orang di luar workspace tidak bisa mengubah setelan pengingatnya",
+        shiftLuarPesan.length > 0,
+        shiftLuarPesan || "diterima tanpa penolakan",
+      );
+
+      // Jam 24 tidak ada di jam dinding, dan ambang 0 jam berarti "selalu keras".
+      let shiftJamPesan = "";
+      try {
+        await client.mutation(api.tenants.updateShift, {
+          tenantId: fnbTenantId,
+          actorId: fnbOwnerId,
+          setting: { active: true, reminderHour: 24, longShiftHours: 14 },
+        });
+      } catch (error) {
+        shiftJamPesan = error?.message ?? String(error);
+      }
+      check(
+        "jam pengingat di luar 0–23 ditolak server dengan alasannya (batasnya disebut)",
+        shiftJamPesan.includes("Jam pengingat") &&
+          shiftJamPesan.includes("00:00") &&
+          shiftJamPesan.includes("23:00"),
+        shiftJamPesan || "diterima server",
+      );
+
+      let shiftAmbangPesan = "";
+      try {
+        await client.mutation(api.tenants.updateShift, {
+          tenantId: fnbTenantId,
+          actorId: fnbOwnerId,
+          setting: { active: true, reminderHour: 21, longShiftHours: 0 },
+        });
+      } catch (error) {
+        shiftAmbangPesan = error?.message ?? String(error);
+      }
+      check(
+        "ambang shift lama di luar 1–24 jam ditolak server",
+        shiftAmbangPesan.includes("Ambang shift lama"),
+        shiftAmbangPesan || "diterima server",
+      );
+
+      const shiftSetelahTolak = await client.query(api.tenants.getMine, {
+        tenantId: fnbTenantId,
+        actorId: fnbOwnerId,
+      });
+      check(
+        "penolakan tidak menulis apa pun ke database",
+        shiftSetelahTolak.shift === undefined,
+        JSON.stringify(shiftSetelahTolak.shift),
+      );
+
+      // Kafe yang tutup lebih malam: pengingatnya pukul 22:00 dengan ambang 8 jam.
+      const shiftSet = await client.mutation(api.tenants.updateShift, {
+        tenantId: fnbTenantId,
+        actorId: fnbOwnerId,
+        setting: { active: true, reminderHour: 22, longShiftHours: 8 },
+      });
+      check(
+        "setelan pengingat yang sah tersimpan apa adanya",
+        shiftSet.changed === true &&
+          shiftSet.setting.reminderHour === 22 &&
+          shiftSet.setting.longShiftHours === 8 &&
+          shiftSet.setting.active === true,
+        JSON.stringify(shiftSet.setting),
+      );
+      check(
+        "kalimat balikan server menyebut jam & ambang barunya",
+        shiftSet.sentence.includes("22:00") && shiftSet.sentence.includes("8 jam"),
+        shiftSet.sentence,
+      );
+      const shiftTersimpan = await client.query(api.tenants.getMine, {
+        tenantId: fnbTenantId,
+        actorId: fnbOwnerId,
+      });
+      check(
+        "yang dibaca kembali dari database persis setelan pengingat yang disimpan",
+        sameShiftSetting(shiftSettingOf(shiftTersimpan.shift), shiftSet.setting),
+        JSON.stringify(shiftTersimpan.shift),
+      );
+
+      const shiftKasirBaca = await client.query(api.tenants.getMine, {
+        tenantId: fnbTenantId,
+        actorId: fnbKasirId,
+      });
+      check(
+        "kasir membaca setelan pengingat yang sama (dialah yang melihat peringatannya)",
+        shiftSettingOf(shiftKasirBaca.shift).reminderHour === 22 &&
+          shiftSettingOf(shiftKasirBaca.shift).longShiftHours === 8,
+        JSON.stringify(shiftKasirBaca.shift),
+      );
+
+      const shiftUlang = await client.mutation(api.tenants.updateShift, {
+        tenantId: fnbTenantId,
+        actorId: fnbOwnerId,
+        setting: { active: true, reminderHour: 22, longShiftHours: 8 },
+      });
+      check(
+        "menyimpan setelan pengingat yang sama tidak menulis perubahan (tanpa audit kosong)",
+        shiftUlang.changed === false,
+        JSON.stringify(shiftUlang),
+      );
+
+      const shiftMati = await client.mutation(api.tenants.updateShift, {
+        tenantId: fnbTenantId,
+        actorId: fnbOwnerId,
+        setting: { active: false, reminderHour: 22, longShiftHours: 8 },
+      });
+      check(
+        "saklar pengingat bisa dimatikan dan keadaannya ikut tersimpan",
+        shiftMati.changed === true &&
+          shiftMati.setting.active === false &&
+          shiftMati.sentence.includes("dimatikan"),
+        shiftMati.sentence,
+      );
+
+      //
+      // Pemberitahuan ke **pemilik toko** (`shiftAlerts.report`): kas belum dibuka
+      // padahal toko sudah buka, dan shift belum ditutup padahal toko sudah tutup.
+      // Perangkat melaporkan keadaannya beserta **jam lokalnya**, lalu server
+      // memutuskan ulang dengan aturan murni yang sama (`shiftOwnerAlert`) — jadi
+      // yang diuji di sini bukan tampilannya: laporan yang tidak cocok dengan
+      // keadaannya ditolak, kabarnya tercatat **sekali per hari per jenis**, dan
+      // yang benar-benar keluar adalah kiriman webhook `shift.alert`.
+      //
+      // Tenant-nya dibuat sendiri supaya tidak ada kabar milik workspace lain yang
+      // ikut terhitung, dan supaya penjagaan “sekali per hari” diuji dari tabel
+      // yang benar-benar kosong. Plan-nya enterprise karena `api.access` (endpoint
+      // webhook) memang modul berbayar — dan gerbang paket itu ikut diuji di bawah
+      // dari tenant professional di atas.
+      const kabarSuffix = `${runId}-kabar`;
+      const kabarOwnerEmail = `kabar-owner+${kabarSuffix}@mesinpos.test`;
+      const { userId: kabarOwnerId } = await client.mutation(api.users.createOrGet, {
+        email: kabarOwnerEmail,
+        name: "Pemilik Uji Kabar Shift",
+      });
+      const { tenantId: kabarTenantId } = await client.mutation(api.tenants.create, {
+        ownerId: kabarOwnerId,
+        name: "Toko Uji Kabar Shift",
+        slug: `verify-kabar-${runId}`,
+        planKey: "enterprise",
+        storeName: "Cabang Kabar",
+      });
+      const kabarKasirEmail = `kabar-kasir+${kabarSuffix}@mesinpos.test`;
+      const { userId: kabarKasirId } = await client.mutation(api.users.createOrGet, {
+        email: kabarKasirEmail,
+        name: "Kasir Uji Kabar Shift",
+      });
+      await client.mutation(api.members.add, {
+        tenantId: kabarTenantId,
+        actorId: kabarOwnerId,
+        email: kabarKasirEmail,
+        name: "Kasir Uji Kabar Shift",
+        role: "cashier",
+      });
+
+      // Jam operasional 08:00–22:00 dan ambang shift lama 8 jam: keadaannya
+      // ditentukan oleh **jam lokal yang dilaporkan perangkat**, bukan jam server.
+      await client.mutation(api.tenants.updateShift, {
+        tenantId: kabarTenantId,
+        actorId: kabarOwnerId,
+        setting: {
+          active: true,
+          reminderHour: 22,
+          longShiftHours: 8,
+          openHour: 8,
+          closeHour: 22,
+          notifyOwner: true,
+        },
+      });
+
+      const penerimaKabar = await client.mutation(api.apiAccess.createEndpoint, {
+        tenantId: kabarTenantId,
+        actorId: kabarOwnerId,
+        url: "https://tidak-ada.mesinpos.invalid/kabar-shift",
+        description: "Penerima kabar shift ke pemilik toko",
+        events: ["shift.alert"],
+      });
+
+      // Hari kalender lokal perangkat yang jauh di belakang hari ini: penjagaan
+      // “sekali per hari” jadi diuji dari tabel yang kosong, bukan dari sisa
+      // putaran sebelumnya. `openedAt` pun dibangun dari hari lokal yang sama
+      // supaya keadaannya bisa dibaca (10:00 hari itu, bukan kemarin).
+      const hariKas = shiftDayKey(runId - 900 * 86_400_000);
+      const hariShift = shiftDayKey(runId - 901 * 86_400_000);
+      const bukaShiftUji = Date.parse(`${hariShift}T10:00:00`);
+
+      // 1. Kas belum dibuka; sekarang pukul 09:05, jadi sudah lewat jeda 30 menit
+      //    dari jam buka. Yang melapor adalah perangkat kasirnya sendiri.
+      const kabarKas = await client.mutation(api.shiftAlerts.report, {
+        tenantId: kabarTenantId,
+        actorId: kabarKasirId,
+        kind: "till-closed",
+        clock: { hour: 9, minute: 5, dayKey: hariKas },
+      });
+      check(
+        "kas belum dibuka di jam operasional tercatat sebagai kabar ke pemilik toko",
+        kabarKas.recorded === true &&
+          kabarKas.kind === "till-closed" &&
+          kabarKas.reason === "opening-grace" &&
+          kabarKas.dayKey === hariKas,
+        JSON.stringify(kabarKas),
+      );
+      check(
+        "kabarnya ikut terkirim ke endpoint webhook yang melanggan `shift.alert`",
+        kabarKas.notifiedEndpoints === 1 && kabarKas.notice.includes("1 endpoint webhook"),
+        `${kabarKas.notifiedEndpoints} endpoint · ${kabarKas.notice}`,
+      );
+      check(
+        "laporannya menyebut penerima emailnya: alamat pemilik workspace ini, bukan cuma pemasang webhook",
+        kabarKas.emailRecipients.includes(kabarOwnerEmail),
+        JSON.stringify(kabarKas.emailRecipients),
+      );
+      check(
+        "alamat uji `.test` milik pemilik dikatakan apa adanya (bukan diklaim terkirim)",
+        kabarKas.notice.includes("alamat uji") && kabarKas.notice.includes("tidak ada email yang berangkat"),
+        kabarKas.notice,
+      );
+
+      // Hasil pengiriman emailnya ditulis oleh aksi terjadwal
+      // (`shiftAlertEmail.send` → `markEmailDelivered`/`markEmailFailed`), jadi yang
+      // dibaca di sini adalah barisnya sendiri — bukan tebakan pemanggil. Alamat
+      // `.test` tidak dikirimi email tetapi tetap dicatat sebagai `uji`.
+      let kabarEmail = null;
+      const batasEmail = Date.now() + 20_000;
+      while (Date.now() < batasEmail) {
+        const barisKabar = await client.query(api.shiftAlerts.list, {
+          tenantId: kabarTenantId,
+          actorId: kabarOwnerId,
+          limit: 5,
+        });
+        kabarEmail = barisKabar.find((row) => row.id === kabarKas.alertId) ?? null;
+        if (kabarEmail && (kabarEmail.emailVia || kabarEmail.emailError)) break;
+        await new Promise((selesai) => setTimeout(selesai, 1000));
+      }
+      check(
+        "hasil pengiriman email pemilik tercatat di barisnya (alamat uji → `uji`, tanpa waktu kirim)",
+        kabarEmail !== null &&
+          kabarEmail.emailVia === "uji" &&
+          kabarEmail.emailDeliveredAt === null &&
+          kabarEmail.emailError === null &&
+          kabarEmail.emailRecipients.includes(kabarOwnerEmail),
+        JSON.stringify(kabarEmail),
+      );
+
+      const kabarUlang = await client.mutation(api.shiftAlerts.report, {
+        tenantId: kabarTenantId,
+        actorId: kabarKasirId,
+        kind: "till-closed",
+        clock: { hour: 9, minute: 40, dayKey: hariKas },
+      });
+      check(
+        "kabar kedua di hari yang sama dijawab “sudah diberitahukan”, bukan dikirim lagi",
+        kabarUlang.recorded === false &&
+          kabarUlang.duplicate === true &&
+          kabarUlang.alertId === kabarKas.alertId,
+        JSON.stringify(kabarUlang),
+      );
+
+      let kabarJenisPesan = "";
+      try {
+        await client.mutation(api.shiftAlerts.report, {
+          tenantId: kabarTenantId,
+          actorId: kabarKasirId,
+          kind: "shift-open",
+          clock: { hour: 9, minute: 40, dayKey: hariKas },
+        });
+      } catch (error) {
+        kabarJenisPesan = error?.message ?? String(error);
+      }
+      check(
+        "laporan yang jenisnya tidak cocok dengan keadaannya ditolak server",
+        kabarJenisPesan.includes("tidak cocok dengan keadaan kas"),
+        kabarJenisPesan || "diterima server",
+      );
+
+      const kabarLuarJam = await client.mutation(api.shiftAlerts.report, {
+        tenantId: kabarTenantId,
+        actorId: kabarKasirId,
+        kind: "till-closed",
+        clock: { hour: 5, minute: 0, dayKey: hariKas },
+      });
+      check(
+        "laporan “kas belum dibuka” di luar jam operasional tidak menjadi pemberitahuan",
+        kabarLuarJam.recorded === false &&
+          kabarLuarJam.duplicate === false &&
+          kabarLuarJam.notice.includes("tidak (lagi) perlu"),
+        kabarLuarJam.notice,
+      );
+
+      let kabarHariPesan = "";
+      try {
+        await client.mutation(api.shiftAlerts.report, {
+          tenantId: kabarTenantId,
+          actorId: kabarKasirId,
+          kind: "till-closed",
+          clock: { hour: 9, minute: 5, dayKey: "16-10-2026" },
+        });
+      } catch (error) {
+        kabarHariPesan = error?.message ?? String(error);
+      }
+      check(
+        "hari laporan yang tidak berbentuk YYYY-MM-DD ditolak server",
+        kabarHariPesan.includes("YYYY-MM-DD"),
+        kabarHariPesan || "diterima server",
+      );
+
+      // Saklar pemberitahuannya mati: tidak ada kabar sama sekali, apa pun
+      // keadaannya — dan itu dikatakan apa adanya ke kasir, bukan diam-diam
+      // dianggap berhasil.
+      await client.mutation(api.tenants.updateShift, {
+        tenantId: kabarTenantId,
+        actorId: kabarOwnerId,
+        setting: {
+          active: true,
+          reminderHour: 22,
+          longShiftHours: 8,
+          openHour: 8,
+          closeHour: 22,
+          notifyOwner: false,
+        },
+      });
+      const kabarSaklarMati = await client.mutation(api.shiftAlerts.report, {
+        tenantId: kabarTenantId,
+        actorId: kabarKasirId,
+        kind: "till-closed",
+        clock: { hour: 9, minute: 5, dayKey: hariShift },
+      });
+      check(
+        "saklar “pemberitahuan ke pemilik toko” yang mati menghentikan kabarnya",
+        kabarSaklarMati.recorded === false &&
+          kabarSaklarMati.duplicate === false &&
+          kabarSaklarMati.notice.includes("dimatikan"),
+        kabarSaklarMati.notice,
+      );
+      await client.mutation(api.tenants.updateShift, {
+        tenantId: kabarTenantId,
+        actorId: kabarOwnerId,
+        setting: {
+          active: true,
+          reminderHour: 22,
+          longShiftHours: 8,
+          openHour: 8,
+          closeHour: 22,
+          notifyOwner: true,
+        },
+      });
+
+      // 2. Shift yang masih terbuka padahal toko sudah tutup (pukul 23:10 dengan
+      //    jam operasional 08:00–22:00). Shiftnya dibuka pukul 10:00 **hari yang
+      //    sama** menurut hari lokal perangkat laporan ini, jadi yang berlaku
+      //    adalah alasan “toko sudah tutup”, bukan “shift kemarin”.
+      const kabarShift = await client.mutation(api.shiftAlerts.report, {
+        tenantId: kabarTenantId,
+        actorId: kabarKasirId,
+        kind: "shift-open",
+        clock: { hour: 23, minute: 10, dayKey: hariShift },
+        openedAt: bukaShiftUji,
+      });
+      check(
+        "shift yang belum ditutup padahal toko sudah tutup ikut dikabarkan ke pemilik toko",
+        Number.isFinite(bukaShiftUji) &&
+          kabarShift.recorded === true &&
+          kabarShift.kind === "shift-open" &&
+          kabarShift.reason === "after-close",
+        `${kabarShift.reason} · ${kabarShift.notice}`,
+      );
+
+      const kirimanKabar = await client.query(api.apiAccess.overview, {
+        tenantId: kabarTenantId,
+        actorId: kabarOwnerId,
+      });
+      const kabarTerkirim = kirimanKabar.deliveries.filter((row) => row.event === "shift.alert");
+      check(
+        "kedua kabar shift benar-benar masuk antrean webhook pelanggannya",
+        kabarTerkirim.length === 2 &&
+          kabarTerkirim.every((row) => row.endpointId === penerimaKabar.endpointId),
+        JSON.stringify(kirimanKabar.deliveries.map((row) => row.event)),
+      );
+
+      const daftarKabar = await client.query(api.shiftAlerts.list, {
+        tenantId: kabarTenantId,
+        actorId: kabarOwnerId,
+        limit: 10,
+      });
+      check(
+        "halaman Shift & Kas membaca kembali kedua kabarnya, yang terbaru di puncak",
+        daftarKabar.length === 2 &&
+          new Set(daftarKabar.map((row) => row.kind)).size === 2 &&
+          daftarKabar[0].reportedAt >= daftarKabar[1].reportedAt &&
+          daftarKabar.every((row) => row.notifiedEndpoints === 1) &&
+          daftarKabar.every((row) => row.emailRecipients.includes(kabarOwnerEmail)),
+        JSON.stringify(daftarKabar.map((row) => `${row.kind}:${row.dayKey}`)),
+      );
+
+      const kabarDitandai = await client.mutation(api.shiftAlerts.resolve, {
+        alertId: kabarShift.alertId,
+        actorId: kabarOwnerId,
+      });
+      const kabarDitandaiUlang = await client.mutation(api.shiftAlerts.resolve, {
+        alertId: kabarShift.alertId,
+        actorId: kabarOwnerId,
+      });
+      check(
+        "kabar bisa ditandai sudah ditangani, dan penandaan keduanya tidak mengubah apa pun",
+        kabarDitandai.changed === true && kabarDitandaiUlang.changed === false,
+        JSON.stringify([kabarDitandai, kabarDitandaiUlang]),
+      );
+
+      let kabarLuarPesan = "";
+      try {
+        await client.mutation(api.shiftAlerts.report, {
+          tenantId: kabarTenantId,
+          actorId: outsiderId,
+          kind: "till-closed",
+          clock: { hour: 9, minute: 5, dayKey: hariKas },
+        });
+      } catch (error) {
+        kabarLuarPesan = error?.message ?? String(error);
+      }
+      check(
+        "orang di luar workspace tidak bisa melaporkan keadaan kas ke pemiliknya",
+        kabarLuarPesan.length > 0,
+        kabarLuarPesan || "diterima tanpa penolakan",
+      );
+
+      // Endpoint webhook adalah modul `api.access`: tenant professional di atas
+      // tidak bisa memasangnya, jadi kabarnya pun berhenti di “tercatat”.
+      let kabarPaketPesan = "";
+      try {
+        await client.mutation(api.apiAccess.createEndpoint, {
+          tenantId: fnbTenantId,
+          actorId: fnbOwnerId,
+          url: "https://tidak-ada.mesinpos.invalid/kabar-shift-paket",
+          events: ["shift.alert"],
+        });
+      } catch (error) {
+        kabarPaketPesan = error?.message ?? String(error);
+      }
+      check(
+        "tenant professional tidak bisa memasang endpoint penerima kabar (butuh modul api.access)",
+        kabarPaketPesan.includes("tidak termasuk paket") && kabarPaketPesan.includes("professional"),
+        kabarPaketPesan || "diterima tenant professional",
+      );
+
+      const penerimaKabarDibersihkan = await client.mutation(api.apiAccess.removeEndpoint, {
+        tenantId: kabarTenantId,
+        actorId: kabarOwnerId,
+        endpointId: penerimaKabar.endpointId,
+      });
+      check(
+        "endpoint penerima kabar shift dibersihkan setelah uji",
+        penerimaKabarDibersihkan.removedDeliveries === 2,
+        String(penerimaKabarDibersihkan.removedDeliveries),
       );
 
       //

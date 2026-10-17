@@ -375,6 +375,14 @@ export function ApiPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button asChild size="sm" variant="outline">
+              <Link to="/dokumentasi-api">Dokumentasi API publik</Link>
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              Halaman itu bisa dibaca tanpa masuk — bagikan ke tim platform mitra.
+            </span>
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-left text-xs uppercase tracking-wide text-muted-foreground">
@@ -491,7 +499,7 @@ export function ApiPage() {
                       </div>
                     </td>
                     <td className="px-2 py-2 text-xs">
-                      {ROLE_LABELS[key.creatorRole]}
+                      {key.creatorRole ? ROLE_LABELS[key.creatorRole] : "peran tambahan"}
                     </td>
                     <td className="px-2 py-2 text-xs text-muted-foreground">
                       {key.expiresAt === null ? "tanpa kedaluwarsa" : formatDate(key.expiresAt)}

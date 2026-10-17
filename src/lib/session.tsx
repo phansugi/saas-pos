@@ -39,6 +39,11 @@ import {
   type FnbTaxProfile,
 } from "@/lib/fnbTax";
 import {
+  DEFAULT_SHIFT_SETTING,
+  sameShiftSetting,
+  type ShiftSetting,
+} from "@/lib/shift";
+import {
   DEFAULT_RECEIPT_SETTING,
   sameReceiptSetting,
   type ReceiptSetting,
@@ -117,6 +122,16 @@ export interface SessionTenant {
    */
   receipt?: ReceiptSetting;
   /**
+   * Setelan pengingat tutup shift (`tenants.shift`): jam pengingatnya, ambang
+   * “shift sudah terlalu lama”, dan saklarnya. Halaman Kasir & Shift & Kas
+   * membacanya saat memutuskan kapan kasir diingatkan.
+   *
+   * Di mode demo inilah satu-satunya tempat setelannya hidup; di mode Convex
+   * nilainya datang dari baris tenant (`tenants.listMine` sudah berlangganan),
+   * jadi seluruh kasir di workspace itu memakai jam yang sama.
+   */
+  shift?: ShiftSetting;
+  /**
    * Logo toko yang tercetak di atas nama usaha pada struk (`tenants.logo`).
    *
    * Di mode Convex nilainya datang dari server (`tenants.listMine` mengembalikan
@@ -126,16 +141,31 @@ export interface SessionTenant {
    */
   logoUrl?: string | null;
   /**
-   * The signed-in user's role *within this tenant* — mirrors
-   * `memberships.role` on the backend, and drives every client-side gate.
+   * Peran **bawaan** pengguna aktif di workspace ini — cerminan
+   * `memberships.role` di backend, dan dasar setiap gate di klien.
+   *
+   * `null` berarti pengguna ini memakai **peran tambahan** (`customRole`) yang
+   * berdiri sendiri: tidak ada peran bawaan yang menemani, jadi tidak ada izin
+   * peran bawaan yang boleh dipakai sebagai cadangan.
    */
-  role: Role;
+  role: Role | null;
   /**
    * Peran kustom yang **menggantikan** izin `role` kalau ada. Di backend ini
    * datang dari `memberships.customRoleId` (`roles.myAccess`); di tenant tanpa
    * peran kustom, kosong.
    */
   customRole?: SessionCustomRole | null;
+  /**
+   * Izin **peran bawaan** pengguna aktif setelah penyesuaian workspace
+   * (`roleSettings`) — yaitu izin yang berlaku sebelum peran kustom ikut dihitung.
+   *
+   * Di backend ini datang dari `roles.myAccess.rolePermissions`; di mode demo dari
+   * store demo. Kosong berarti izin bawaan peran itu yang berlaku (`permissionsFor`),
+   * jadi sesi lama tanpa kolom ini tetap berjalan persis seperti sebelumnya — dan
+   * menu/rute klien tidak pernah menampilkan halaman yang akan ditolak server
+   * karena peran bawaan yang izinnya dipersempit pemilik toko.
+   */
+  rolePermissions?: Permission[];
   /** ISO timestamp of onboarding completion. */
   createdAt: string;
   /** ISO timestamp the 14-day trial ends. */
@@ -163,7 +193,8 @@ export interface CreateTenantInput {
 export interface AdoptWorkspaceInput {
   name: string;
   slug: string;
-  role: Role;
+  /** `null` = pengguna aktif memakai peran tambahan (berdiri sendiri). */
+  role: Role | null;
   planKey?: PlanKey;
   verticals?: Vertical[];
   storeName?: string;
@@ -218,6 +249,12 @@ interface SessionContextValue {
    */
   setReceiptSetting: (setting: ReceiptSetting) => void;
   /**
+   * Menyimpan setelan pengingat tutup shift hasil `tenants.updateShift` di server.
+   * Halaman Kasir, halaman Shift & Kas, dan halaman Pengaturan membaca angka yang
+   * sama dari sini.
+   */
+  setShiftSetting: (setting: ShiftSetting) => void;
+  /**
    * Menyimpan logo toko hasil `tenants.setLogo`/`removeLogo`. Mode demo memakainya
    * sebagai rumah logonya (data URL); mode Convex membacanya dari server, jadi
    * pemanggilnya hanya store demo.
@@ -254,9 +291,15 @@ interface SessionContextValue {
    * Menu & rute harus mengikuti izin server, bukan menebak dari `role`.
    */
   setCustomRole: (role: SessionCustomRole | null) => void;
+  /**
+   * Menyimpan izin peran bawaan yang berlaku (penyesuaian workspace, dari
+   * backend atau store demo). `null` mengembalikannya ke izin bawaan.
+   */
+  setRolePermissions: (permissions: Permission[] | null) => void;
   signOut: () => void;
   /** Demo helper: changes the acting role so the RBAC gates are observable. */
-  setRole: (role: Role) => void;
+  /** `null` = pengguna aktif memakai peran tambahan (berdiri sendiri). */
+  setRole: (role: Role | null) => void;
 }
 
 const SessionContext = createContext<SessionContextValue | null>(null);
@@ -282,7 +325,13 @@ function readStoredSession(): Session | null {
     if (!parsed?.user?.email) return null;
     // Sessions persisted before roles existed (or from an older backend) are
     // normalised rather than trusted, so `can()` never sees an unknown role.
-    if (parsed.tenant && !isRole(parsed.tenant.role)) {
+    // `null` sengaja dipertahankan: itu anggota yang memakai peran tambahan
+    // (berdiri sendiri), bukan sesi rusak.
+    if (
+      parsed.tenant &&
+      parsed.tenant.role !== null &&
+      !isRole(parsed.tenant.role)
+    ) {
       return { ...parsed, tenant: { ...parsed.tenant, role: "owner" } };
     }
     // Sesi yang tersimpan sebelum modul plug-in ada hanya punya `vertical`,
@@ -291,6 +340,19 @@ function readStoredSession(): Session | null {
       return {
         ...parsed,
         tenant: { ...parsed.tenant, verticals: [parsed.tenant.vertical] },
+      };
+    }
+    // Izin peran bawaan hasil penyesuaian workspace juga dinormalkan; daftar yang
+    // tidak menyisakan izin dikenal sama saja dengan “belum disesuaikan”, jadi
+    // kolomnya dilepas supaya izin bawaan perannya yang berlaku.
+    if (Array.isArray(parsed.tenant?.rolePermissions)) {
+      const permissions = sanitizePermissions(parsed.tenant.rolePermissions);
+      return {
+        ...parsed,
+        tenant: {
+          ...parsed.tenant,
+          rolePermissions: permissions.length > 0 ? permissions : undefined,
+        },
       };
     }
     // Peran kustom dari sesi lama dinormalkan: izin yang tidak dikenal dibuang,
@@ -389,6 +451,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         // thermal 80 mm sekali cetak, dengan catatan kaki yang sudah dipakai
         // aplikasi ini sejak sebelum setelannya bisa diatur.
         receipt: { ...DEFAULT_RECEIPT_SETTING },
+        // Bawaan pengingat tutup shift sama dengan kolom `tenants.shift` yang
+        // masih kosong: aktif, 21:00, dan ambang 14 jam.
+        shift: { ...DEFAULT_SHIFT_SETTING },
         // The person who onboards owns the tenant (`tenants.create` makes them
         // the owner membership server-side too).
         role: "owner",
@@ -532,7 +597,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const setShiftSetting = useCallback((setting: ShiftSetting) => {
+    setSession((current) => {
+      if (!current?.tenant) return current;
+      const currentSetting = current.tenant.shift;
+      if (currentSetting && sameShiftSetting(currentSetting, setting)) return current;
+      return {
+        ...current,
+        tenant: { ...current.tenant, shift: { ...setting } },
+      };
+    });
+  }, []);
+
   const setLogoUrl = useCallback((url: string | null) => {
+
     setSession((current) => {
       if (!current?.tenant) return current;
       const next = url && url.trim() !== "" ? url : null;
@@ -619,12 +697,34 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const setRolePermissions = useCallback((permissions: Permission[] | null) => {
+    setSession((current) => {
+      if (!current?.tenant) return current;
+      const next =
+        permissions && sanitizePermissions(permissions).length > 0
+          ? sanitizePermissions(permissions)
+          : undefined;
+      const before = current.tenant.rolePermissions;
+      // Identitas sama → jangan memicu render ulang (efek store bisa berjalan
+      // berkali-kali, dan pembaruan sesi tanpa perubahan akan jadi gelung).
+      if (
+        (before === undefined && next === undefined) ||
+        (before !== undefined &&
+          next !== undefined &&
+          [...before].sort().join(",") === [...next].sort().join(","))
+      ) {
+        return current;
+      }
+      return { ...current, tenant: { ...current.tenant, rolePermissions: next } };
+    });
+  }, []);
+
   const signOut = useCallback(() => {
     setSession(null);
     setReady(true);
   }, []);
 
-  const setRole = useCallback((role: Role) => {
+  const setRole = useCallback((role: Role | null) => {
     setSession((current) =>
       current?.tenant ? { ...current, tenant: { ...current.tenant, role } } : current,
     );
@@ -642,10 +742,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setTaxSetting,
       setFnbTaxProfile,
       setReceiptSetting,
+      setShiftSetting,
       setLogoUrl,
       setUserProfile,
       setTenantProfile,
       setCustomRole,
+      setRolePermissions,
       signOut,
       setRole,
     }),
@@ -660,10 +762,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setTaxSetting,
       setFnbTaxProfile,
       setReceiptSetting,
+      setShiftSetting,
       setLogoUrl,
       setUserProfile,
       setTenantProfile,
       setCustomRole,
+      setRolePermissions,
       signOut,
       setRole,
     ],
@@ -680,9 +784,15 @@ export function useSession(): SessionContextValue {
   return ctx;
 }
 
-/** The acting role for the current tenant; an owner-less session is an owner. */
-export function actingRole(session: Session | null): Role {
-  return session?.tenant?.role ?? "owner";
+/**
+ * Peran **bawaan** pengguna aktif di workspace ini; `null` kalau ia memakai
+ * peran tambahan (berdiri sendiri) atau workspace-nya belum diketahui.
+ *
+ * Sengaja **bukan** "pemilik secara bawaan": sesi tanpa peran bawaan bukan
+ * pemilik, dan memberinya izin pemilik akan membuka hal-hal yang server tolak.
+ */
+export function actingRole(session: Session | null): Role | null {
+  return session?.tenant?.role ?? null;
 }
 
 /**
@@ -702,7 +812,7 @@ export function actingPermissions(session: Session | null): Permission[] {
   if (!tenant) return [];
   return effectivePermissions(
     tenant.role,
-    tenant.customRole?.permissions ?? null,
+    tenant.customRole?.permissions ?? tenant.rolePermissions ?? null,
   );
 }
 
@@ -730,7 +840,9 @@ export function RequirePermission({
       <p className="mt-2 text-sm text-muted-foreground">
         {session?.tenant?.customRole
           ? `Peran kustom ${session.tenant.customRole.name} tidak memiliki izin untuk halaman ini.`
-          : `Peran ${ROLE_LABELS[role]} tidak memiliki izin untuk halaman ini.`}
+          : role
+            ? `Peran ${ROLE_LABELS[role]} tidak memiliki izin untuk halaman ini.`
+            : "Akun ini belum diberi peran di workspace — minta pemilik menugaskan peran."}
       </p>
       <Link
         to="/app"

@@ -18,6 +18,7 @@ import { ModulesPage } from "@/pages/ModulesPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { TeamPage } from "@/pages/TeamPage";
 import { ApiPage } from "@/pages/ApiPage";
+import { ApiDocsPage } from "@/pages/ApiDocsPage";
 import { SupportPage } from "@/pages/SupportPage";
 import { PanduanPage } from "@/pages/PanduanPage";
 import { MejaPage } from "@/pages/MejaPage";
@@ -63,6 +64,13 @@ export function App() {
               situ — lihat `src/convex/meja.ts`.
             */}
             <Route path="/meja/:token" element={<MejaPage />} />
+            {/*
+              Dokumentasi API **publik dan tanpa sesi**: pembacanya pengembang
+              platform mitra (mis. pusatbahanbangunan.com) yang belum punya akun
+              MesinPOS. Isinya tidak memuat rahasia apa pun — kunci API dibuat
+              pemilik workspace sendiri di `/app/api`.
+            */}
+            <Route path="/dokumentasi-api" element={<ApiDocsPage />} />
             <Route
               path="/onboarding"
               element={
@@ -123,9 +131,10 @@ export function App() {
               <Route
                 path="kds"
                 element={
-                  /* Layar dapur: izin kasir, dan server tetap menolak tenant yang
-                     modul F&B-nya mati. */
-                  <RequirePermission permission="pos.sell">
+                  /* Layar dapur: izinnya sendiri (`kds.manage`), jadi peran
+                     “dapur saja” tidak perlu bisa menjual; server tetap menolak
+                     tenant yang modul F&B-nya mati. */
+                  <RequirePermission permission="kds.manage">
                     <KdsPage />
                   </RequirePermission>
                 }
@@ -133,7 +142,11 @@ export function App() {
               <Route
                 path="shift"
                 element={
-                  <RequirePermission permission="pos.sell">
+                  /* Shift & kas: izinnya sendiri (`shift.manage`). Peran yang
+                     menjual tetap wajib memegangnya — penjualan butuh shift
+                     terbuka — tetapi peran pengawas kas bisa memegangnya tanpa
+                     bisa menjual. */
+                  <RequirePermission permission="shift.manage">
                     <ShiftPage />
                   </RequirePermission>
                 }

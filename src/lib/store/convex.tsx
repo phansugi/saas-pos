@@ -42,6 +42,7 @@ import {
   type PlanKey,
   type Vertical,
 } from "@/lib/billing";
+import { shiftSettingOf, type ShiftSetting } from "@/lib/shift";
 import { receiptSettingOf, type ReceiptSetting } from "@/lib/struk";
 import { taxSettingOf, type TaxSetting } from "@/lib/tax";
 import {
@@ -51,7 +52,7 @@ import {
   recentMonthWindows,
   type FnbTaxProfile,
 } from "@/lib/fnbTax";
-import type { Permission } from "@/lib/authz";
+import type { Permission, Role } from "@/lib/authz";
 import {
   effectivePermissions,
   MAX_CUSTOM_ROLES,
@@ -192,6 +193,7 @@ import {
   type StoreApiKey,
   type StoreApiKeySummary,
   type StoreArSummary,
+  type StoreBuiltinRole,
   type StoreCustomRole,
   type StoreCustomer,
   type StoreKdsTicket,
@@ -208,6 +210,8 @@ import {
   type StoreWebhookEndpoint,
   type StoreWebhookSummary,
   type UpdateCustomRoleInput,
+  type UpdateBuiltinRoleInput,
+  EMPTY_BUILTIN_ROLE_SUMMARY,
   type UpdateWebhookEndpointInput,
   type WebhookTestResult,
   type StoreLogo,
@@ -242,6 +246,12 @@ import {
   type UpdatedFnbTax,
   type UpdateReceiptInput,
   type UpdatedReceipt,
+  type UpdateShiftInput,
+  type UpdatedShift,
+  type ShiftAlertReportInput,
+  type ShiftAlertReportResult,
+  type StoreShiftAlert,
+  type StoreTill,
   type StoreFnbTaxMonth,
   type StoreFnbTaxMonthSummary,
   type StoreUserProfile,
@@ -344,6 +354,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
     setVerticals,
     setPlan,
     setCustomRole,
+    setRolePermissions,
     setUserProfile,
     setTenantProfile: setSessionTenantProfile,
   } = useSession();
@@ -500,6 +511,16 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
   // harian — tetapi kuerinya **digerbang fitur** `report.advanced`, jadi
   // langganannya baru dinyalakan kalau paket + modulnya memang memuatnya.
   const canViewReports = has("report.view");
+  // Shift kas & pemberitahuan ke pemilik memakai izinnya sendiri
+  // (`shift.manage`, sama dengan rute `/app/shift`): yang melaporkan keadaan kas
+  // adalah perangkat yang memegang kasnya, dan yang membacanya
+  // pemilik/manajer/kasir di halaman itu. Langganannya dimatikan lebih dulu
+  // untuk peran lain — query yang ditolak akan menjatuhkan render.
+  const canManageShift = has("shift.manage");
+  // Antrean dapur (`pos.kdsTickets`) menuntut izin `kds.manage`; peran yang
+  // tidak memegangnya tidak boleh berlangganan — query yang ditolak akan
+  // menjatuhkan render halaman tempat ia berlangganan.
+  const canWorkKitchen = has("kds.manage");
   const [analyticsDays, setAnalyticsDays] = useState(DEFAULT_ANALYTICS_DAYS);
 
   /*
@@ -518,7 +539,11 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
           }
         : null,
     );
-  }, [myAccess, setCustomRole]);
+    // Izin peran bawaan yang sudah disesuaikan workspace juga ikut ke sesi: menu &
+    // rute harus memakai izin server, bukan izin bawaan mentah.
+    const base = sanitizePermissions(myAccess.rolePermissions ?? []);
+    setRolePermissions(base.length > 0 ? base : null);
+  }, [myAccess, setCustomRole, setRolePermissions]);
 
   const stores = useQuery(
     api.tenants.listStores,
@@ -550,6 +575,18 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       ? { tenantId, storeId, actorId: userId, limit: 20 }
       : "skip",
   );
+  /**
+   * Kas toko (`pos.till`): shift yang masih berjalan + riwayat penutupannya.
+   * Dibaca tanpa gerbang izin — kasir yang menjual justru tidak memegang
+   * `shift.manage`, dan ia yang paling perlu tahu kasnya sudah terbuka dari
+   * perangkat mana pun.
+   */
+  const tillDocs = useQuery(
+    api.pos.till,
+    tenantId && storeId && userId
+      ? { tenantId, storeId, actorId: userId }
+      : "skip",
+  );
   // Ringkasan harian menuntut `report.view` di server. Peran bawaan semuanya
   // memilikinya, tetapi peran kustom bisa tidak — dan query yang ditolak akan
   // menjatuhkan render, jadi langganannya ikut digerbang izin seperti katalog
@@ -568,9 +605,10 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
   );
 
   // Modul aktif versi server dipakai lebih dulu untuk memutuskan query mana yang
-  // boleh dijalankan: `pos.kdsTickets` **menolak** tenant tanpa modul F&B, dan
-  // query Convex yang melempar akan menjatuhkan render. Jadi langganannya
-  // dinyalakan hanya saat fiturnya memang aktif.
+  // boleh dijalankan: `pos.kdsTickets` **menolak** tenant tanpa modul F&B (dan
+  // peran tanpa izin `kds.manage`), dan query Convex yang melempar akan
+  // menjatuhkan render. Jadi langganannya dinyalakan hanya saat fiturnya aktif
+  // **dan** perannya memang pekerja dapur.
   const sessionVerticals = useMemo<Vertical[]>(
     () => (tenant ? (tenant.verticals ?? [tenant.vertical]) : ["umkm"]),
     [tenant],
@@ -590,7 +628,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
   );
   const kdsTicketDocs = useQuery(
     api.pos.kdsTickets,
-    tenantId && storeId && userId && kdsFeatureOn
+    tenantId && storeId && userId && kdsFeatureOn && canWorkKitchen
       ? { tenantId, storeId, actorId: userId }
       : "skip",
   );
@@ -741,11 +779,16 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
   const sendReceiptWhatsappAction = useAction(api.receiptWa.send);
 
   const createUser = useMutation(api.users.createOrGet);
+  const cancelRegistrationMutation = useMutation(api.users.cancelRegistration);
   const createTenant = useMutation(api.tenants.create);
   const createRoleMutation = useMutation(api.roles.create);
   const updateRoleMutation = useMutation(api.roles.update);
   const removeRoleMutation = useMutation(api.roles.remove);
   const assignRoleMutation = useMutation(api.roles.assign);
+  const setBuiltinRoleMutation = useMutation(api.roles.setBuiltin);
+  const removeBuiltinRoleMutation = useMutation(api.roles.removeBuiltin);
+  const restoreBuiltinRoleMutation = useMutation(api.roles.restoreBuiltin);
+  const resetBuiltinRoleMutation = useMutation(api.roles.resetBuiltin);
   const addMemberMutation = useMutation(api.members.add);
   const resendInviteMutation = useMutation(api.members.resendInvite);
   const updateTeamMemberMutation = useMutation(api.members.update);
@@ -759,6 +802,11 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
   const updateTenantProfileMutation = useMutation(api.tenants.updateProfile);
   const setFnbTaxMutation = useMutation(api.tenants.updateFnbTax);
   const setReceiptMutation = useMutation(api.tenants.updateReceipt);
+  const setShiftMutation = useMutation(api.tenants.updateShift);
+  const openTillMutation = useMutation(api.pos.openShift);
+  const closeTillMutation = useMutation(api.pos.closeShift);
+  const reportShiftAlertMutation = useMutation(api.shiftAlerts.report);
+  const resolveShiftAlertMutation = useMutation(api.shiftAlerts.resolve);
   const setLogoMutation = useMutation(api.tenants.setLogo);
   const removeLogoMutation = useMutation(api.tenants.removeLogo);
   const generateLogoUploadUrlMutation = useMutation(api.tenants.generateLogoUploadUrl);
@@ -783,6 +831,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
   const cancelMejaOrderMutation = useMutation(api.meja.cancelOrder);
   const holdSaleMutation = useMutation(api.pos.createSale);
   const finalizeHeldMutation = useMutation(api.pos.finalizeHeldSale);
+  const kitchenDoneMutation = useMutation(api.pos.kitchenDone);
   const createCustomerMutation = useMutation(api.ar.createCustomer);
   const setCreditMutation = useMutation(api.ar.setCredit);
   const recordPaymentMutation = useMutation(api.ar.recordPayment);
@@ -859,7 +908,18 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
   // Resolve the acting user once per session. `createOrGet` is idempotent, so
   // this is also the first-run registration.
   useEffect(() => {
-    if (!session || userId) return;
+    /*
+      Sesi berakhir (keluar, atau pendaftarannya dibatalkan): id pengguna yang
+      tersimpan di sini milik baris `users` yang mungkin sudah tidak ada. Kalau
+      dibiarkan, `createOrGet` tidak akan pernah berjalan untuk akun berikutnya —
+      dan setelah pendaftaran dibatalkan, id lama itu bahkan menunjuk baris yang
+      sudah dihapus. Karena itu id-nya dilepas bersama sesinya.
+    */
+    if (!session) {
+      if (userId) setUserId(null);
+      return;
+    }
+    if (userId) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -882,6 +942,25 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
   }, [session, userId, createUser, reportProvisionError]);
 
   const provisioning = useRef(false);
+
+  /**
+   * Membatalkan pendaftaran akun yang baru dibuat.
+   *
+   * Yang dikirim ke server hanya id baris milik sesi ini; server memverifikasi
+   * aktornya sendiri lalu menghapus baris `users` beserta jejak masuknya. Setelah
+   * ini sesi perangkat **masih hidup** — keadaan itu sengaja diserahkan ke
+   * halaman (`signOut` + kembali ke beranda) supaya urutannya terlihat di satu
+   * tempat, bukan tersembunyi di dalam store.
+   */
+  const cancelRegistration = useCallback(async () => {
+    if (!userId) {
+      throw new Error(
+        "Akun belum tersambung ke server, jadi pendaftarannya belum bisa dibatalkan. Coba lagi sebentar lagi.",
+      );
+    }
+    const result = await cancelRegistrationMutation({ userId });
+    return { email: result.email, sentence: result.sentence };
+  }, [userId, cancelRegistrationMutation]);
 
   /*
     Keanggotaan nonaktif dijelaskan lewat **alasan** workspace belum tersambung
@@ -966,7 +1045,8 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
     adoptWorkspace({
       name: row.name,
       slug: row.slug,
-      role: workspace.role,
+      // `null` = pengguna ini memakai peran tambahan (berdiri sendiri).
+      role: workspace.role ?? null,
       planKey: row.planKey,
       verticals: row.verticals,
       storeName: serverStoreName,
@@ -1196,6 +1276,16 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
           // dibuat & dilunasi **online**, jadi yang menunggu di sini hanya nota
           // penjualannya — dan pemutaran ulang memakai tagihan yang sama.
           digitalChargeId: digitalChargeId as Id<"digitalCharges"> | undefined,
+          /*
+            Penjualan ditempelkan ke shift kas toko yang sedang berjalan, supaya
+            Z-report-nya menghitung penjualan ini (server menjumlahkan penjualan
+            per `shiftId`). Kalau kasnya belum dibuka, tidak ada yang ditempelkan
+            — server tidak menuntutnya, dan gerbang kasir di layar sudah menutup
+            jalur ini lebih dulu.
+          */
+          shiftId: tillDocs?.current
+            ? (tillDocs.current.id as Id<"shifts">)
+            : undefined,
           // Reused verbatim on every retry — this is the whole safety net.
           idempotencyKey: entry.idempotencyKey,
         });
@@ -1203,10 +1293,13 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
         throw toTransportError(error);
       }
     },
-    [tenantId, storeId, userId, priceCart, createSaleMutation],
+    [tenantId, storeId, userId, priceCart, createSaleMutation, tillDocs],
   );
 
-  const outbox = useOutbox<CreateSaleInput, { number: string; total: number }>({
+  const outbox = useOutbox<
+    CreateSaleInput,
+    { number: string; total: number; kitchenFired?: boolean }
+  >({
     storageKey: OUTBOX_KEY,
     send,
   });
@@ -1221,7 +1314,14 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
 
       const { result } = await outbox.enqueue(input);
       if (result) {
-        return { number: result.number, total: result.total, queued: false };
+        // `kitchenFired` datang dari server: kalau penjualannya memang langsung
+        // dikirim ke dapur, kasir diberi tahu di layar yang sama dengan struknya.
+        return {
+          number: result.number,
+          total: result.total,
+          queued: false,
+          kitchenFired: result.kitchenFired,
+        };
       }
       // Offline: the sale is safe in the queue but the server has not assigned
       // a receipt number yet, so we say so instead of inventing one.
@@ -1459,6 +1559,185 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       };
     },
     [tenantId, userId, setReceiptMutation],
+  );
+
+  /**
+   * Setelan pengingat tutup shift dibaca dari baris tenant yang sama dengan yang
+   * dibaca server (`tenants.listMine` sudah berlangganan), jadi setelah
+   * `tenants.updateShift` tersimpan, halaman Kasir & Shift & Kas memakai jam yang
+   * baru tanpa memuat ulang — dan workspace yang belum mengaturnya dibaca sebagai
+   * bawaan (aktif, 21:00, 14 jam).
+   */
+  const shift = useMemo<ShiftSetting>(
+    () => shiftSettingOf(workspace?.tenant?.shift ?? null),
+    [workspace],
+  );
+
+  /**
+   * Kas **toko** (bukan perangkat): shift yang masih berjalan beserta riwayat
+   * penutupannya, dibaca dari tabel `shifts` lewat `pos.till`.
+   *
+   * Inilah yang membuat kas yang dibuka pemilik di ponselnya ikut membuka kasir
+   * di perangkat kasir lain — dan kenapa kasir yang melayani penjualan tidak
+   * perlu memegang izin `shift.manage`: ia hanya perlu tahu kasnya terbuka.
+   * Query-nya hanya menuntut keanggotaan, jadi tidak perlu digerbang izin seperti
+   * `shiftAlerts.list`.
+   */
+  const till = useMemo<StoreTill>(
+    () => ({
+      current: tillDocs?.current
+        ? {
+            id: tillDocs.current.id,
+            openedAt: tillDocs.current.openedAt,
+            openingCash: tillDocs.current.openingCash,
+          }
+        : null,
+      history: (tillDocs?.history ?? []).map((row) => ({
+        id: row.id,
+        openedAt: row.openedAt,
+        closedAt: row.closedAt,
+        openingCash: row.openingCash,
+        countedCash: row.countedCash,
+        expectedCash: row.expectedCash,
+        variance: row.variance,
+      })),
+    }),
+    [tillDocs],
+  );
+
+  const openTill = useCallback(
+    async (input: { openingCash: number }): Promise<void> => {
+      if (!tenantId || !storeId) {
+        notReady();
+      }
+      if (!userId) throw new Error("Pengguna belum siap. Coba lagi sebentar lagi.");
+      try {
+        await openTillMutation({
+          tenantId,
+          storeId,
+          cashierId: userId,
+          openingCash: input.openingCash,
+        });
+      } catch (error) {
+        throw toTransportError(error);
+      }
+    },
+    [tenantId, storeId, userId, openTillMutation],
+  );
+
+  const closeTill = useCallback(
+    async (input: { countedCash: number }): Promise<void> => {
+      if (!tenantId || !storeId) {
+        notReady();
+      }
+      if (!userId) throw new Error("Pengguna belum siap. Coba lagi sebentar lagi.");
+      const current = till.current;
+      if (!current) throw new Error("Kas belum dibuka; tidak ada shift yang bisa ditutup.");
+      try {
+        await closeTillMutation({
+          shiftId: current.id as Id<"shifts">,
+          actorId: userId,
+          closingCash: input.countedCash,
+        });
+      } catch (error) {
+        throw toTransportError(error);
+      }
+    },
+    [tenantId, storeId, userId, till, closeTillMutation],
+  );
+
+  const setShift = useCallback(
+    async (input: UpdateShiftInput): Promise<UpdatedShift> => {
+      if (!tenantId || !userId) {
+        notReady();
+      }
+      const result = await setShiftMutation({
+        tenantId,
+        actorId: userId,
+        setting: input,
+      });
+      return {
+        changed: result.changed,
+        setting: result.setting as ShiftSetting,
+        sentence: result.sentence,
+      };
+    },
+    [tenantId, userId, setShiftMutation],
+  );
+
+  /**
+   * Kabar shift yang **sudah dikirim ke pemilik toko** (`shiftAlerts.list`): kas
+   * belum dibuka di jam operasional, atau shift belum ditutup. Daftarnya dibaca
+   * halaman Shift & Kas supaya “pemilik sudah diberi tahu” bisa diperiksa ulang —
+   * termasuk status email ke pemiliknya, bukan cuma klaim di layar kasir.
+   *
+   * Langganannya bergerbang `shift.manage` (izin yang sama dengan rutenya): query
+   * yang ditolak akan menjatuhkan render, jadi peran lain tidak berlangganan dulu.
+   */
+  const shiftAlertDocs = useQuery(
+    api.shiftAlerts.list,
+    tenantId && userId && canManageShift ? { tenantId, actorId: userId } : "skip",
+  );
+
+  const shiftAlerts = useMemo<StoreShiftAlert[]>(
+    () =>
+      (shiftAlertDocs ?? []).map((row) => ({
+        id: row.id,
+        kind: row.kind as StoreShiftAlert["kind"],
+        reason: row.reason,
+        dayKey: row.dayKey,
+        title: row.title,
+        message: row.message,
+        localClock: row.localClock,
+        openedAt: row.openedAt,
+        notifiedEndpoints: row.notifiedEndpoints,
+        emailRecipients: row.emailRecipients,
+        emailVia: row.emailVia,
+        emailDeliveredAt: row.emailDeliveredAt,
+        emailError: row.emailError,
+        reportedAt: row.reportedAt,
+        resolvedAt: row.resolvedAt,
+      })),
+    [shiftAlertDocs],
+  );
+
+  /**
+   * Melaporkan keadaan kas perangkat ini supaya pemilik toko diberi tahu kalau
+   * memang perlu. Server memutuskan ulang (`shiftOwnerAlert`) dengan jam lokal yang
+   * ikut dikirim, dan menjawab apa adanya: terkirim, tidak perlu, atau hari itu
+   * sudah pernah — jadi halaman tidak pernah mengaku sudah mengabari pemilik
+   * padahal belum.
+   */
+  const reportShiftAlert = useCallback(
+    async (input: ShiftAlertReportInput): Promise<ShiftAlertReportResult> => {
+      if (!tenantId || !userId) {
+        notReady();
+      }
+      const result = await reportShiftAlertMutation({
+        tenantId,
+        actorId: userId,
+        storeId: storeId as Id<"stores"> | undefined,
+        kind: input.kind,
+        clock: input.clock,
+        openedAt: input.openedAt,
+      });
+      return result as ShiftAlertReportResult;
+    },
+    [tenantId, userId, storeId, reportShiftAlertMutation],
+  );
+
+  /** Menandai satu kabar shift sudah ditangani (`shiftAlerts.resolve`). */
+  const resolveShiftAlert = useCallback(
+    async (alertId: string): Promise<void> => {
+      if (!tenantId || !userId) {
+        notReady();
+      }
+      await resolveShiftAlertMutation({
+        alertId: alertId as Id<"shiftAlerts">,
+        actorId: userId,
+      });
+    },
+    [tenantId, userId, resolveShiftAlertMutation],
   );
 
   /**
@@ -2084,6 +2363,19 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
     [userId, finalizeHeldMutation],
   );
 
+  /**
+   * Tombol Selesai di layar dapur. Satu panggilan untuk kedua jenis tiket —
+   * server yang memutuskan apakah penjualannya perlu diselesaikan (pesanan
+   * tertahan) atau hanya ditandai beres (tiket yang sudah lunas).
+   */
+  const finishKitchenTicket = useCallback(
+    async (saleId: string): Promise<void> => {
+      if (!userId) throw new Error("Pengguna belum siap. Coba lagi sebentar lagi.");
+      await kitchenDoneMutation({ saleId: saleId as Id<"sales">, actorId: userId });
+    },
+    [userId, kitchenDoneMutation],
+  );
+
   // Modifier item: konfigurasi disimpan di server, produknya ikut segar sendiri
   // karena query Convex reaktif.
   const setModifiers = useCallback(
@@ -2483,14 +2775,16 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
    */
   const analyticsReport: StoreAdvancedReport = useMemo(() => {
     if (analyticsDocs) return analyticsDocs;
+    const now = Date.now();
     return buildAdvancedReport({
       sales: [],
       range: analyticsRange({
         days: analyticsDays,
-        now: Date.now(),
+        now,
         timezoneOffsetMinutes,
       }),
       timezoneOffsetMinutes,
+      now,
     });
   }, [analyticsDocs, analyticsDays, timezoneOffsetMinutes]);
 
@@ -2801,22 +3095,43 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
     [roleDocs],
   );
 
+  /** Peran bawaan beserta penyesuaiannya (`roles.list` memuat kelimanya). */
+  const builtinRoles: StoreBuiltinRole[] = useMemo(
+    () =>
+      (roleDocs?.builtin ?? []).map((row) => ({
+        role: row.role as Role,
+        label: row.label,
+        permissions: sanitizePermissions(row.permissions),
+        basePermissions: sanitizePermissions(row.basePermissions),
+        active: row.active,
+        removed: row.removed,
+        customized: row.customized,
+        memberCount: row.memberCount,
+      })),
+    [roleDocs],
+  );
+
   const roleSummary: StoreRoleSummary = useMemo(
     () =>
       roleDocs?.summary
-        ? { ...roleDocs.summary }
+        ? {
+            ...roleDocs.summary,
+            builtin: roleDocs.summary.builtin ?? EMPTY_BUILTIN_ROLE_SUMMARY,
+          }
         : {
             total: 0,
             active: 0,
             assignedMembers: 0,
             limit: MAX_CUSTOM_ROLES,
             canCreate: true,
+            builtin: EMPTY_BUILTIN_ROLE_SUMMARY,
           },
     [roleDocs],
   );
 
   const teamMembers: StoreTeamMember[] = useMemo(() => {
     const byId = new Map(customRoles.map((row) => [row.id, row]));
+    const builtinById = new Map(builtinRoles.map((row) => [row.role, row]));
     return (teamDocs ?? []).map(({ membership, user }) => {
       const role = membership.customRoleId
         ? (byId.get(membership.customRoleId as string) ?? null)
@@ -2824,17 +3139,22 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       // Peran kustom nonaktif tidak berlaku lagi: anggota kembali ke peran
       // bawaannya, sama seperti resolusi di backend.
       const effective = role && role.active ? role : null;
+      // Izin peran bawaan anggota ini memakai penyesuaian workspace
+      // (`rolePermissions` dari server), lalu digantikan peran kustom bila ada.
+      // Anggota berperan tambahan tidak punya peran bawaan sama sekali.
+      const baseRole = membership.role ?? null;
+      const base = baseRole ? (builtinById.get(baseRole)?.permissions ?? null) : null;
       return {
         membershipId: membership._id as string,
         userId: user._id as string,
         name: user.name,
         email: user.email,
-        role: membership.role,
+        role: baseRole,
         customRoleId: effective ? effective.id : null,
         customRoleName: effective ? effective.name : null,
         permissions: effectivePermissions(
-          membership.role,
-          effective?.permissions ?? null,
+          baseRole,
+          effective?.permissions ?? base,
         ),
         active: membership.active,
         // Jejak kirim undangan lewat email (undangan, gagal, atau alamat uji).
@@ -2851,7 +3171,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
         },
       };
     });
-  }, [customRoles, teamDocs]);
+  }, [builtinRoles, customRoles, teamDocs]);
 
   const createCustomRole = useCallback(
     async (input: CreateCustomRoleInput): Promise<{ id: string; name: string }> => {
@@ -2917,6 +3237,59 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
     [tenantId, userId, assignRoleMutation],
   );
 
+  const updateBuiltinRole = useCallback(
+    async (
+      input: UpdateBuiltinRoleInput,
+    ): Promise<{ role: Role; permissions: Permission[]; active: boolean }> => {
+      if (!tenantId || !userId) {
+        notReady();
+      }
+      const result = await setBuiltinRoleMutation({
+        tenantId,
+        actorId: userId,
+        role: input.role,
+        permissions: input.permissions,
+        active: input.active,
+      });
+      return {
+        role: result.role as Role,
+        permissions: sanitizePermissions(result.permissions),
+        active: result.active,
+      };
+    },
+    [tenantId, userId, setBuiltinRoleMutation],
+  );
+
+  const deleteBuiltinRole = useCallback(
+    async (role: Role): Promise<void> => {
+      if (!tenantId || !userId) {
+        notReady();
+      }
+      await removeBuiltinRoleMutation({ tenantId, actorId: userId, role });
+    },
+    [tenantId, userId, removeBuiltinRoleMutation],
+  );
+
+  const restoreBuiltinRole = useCallback(
+    async (role: Role): Promise<void> => {
+      if (!tenantId || !userId) {
+        notReady();
+      }
+      await restoreBuiltinRoleMutation({ tenantId, actorId: userId, role });
+    },
+    [tenantId, userId, restoreBuiltinRoleMutation],
+  );
+
+  const resetBuiltinRole = useCallback(
+    async (role: Role): Promise<void> => {
+      if (!tenantId || !userId) {
+        notReady();
+      }
+      await resetBuiltinRoleMutation({ tenantId, actorId: userId, role });
+    },
+    [tenantId, userId, resetBuiltinRoleMutation],
+  );
+
   /**
    * Mendaftarkan anggota tim baru ke workspace ini.
    *
@@ -2932,7 +3305,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
         notReady();
       }
       const invite = validateTeamInvite(
-        { email: input.email, name: input.name, role: input.role },
+        { email: input.email, name: input.name, role: input.role ?? null },
         { actingRole: actingRole(session) },
       );
       if (!invite.ok) throw new Error(invite.reason);
@@ -2943,7 +3316,19 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
         email: invite.value.email,
         name: invite.value.name,
         phone: input.phone?.trim() ? input.phone : undefined,
-        role: invite.value.role,
+        role: invite.value.role ?? undefined,
+        /*
+          Peran kustom ikut sejak undangan pertama: `members.add` yang memutuskan
+          boleh-tidaknya (fitur `rbac.custom` + pagar eskalasi), jadi halaman tidak
+          perlu menebak. `null`/kosong berarti anggota memakai peran bawaannya.
+        */
+        customRoleId:
+          input.customRoleId === undefined
+            ? undefined
+            : input.customRoleId === null
+              ? null
+              : (input.customRoleId as Id<"customRoles">),
+
       });
       return {
         membershipId: result.membershipId as string,
@@ -3016,7 +3401,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
         membershipId: input.membershipId as Id<"memberships">,
         name: decision.value.name,
         email: decision.value.email,
-        role: decision.value.role,
+        role: decision.value.role ?? undefined,
         phone: decision.value.phone,
         active: decision.value.active,
       });
@@ -3684,6 +4069,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       source: "convex",
       ready,
       workspacePending,
+      cancelRegistration,
       error: provisionError,
       products,
       catalogProducts,
@@ -3704,6 +4090,14 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       fnbTaxMonth,
       receipt,
       setReceipt,
+      shift,
+      setShift,
+      shiftAlerts,
+      reportShiftAlert,
+      resolveShiftAlert,
+      till,
+      openTill,
+      closeTill,
       logo,
       setLogo,
       removeLogo,
@@ -3747,6 +4141,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       cancelMejaOrder,
       holdSale,
       completeHeld,
+      finishKitchenTicket,
       warehouses,
       stock,
       warehouseCapacity: warehouseCapacityValue,
@@ -3813,6 +4208,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       pushSync,
       pullSync,
       resolveSyncChange,
+      builtinRoles,
       customRoles,
       roleSummary,
       teamMembers,
@@ -3825,6 +4221,10 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       updateCustomRole,
       deleteCustomRole,
       assignCustomRole,
+      updateBuiltinRole,
+      deleteBuiltinRole,
+      restoreBuiltinRole,
+      resetBuiltinRole,
       apiKeys,
       apiKeySummary,
       webhookEndpoints,
@@ -3843,6 +4243,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
     [
       ready,
       workspacePending,
+      cancelRegistration,
       provisionError,
       products,
       catalogProducts,
@@ -3863,6 +4264,14 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       fnbTaxMonth,
       receipt,
       setReceipt,
+      shift,
+      setShift,
+      shiftAlerts,
+      reportShiftAlert,
+      resolveShiftAlert,
+      till,
+      openTill,
+      closeTill,
       logo,
       setLogo,
       removeLogo,
@@ -3906,6 +4315,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       cancelMejaOrder,
       holdSale,
       completeHeld,
+      finishKitchenTicket,
       warehouses,
       stock,
       warehouseCapacityValue,
@@ -3972,6 +4382,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       pushSync,
       pullSync,
       resolveSyncChange,
+      builtinRoles,
       customRoles,
       roleSummary,
       teamMembers,
@@ -3984,6 +4395,10 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       updateCustomRole,
       deleteCustomRole,
       assignCustomRole,
+      updateBuiltinRole,
+      deleteBuiltinRole,
+      restoreBuiltinRole,
+      resetBuiltinRole,
       apiKeys,
       apiKeySummary,
       webhookEndpoints,

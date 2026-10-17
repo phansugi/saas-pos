@@ -11,6 +11,176 @@ menjelaskan cadangan **data** (tombol backup di dashboard Convex, atau satu peri
 Daftar **nama** kunci rahasia (env workspace, deployment Convex, produksi) beserta tempat menyimpan dan
 cara membuat ulangnya ada di [`docs/daftar-kunci-rahasia.md`](./docs/daftar-kunci-rahasia.md).
 
+## Dokumentasi API publik: `/dokumentasi-api`
+
+Halaman **publik tanpa sesi** untuk pengembang platform mitra (mis. **pusatbahanbangunan.com**):
+`/dokumentasi-api`. Tautannya ada di navigasi & footer beranda, dan dari halaman backstage
+**API & Webhook** (`/app/api`). Isinya:
+
+- **mulai cepat** (buat kunci → simpan rahasia → panggil `GET /api/v1/ping`),
+- **autentikasi & scope** (header `Authorization: Bearer mp_…` atau `x-api-key`, tabel scope yang
+ditawarkan beserta endpoint dan jenisnya),
+- **referensi tiap endpoint** (`GET /api/v1/ping`, `GET /api/v1/sales`, `POST /api/v1/sales`,
+`GET /api/v1/products`, `GET /api/v1/payables`, `GET /api/v1/purchases`) dengan parameter query
+(`days`, `since`, `limit`, `cursor`), arti field balasan, contoh permintaan, contoh balasan, dan catatannya,
+- **webhook keluar** (14 event, header `x-mesinpos-*`, HMAC-SHA256 atas `timestamp.body`,
+contoh verifikasi Node.js, jadwal percobaan ulang 1 · 5 · 30 · 120 · 720 menit),
+- **sinkronisasi berkelanjutan**: tabel kepemilikan data (MesinPOS sumber utama), langkah salinan awal →
+webhook realtime → rekonsiliasi berkala, dan aturan “MesinPOS menang” supaya harga/stok tidak saling menimpa.
+- **kode status 200/201/400/401/403/404/409** beserta penyebab yang biasa,
+- **batas v1** (`limit` 1–100, `days` 1–30, 20 kunci hidup, 50 baris/pesanan, satu toko utama)
+  dan daftar jujur hal yang **belum** tersedia lewat API,
+- **rencana integrasi pusatbahanbangunan.com**: katalog (berhalaman) dari `GET /products`, pesanan
+  lewat `POST /sales` dengan `idempotencyKey` = ID pesanan platform, webhook `sale.completed` /
+  `purchase.received` / `stock.changed` / `product.updated` untuk perubahan realtime, serta
+  `GET /sales`, `GET /purchases`, dan `GET /payables` dengan `since` untuk rekonsiliasi.
+
+Isi halaman dibaca dari **`src/lib/apiDocs.ts`**, yang menurunkan method/path/scope tiap endpoint dari
+`API_RESOURCES` (`src/convex/lib/apiKeys.ts`) dan katalog event dari `WEBHOOK_EVENTS`
+(`src/convex/lib/webhooks.ts`) — jadi dokumentasi tidak bisa menawarkan endpoint yang tidak dilayani
+`src/convex/http.ts`. Base URL di halaman dihitung dari `VITE_CONVEX_URL` (`.convex.cloud` → `.convex.site`),
+selama deployment-nya terbaca; tanpa itu ditampilkan sebagai `https://<deployment>.convex.site`.
+
+```bash
+bun scripts/verify-api-docs.mjs   # memeriksa halaman tetap publik, semua endpoint & event terwakili,
+                                  # dan setiap contoh JSON benar-benar bisa diuraikan (termasuk parseExternalOrder)
+bun scripts/verify-platform-sync.mjs   # sinkronisasi platform: event harga/stok/pembelian, pemicunya di jalur
+                                      # tulis domain, endpoint tarik bertahap, dan aturan “MesinPOS sumber utama”
+```
+
+## Laporan yang bisa diunduh: **PDF, Excel (`.xlsx`), CSV** — tabel **berwarna**, grafik, **dan ringkasan bahasa awam**
+
+Halaman **Laporan** (`/app/reports`, izin `report.view`) punya kartu **Unduh laporan** di paling atas dengan
+tiga tombol: **Unduh PDF**, **Unduh Excel (.xlsx)**, dan **Unduh CSV**. Berkasnya disusun **di perangkat
+pengguna** (Blob + tautan `blob:`, sama seperti PDF struk di kasir) — tidak ada satu byte pun yang dikirim ke
+server — dan pesan sesudahnya menyebut nama berkas yang benar-benar disimpan beserta ukurannya.
+
+Di bawah tombolnya ada daftar **“Berkas yang sudah diunduh (n)”**: satu baris per berkas berisi **jenis berkas**
+(`PDF` / `Excel (.xlsx)` / `CSV`), **nama berkas**, **ukuran**, dan **tanggal & jam unduhnya**, plus tautan
+**Unduh ulang** dan **Buka**. Daftarnya urut dari yang terbaru dan **menetap di perangkat** (`localStorage`,
+maksimal 8 baris): tetap ada setelah halaman dimuat ulang atau ditutup, dan bisa dikosongkan lewat tombol
+**Bersihkan daftar**. URL `blob:` yang masih hidup dipakai untuk **Unduh ulang**/**Buka** byte yang sama
+(di ponsel, folder unduhan peramban tidak selalu gampang ditemukan kembali). Baris dari kunjungan sebelumnya
+— URL `blob:`-nya sudah mati dan **tidak** pernah ditampilkan sebagai tautan — diberi tombol **Unduh ulang**
+yang menyusun berkasnya lagi dari angka yang tampil sekarang (kalau ada penjualan baru, berkas barunya ikut
+memuatnya). Saat belum ada unduhan, daftarnya mengatakannya apa adanya, bukan kosong tanpa keterangan.
+
+Sebelum tombolnya, kartu **Ringkasan singkat** di paling atas halaman Laporan menuliskan — dalam kalimat
+sehari-hari — berapa yang diterima tokonya, dari berapa transaksi, dibayar pakai apa, apa yang ikut dipungut,
+dan apa yang menjadi kewajiban pemiliknya. Kalimat yang sama (turun dari masukan yang sama,
+`laporanRingkasanSingkat`) ikut ke dalam ketiga berkas: kotak **Ringkasan singkat** di halaman pertama PDF,
+lembar **Info berkas** di Excel, dan baris `Ringkasan;…` di kepala CSV — jadi laporan bisa dikirim ke orang
+yang tidak terbiasa membaca pembukuan tanpa perlu dijelaskan lebih dulu.
+
+Tiga berkas itu digambar dari **satu** dokumen (`LaporanDocument`): judul, ruang kerja, toko, periode,
+catatan, lalu daftar bagian berisi kepala kolom, baris, dan baris jumlah — **plus daftar grafik** yang
+angkanya sama dengan tabelnya. Angka-angkanya datang dari hasil
+aturan murni yang **sudah** dipakai halaman (ringkasan harian, pajak & pungutan F&B per bulan, analitik
+lanjutan, lintas cabang), jadi berkas dan layar tidak bisa berbeda diam-diam. Selnya membawa **nilainya**,
+bukan teksnya: sel uang menyimpan rupiah bulat dan sel angka menyimpan angkanya, sehingga angka di Excel &
+CSV tetap angka (bisa dijumlahkan, diurutkan, dipivot) — sedangkan format `Rp1.234.567` hanya dipakai di PDF
+yang memang untuk dibaca manusia.
+
+Bedanya ketiga berkas:
+
+- **PDF** — A4 tegak, banyak halaman, angka rata kanan, **tampilannya mengikuti halaman Laporan**: tiap
+  bagian digambar sebagai **kartu putih bersudut bulat** dengan pita warna di tepi atasnya, kotak ikon kecil
+  bernada bagiannya, label bernomor (“BAGIAN 3 · DARI MANA UANGNYA MASUK”), judul, keterangan, dan daftar
+  isi bernomor di halaman pertama — jadi berkas yang diunduh tidak lagi terlihat seperti keluaran lain
+  aplikasi. Tabelnya berwarna: kepala kolomnya pita nada tua berhuruf putih, baris isinya berpita sangat
+  tipis berselang-seling, dan baris jumlahnya berpita aksen dengan garis tebal di atasnya — semuanya dari
+  **satu keluarga warna per bagian** (ringkasan hijau zamrud, metode bayar hijau kebiruan, pajak & pungutan
+  kuning madu, analitik biru nila/ungu, produk biru langit, lintas cabang merah muda) yang nilainya ditulis
+  sekali di `src/convex/lib/laporanWarna.ts` dan dipakai bersama berkas Excel. Angka utama dicetak sebagai
+  **petak berikon** (dua kolom) seperti kartu angka di layar. Warnanya ditulis dengan urutan operator PDF
+  yang benar (`r g b rg`, bukan `rg r g b`) supaya pembaca PDF sungguhan benar-benar mengecatnya, dan
+  semuanya digambar **tepat selebar tabelnya**. **Pita warna di tepi kartu mengikuti lengkung sudut kartunya**
+  (dipotong sebagai potongan tepi kartu, bukan kotak bersudut sendiri) — jadi tidak ada garis warna yang
+  menyembul keluar dari kartu — dan **kepala tabel tidak pernah tercetak dua kali** di puncak halaman
+  sambungan: pengulangannya menggantikan, bukan menambah. Aturan tata letaknya dijaga harness, bukan cuma diklaim:
+  tiap unit tahu kartu pemiliknya (kartu yang unitnya tidak bertanda tidak akan berangka), tinggi tiap unit
+  dihitung dari isinya sendiri, tidak ada huruf yang tertimpa bentuk atau **huruf lain** (kotak huruf
+  dihitung dari ukuran hurufnya: 0,25 em di bawah garis dasar sampai 0,75 em di atasnya), tidak ada tulisan
+  yang melewati tepi halaman, kontras huruf terhadap latar efektifnya (pita setengah tembus pandang ikut
+  ditumpuk) minimal 4,5:1, dan tiap bagian benar-benar memakai warnanya sendiri. Kepala kolom yang panjang
+  turun ke baris berikutnya sebanyak yang diperlukan dan **tidak pernah dipotong jadi “TRANSAKSI…”**: lebar
+  minimum kolom mengikuti kata terpanjang di kepalanya. Huruf di luar Latin-1 (tanda pisah panjang, tanda
+  kutip melengkung) diterjemahkan ke ASCII, bukan berubah jadi `?`. **Grafiknya batang vektor berwarna**
+  yang digambar di bawah tabel bagiannya: tetap tajam saat dicetak & difotokopi, angkanya ikut tercetak di
+  atas batang selama muat di kolomnya sendiri, dan tiap grafik menuliskan *jumlah titik batang & nilai
+  tertingginya* sebagai kalimat — jadi isinya tidak hilang di pembaca yang teksnya saja (pembaca layar,
+  penyalinan teks).
+- **Excel** — `.xlsx` **asli** (paket OOXML + arsip ZIP tanpa pemadatan, ditulis sendiri di
+  `src/convex/lib/laporanXlsx.ts`; bukan CSV yang diberi nama `.xls`, yang selalu memunculkan peringatan
+  format berkas). Satu lembar per bagian laporan — `Info berkas`, `Ringkasan periode`, `Omzet per metode
+  bayar`, `Pajak & pungutan F&B per bulan`, lima lembar analitik (termasuk `Tren omzet harian`), `Temuan`,
+  dua lembar lintas cabang — dengan rupiah berformat `#,##0`, desimal `0.00`, dan kepala kolom + baris jumlah
+  dicetak tebal. **Tabelnya berwarna juga, satu keluarga warna per bagian** (sumber yang sama dengan PDF):
+  tiap lembar dibuka baris judul berhuruf **putih tebal di atas pita nada tua bagiannya** (pitanya dilebarkan
+  sampai kolom terakhir tabelnya), kepala kolomnya pita nada tua berhuruf putih dengan bingkai tipis, baris
+  isinya berselang-seling pita sangat tipis, dan baris jumlahnya pita aksen bergaris tebal senada — gaya itu
+  disusun per **peran sel** (7 peran × 3 jenis angka × 8 keluarga warna = 168 format sel). Kepala kolomnya
+  **dibekukan** (`pane ySplit=2`) dan tabelnya bisa **disaring** (`autoFilter`, keterangan di bawah tabel
+  sengaja di luar rentangnya). Bagan Excel-nya juga ikut berwarna: tiap batangnya bernada menurut tingginya
+  (`laporanWarnaBatang`) dan judul bagannya senada bagiannya.
+  **Grafiknya bagan Excel asli**: tiap grafik dapat lembar datanya sendiri (`Grafik - …`)
+  dengan bagan di sebelahnya yang **menunjuk ke sel-sel itu** (`'Grafik - Omzet per jam'!$B$3:$B$25`), jadi
+  mengubah angkanya langsung menggerakkan batangnya — bukan gambar tempelan.
+- **CSV** — pemisah **titik koma** (koma sudah dipakai untuk desimal, jadi berkasnya langsung terbagi ke
+  kolom di Excel Indonesia), BOM UTF-8 (tanpa itu huruf beraksen jadi sampah di Windows), CRLF, dan kutip
+  ganda hanya untuk sel yang memuat pemisah/kutip/baris baru: nama produk seperti `Semen "Gresik" 40kg;
+khusus` tetap **satu** sel. Setiap bagian dibuka baris judulnya dan baris jumlahnya diberi label “Jumlah” —
+dan ringkasannya ikut sebagai baris `Ringkasan;…` di kepala berkas (format CSV tidak punya tempat untuk
+warna atau grafik).
+
+Grafik batang ikut untuk **omzet per metode bayar, tren omzet harian, omzet per jam, produk teratas, omzet
+tercatat per bulan, dan omzet per cabang**. Grafik yang datanya masih kosong **tidak** dipaksakan muncul
+(grafik rata tanpa batang hanya membuat berkasnya tampak lebih lengkap daripada isinya), sedangkan tabelnya
+tetap ada dengan kalimat “Belum ada data pada periode ini.”. CSV sengaja tetap **tabel saja** — format itu
+memang tidak punya tempat untuk grafik, dan grafiknya sudah ada di PDF & Excel dari angka yang sama.
+
+**Halaman Laporannya sendiri berwarna per bagian** — bukan hanya isi berkasnya. Tujuh bagiannya (ringkasan,
+angka utama, metode bayar, unduhan, pajak & pungutan, analitik, lintas cabang) masing-masing punya nadanya
+sendiri — emerald · sky · teal · indigo · amber · violet · rose — dan nada itu dipakai konsisten pada pita
+tepi kartu, kotak ikon, label bagian, kepala kolom tabel, baris selang-seling, baris jumlah, sampai pil di
+**peta bagian** di kepala halaman (tujuh pil yang melompat ke bagiannya). Empat angka utama berikon, batang
+omzet per metode bayar & per kategori memakai **satu warna per baris**, dan temuan dibedakan kuning (perlu
+ditindak) / hijau (kabar baik) / biru (keterangan). Warnanya dijaga terukur, bukan hanya terpasang: pita
+kepala kolom memakai warna **solid tingkat 700** karena tulisan putih di atas nada 500/600 diukur hanya
+3,19:1, dan `verify-laporan-browser.mjs` memastikan tulisan kepala kolom & judul tiap bagian tetap ≥ 4,5:1
+serta pil **peta bagian** benar-benar memindahkan pandangan ke bagiannya (`main` ikut bergulir, bukan cuma
+hash di URL yang berubah).
+
+Yang tidak dimuat paket atau peran tidak dihilangkan diam-diam: kepala berkas menyebutkan bahwa analitik
+lanjutan atau laporan lintas cabang tidak disertakan, bagian yang datanya belum ada tetap muncul dengan
+kalimat “Belum ada data pada periode ini.”, dan kartunya menyebut bagian apa saja yang ikut sebelum tombol
+ditekan. Isinya mengikuti apa yang tampil di halaman: ringkasan **hari ini**, analitik **30 hari terakhir**
+(sesuai pemilih periode), pajak & pungutan **12 bulan terakhir**, dan lintas cabang **30 hari terakhir** —
+bukan ekspor baris penjualan mentah.
+
+```bash
+bun scripts/verify-laporan.mjs             # 263/263: tiga bagian enterprise baru (proyeksi, ukuran keranjang, pasangan produk) diperiksa sebagai **angka & keterangan** di model dokumen, **judulnya benar-benar tercetak** di aliran isi PDF, dan **lembar Excel-nya** benar-benar dibuat; plus seluruh cek lama: CSV dibaca ulang (kutip & pemisah), arsip .xlsx dibongkar ulang dari byte-nya (CRC, header lokal, metode pemadatan, nama lembar, sel angka, escape XML, gaya per peran sel per **keluarga warna bagian** + warna kepala kolom tiap bagian dihitung ulang dari `laporanWarna.ts` + cacah bagian gaya (`fonts`/`fills`/`borders`/`cellXfs`) cocok dengan isinya + kepala dibekukan + autoFilter, **rantai bagan** lembar → gambar → bagan + rujukan selnya), grafik (titik & bagiannya, label sumbu dijarangkan, grafik kosong tidak dipaksakan), PDF (offset xref, /Length, /Count, /MediaBox A4, angka ber-pemisah ribuan, paginasi 120 baris, dan **pembaca aliran isi halaman**: isian & garis dibaca sebagai bentuk beserta **kepekatannya** — kartu putih bersudut bulat di tiap halaman, tiap unit bertanda kartu, kepala kolom tidak terpotong, pita per peran baris selebar tabelnya, **pita tepi tidak keluar dari lengkung kotaknya** (jalur tiap pita ditelusuri titik demi titik lalu diuji di dalam jalur kotaknya), **kepala tabel hanya sekali per halaman** saat tabelnya menyambung, batang bagan vektor bernada, tidak ada huruf tertimpa bentuk ataupun **huruf lain** dengan kotak huruf sebenarnya (0,25–0,75 em), tidak ada tulisan keluar tepi halaman, kontras huruf ≥ 4,5:1 di atas latar efektif yang ditumpuk, dan **warna per bagian benar-benar berbeda & tergambar di aliran isi**), ringkasan bahasa awam (diturunkan dari masukan yang sama, ikut ke CSV/Excel/PDF), nama berkas (murni)
+PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-laporan-browser.mjs   # 38/38: tiga tombol ditekan di Chromium sungguhan — berkasnya benar-benar tersimpan di disk, namanya laporan-<toko>-<waktu>.<ext>, tanda awal/akhir sesuai; **warna tabelnya diukur dari `getComputedStyle`** (pita kepala kolom, baris selang-seling, pita baris jumlah, jarak dalam sel) + kartu ringkasan; **tulisan kepala kolom & judul tiap bagian harus terbaca di atas latarnya (kontras ≥ 4,5:1**, latar efektif ditelusuri sampai akar) + **pil peta bagian yang benar-benar menggulir ke bagiannya**; **berkas PDF yang benar-benar tersimpan dibaca ulang**: kotak huruf tiap baris teks (dari operator `Tf`-nya) tidak boleh saling menimpa di halaman yang sama; **daftar unduhan** memuat tiga baris dengan jenis, nama, ukuran & tanggalnya, **“Unduh ulang” yang benar-benar mengunduh lagi**, dan setelah halaman **dimuat ulang** daftarnya tetap ada serta tombol **Unduh ulang** baris lamanya benar-benar menyusun berkas sah
+bun scripts/verify-render.mjs              # 929/929: kartu unduhan + ketiga tombol diklik di DOM tiruan; berkas yang diserahkan ke peramban diperiksa jenis & isinya (PDF: `%PDF-`, rangka kartu putih `1 1 1 rg`, judul bagan tercetak, ≥ 6 warna pita, ≥ 40 bentuk terisi; Excel: PK\x03\x04 + `xl/charts/chart1.xml`; CSV: BOM + “Metode bayar”), plus baris daftar unduhan (jenis/nama/ukuran/tanggal, urut terbaru)
+PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-mobile-overflow.mjs   # 181/181: kartu unduhan & daftar riwayatnya tidak terpotong di lebar 320–414 px
+```
+
+Batas yang jujur: berkas `.xlsx` hasil unduhan **sudah** diperiksa alat di luar repo
+(`unzip -t` → “No errors detected”, lalu `zipfile` + `xml.etree.ElementTree` Python membaca bagian-bagiannya —
+termasuk **`xl/charts/chartN.xml`**: jenis bagan `col`, `ptCount` yang cocok, rumus rujukan sel lembar datanya,
+dan gambar tempelnya — semuanya XML yang sah), tetapi **belum pernah dibuka di Excel/Windows, LibreOffice,
+maupun pembaca PDF sungguhan** — yang terbukti untuk PDF adalah strukturnya (offset xref, `/Length`,
+`/Count`, `/MediaBox`), batangnya yang digambar di aliran isinya, dan tata letaknya yang diukur (lebar
+tiap pita, urutan menggambar, tinggi unit terhadap isinya, **jalur pita tepi di dalam jalur lengkung
+kotaknya**, tidak ada huruf tertimpa bentuk maupun huruf
+lain, kontras ≥ 4,5:1, dan koordinat tiap teks masih di dalam tepi halaman). “Enak dilihat menurut mata manusia” **belum** diperiksa
+mata; yang sudah diperiksa sebagai gantinya: warna tabel **di halaman Laporan** diukur dari `getComputedStyle`
+di Chromium (pita kepala kolom, baris selang-seling, pita baris jumlah, jarak dalam sel).
+Sekali waktu berkas PDF yang diunduh juga **dirender ulang dengan `pdf.js`** (dipasang di `/tmp/pw`, mandiri,
+bukan perintah rutin repo) untuk mengukur tepi pita terhadap tepi lengkung kartunya dari piksel — hasilnya
+tercatat di `worklog.md`; perintah rutin di atas tetap memeriksa **geometri jalur** di aliran isi halaman,
+bukan piksel.
+
 ## Mengisi stok & panduan operasional
 
 Dua kemampuan yang paling dicari saat memulai - membuat produk pertama dan mengisi stoknya - ada di
@@ -29,13 +199,14 @@ Dua jalur itu melengkapi jalur ketiga yang sudah ada: **penerimaan barang (GRN)*
 Pembelian (`purchase.receive`), tempat stok masuk dari supplier ke lokasi yang dipilih. Ringkasan
 ketiganya, plus langkah lengkap dari masuk sampai menjual, ada di halaman **Panduan**
 (`/app/panduan`, izin `report.view`) dan di berkas PDF yang bisa diunduh dari halaman itu:
-`public/panduan/panduan-mesinpos.pdf` (18 bagian, 12 gambar ilustrasi vektor, 33 halaman — termasuk
+`public/panduan/panduan-mesinpos.pdf` (19 bagian, 12 gambar ilustrasi vektor, 35 halaman — termasuk
 panduan pembelian mendalam, panduan opname mendalam, setelan PPN, printer & kertas struk beserta
-cetak langsung ESC/POS-nya, dan **kirim struk ke WhatsApp pembeli** sebagai bagian 18).
+cetak langsung ESC/POS-nya, **kirim struk ke WhatsApp pembeli** sebagai bagian 18, dan **jam
+operasional & pemberitahuan ke pemilik toko** sebagai bagian 19).
 
 ```bash
 bun run panduan:pdf                # bangun ulang PDF panduan (scripts/gen-panduan-pdf.mjs, pdfkit)
-bun scripts/verify-panduan.mjs     # 14/14: halaman, footer, daftar isi (18 bagian), langkah kunci (43 → 49 frasa, termasuk 6 frasa bagian 18), batas gambar (1–12), tautan halaman, plus panduan singkat kirim struk ke WhatsApp pembeli di sumber halamannya
+bun scripts/verify-panduan.mjs     # 14/14: halaman, footer, daftar isi (19 bagian), langkah kunci (43 → 62 frasa, termasuk izin `shift.manage` di bagian 10, izin `kds.manage` di tabel bagian 13, 6 frasa bagian 18, dan 7 frasa bagian 19), batas gambar (1–12), tautan halaman, plus panduan singkat kirim struk ke WhatsApp pembeli di sumber halamannya
 ```
 
 Selain berkas PDF-nya, halaman **Panduan** memuat **panduan singkat kirim struk ke WhatsApp pembeli**
@@ -90,8 +261,8 @@ store, backend, harness).
 
 ```bash
 bun scripts/verify-product-sku.mjs            # 39/39: format, kode kategori dari nama, nomor urut, recode saat kategori berganti (murni)
-bun scripts/verify-render.mjs                 # 738/738: tombol Buat otomatis, simpan dengan kolom SKU kosong & SKU ikut kategori (form + kartu edit) diklik di DOM tiruan
-VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 814/814: SKU otomatis & pindah kategori di server — counter naik, bentrok dilewati, SKU manual utuh
+bun scripts/verify-render.mjs                 # 832/832: tombol Buat otomatis, simpan dengan kolom SKU kosong & SKU ikut kategori (form + kartu edit) diklik di DOM tiruan
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 837/837: SKU otomatis & pindah kategori di server — counter naik, bentrok dilewati, SKU manual utuh
 ```
 
 ## Kategori produk: menambah, mengubah, menonaktifkan, menghapus (`category.manage`)
@@ -148,8 +319,8 @@ pemilih kategori di form produk dan tab POS dipakai semua peran yang bekerja den
 ```bash
 bun scripts/verify-categories.mjs              # 35/35: nama terlarang & kembar, kode SKU, kategori nonaktif, tab POS, dampak hapus (murni)
 bun scripts/verify-authz.mjs                    # 92/92: izin kategori ada di pemilik/manajer, bukan gudang/kasir/keuangan
-bun scripts/verify-render.mjs                   # 738/738: tambah/ubah/nonaktifkan/hapus kategori benar-benar diklik di DOM tiruan (+ tab POS & gerbang izin staf gudang)
-VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 814/814: CRUD kategori di server — izin ditolak untuk kasir/gudang, kategori nonaktif ditolak produk baru, hapus melepas produk tanpa mengubah SKU
+bun scripts/verify-render.mjs                   # 832/832: tambah/ubah/nonaktifkan/hapus kategori benar-benar diklik di DOM tiruan (+ tab POS & gerbang izin staf gudang)
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 837/837: CRUD kategori di server — izin ditolak untuk kasir/gudang, kategori nonaktif ditolak produk baru, hapus melepas produk tanpa mengubah SKU
 ```
 
 ## Produk tersimpan: ubah, aktif/nonaktifkan, hapus (`product.manage`)
@@ -189,8 +360,8 @@ store, backend, harness).
 
 ```bash
 bun scripts/verify-product-edit.mjs           # 36/36: batas nama, bentuk & kembarnya SKU, harga beli, kalimat aktif/nonaktif, pagar hapus (murni)
-bun scripts/verify-render.mjs                 # 738/738: ubah nama/SKU/harga beli, nonaktifkan/aktifkan, dialog hapus berpagar, dan gambar produk di kartu kasir & keranjang diklik di DOM tiruan
-VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 814/814: products.update/setActive/deletionCheck/remove di server — izin, SKU kembar, pagar hapus, produk nonaktif ditolak kasir
+bun scripts/verify-render.mjs                 # 832/832: ubah nama/SKU/harga beli, nonaktifkan/aktifkan, dialog hapus berpagar, dan gambar produk di kartu kasir & keranjang diklik di DOM tiruan
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 837/837: products.update/setActive/deletionCheck/remove di server — izin, SKU kembar, pagar hapus, produk nonaktif ditolak kasir
 ```
 
 ## Gambar produk (maksimal 8 per produk)
@@ -234,8 +405,8 @@ berlaku sama di kedua mode karena keduanya memakai `src/convex/lib/productImages
 ```bash
 bun scripts/verify-product-images.mjs          # 25/25: batas 8, tipe & ukuran berkas, label slot (murni)
 bun scripts/verify-product-sku.mjs             # 39/39: format SKU otomatis PBB-<KATEGORI>-<nomor urut> + recode saat kategori berganti (murni)
-bun scripts/verify-render.mjs                  # 738/738: unggah/hapus gambar, SKU otomatis & SKU ikut kategori diklik di DOM tiruan (kartu Produk baru & Atur harga), plus gambar produk di kartu kasir & baris keranjang
-VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 814/814: unggah sungguhan ke penyimpanan, batas 8 di server, berkas terhapus (404), SKU otomatis & pindah kategorinya
+bun scripts/verify-render.mjs                  # 832/832: unggah/hapus gambar, SKU otomatis & SKU ikut kategori diklik di DOM tiruan (kartu Produk baru & Atur harga), plus gambar produk di kartu kasir & baris keranjang
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 837/837: unggah sungguhan ke penyimpanan, batas 8 di server, berkas terhapus (404), SKU otomatis & pindah kategorinya
 ```
 
 ## PPN workspace: tarif bisa diatur & bisa dimatikan (`billing.manage`)
@@ -274,8 +445,8 @@ daripada membiarkannya seperti sebelumnya. Aturannya murni dan dipakai bersama d
 
 ```bash
 bun scripts/verify-tax.mjs                     # 71/71: tarif besar/kecil, pembacaan “11,5”, tenant lama tetap aktif, “aktif 0%” ditolak, kalimat & contoh perhitungan (murni)
-bun scripts/verify-render.mjs                  # 738/738: setelan PPN diklik di DOM tiruan — ubah tarif, aktif 0% ditolak, matikan PPN, lalu baris PPN di kasir & tagihan langganan mengikuti; 12% menghasilkan total 31.360 untuk belanja 28.000
-bun scripts/verify-backend.mjs                 # 814/814: tenants.updateTax di server — izin billing.manage, struk & tagihan langganan memakai tarif setelan, penolakan tidak menyentuh setelan tersimpan
+bun scripts/verify-render.mjs                  # 832/832: setelan PPN diklik di DOM tiruan — ubah tarif, aktif 0% ditolak, matikan PPN, lalu baris PPN di kasir & tagihan langganan mengikuti; 12% menghasilkan total 31.360 untuk belanja 28.000
+bun scripts/verify-backend.mjs                 # 837/837: tenants.updateTax di server — izin billing.manage, struk & tagihan langganan memakai tarif setelan, penolakan tidak menyentuh setelan tersimpan
 ```
 
 ## Pajak & pungutan F&B: PBJT, biaya layanan, dan kewajiban pusat (`billing.manage`)
@@ -341,8 +512,8 @@ harness).
 
 ```bash
 bun scripts/verify-fnb-tax.mjs                 # 126/126: PBJT menggantikan PPN, batas 10%, biaya layanan bukan pajak, bagian bebas Rp 500 juta & batas waktu 7/4/3 tahun, PPh 4(2), ringkasan setoran, laporan pajak per bulan (omzet/PBJT/PPN/biaya layanan, void dilewati, bulan nol, bulan berjalan)
-bun scripts/verify-render.mjs                  # 738/738: PBJT 10% + biaya layanan 7% diklik di DOM tiruan — tersimpan di workspace, struk kasir 28.000 → 32.760, “aktif 0%” ditolak, pengecualian usaha mikro & peringatan batas omzet, plus kartu laporan pajak F&B 12 bulan di halaman Laporan
-bun scripts/verify-backend.mjs                 # 814/814: tenants.updateFnbTax di server — izin billing.manage, struk mencatat taxKind/serviceCharge, PBJT menggantikan PPN, pengecualian mikro, dan reports.fnbTaxMonths dari penjualan tersimpan (void hilang dari laporan, bulan sebelumnya nol)
+bun scripts/verify-render.mjs                  # 832/832: PBJT 10% + biaya layanan 7% diklik di DOM tiruan — tersimpan di workspace, struk kasir 28.000 → 32.760, “aktif 0%” ditolak, pengecualian usaha mikro & peringatan batas omzet, plus kartu laporan pajak F&B 12 bulan di halaman Laporan
+bun scripts/verify-backend.mjs                 # 837/837: tenants.updateFnbTax di server — izin billing.manage, struk mencatat taxKind/serviceCharge, PBJT menggantikan PPN, pengecualian mikro, dan reports.fnbTaxMonths dari penjualan tersimpan (void hilang dari laporan, bulan sebelumnya nol)
 ```
 
 Panduan PDF (`/app/panduan`) masih memuat bagian PPN yang lama; bagian pajak F&B ada di README ini dan
@@ -512,8 +683,8 @@ bun scripts/verify-escpos.mjs                  # 58/58: urutan perintah (ESC @, 
 #   mencetak lewat dialog peramban; pemilih perangkat yang ditutup dijelaskan apa adanya & tidak
 #   diam-diam beralih ke dialog cetak
 bun scripts/verify-struk.mjs                   # 111/111: katalog tiga printer (cara kerja/kelebihan/kekurangan/cocok untuk/contoh produk), kolom per lebar kertas, bawaan dibaca dari tenant lama, rangkap ditolak di thermal/portable, catatan kaki 2×40, baris pembeli (nama member / “Cash” saat kosong atau spasi, dipotong selebar kertas), baris kasir (dilewati kalau namanya kosong), logo (kotak tetap 110 px × 110 px di semua printer & kertas, masih muat di 58 mm, hitam putih lewat saringan grayscale, kosong/spasi = tanpa logo), tata letak baris (bungkus nama, nominal rata kanan, TOTAL, penanda ASLI/TEMBUSAN), kertas otomatis (yang tak didukung menyesuaikan ke **kertas terdekat**: 76 mm → 80 mm, 241 mm → 80 mm, dot matrix 80 mm → 76 mm, portable 80 mm → 58 mm; lebar tak terbaca jatuh ke kertas pertama), aturan cetak `receiptPrintCss` yang menulis ukuran kertasnya sendiri per lebar (80 mm margin 4 mm, portable 58 mm margin 2 mm, dot matrix 241 mm dua lembar) beserta pembulatan tinggi notanya, dan saran setelan dari modul workspace (`suggestReceiptSetting`: grosir tanpa F&B → dot matrix 76 mm dua rangkap beralasan tembusan, F&B → thermal 80 mm (kafe yang sekaligus grosir ikut jalur thermal, bukan jalur faktur), ritel/workspace kosong → thermal 80 mm satu lembar, catatan kaki bawaan tetap, plus pembanding pilihan mesin yang sengaja mengabaikan catatan kaki)
-bun scripts/verify-render.mjs                  # 738/738: kartu struk diklik di DOM tiruan — unggah/hapus logo (data URL di sesi, kotak 110 px × 110 px hitam putih di pratinjau & di setiap lembar struk kasir, tidak ikut melebar saat kertasnya 241 mm), logo yang sama sebagai penanda workspace di sidebar (ikon bawaan sebelum ada logo) & kartu identitas di halaman Panduan, pindah printer & kertas (pratinjau 48/40/80 kolom), rangkap 2 menampilkan lembar TEMBUSAN, catatan kaki tersimpan, thermal memangkas rangkap, kartu saran setelan otomatis (toko grosir disarankan dot matrix 76 mm dua rangkap — lencana dasarnya menyebut modulnya, alasannya terbaca, dan menekan “Pakai saran ini” memindahkan pilihan mesin tanpa menghapus catatan kaki yang sedang diketik, lalu tombolnya membaca “Sudah sesuai”), plus struk yang dicetak kasir memakai setelan yang sama, termasuk baris pembeli “Member : Cash” yang berganti jadi nama member begitu kasir memilihnya dan baris kasir “Kasir : Uji Struk”
-bun scripts/verify-backend.mjs                 # 814/814: tenants.updateReceipt & logo toko di server — izin billing.manage (kasir ditolak), rangkap ditolak di thermal, lebar tak didukung ditolak, catatan kaki >2 baris ditolak, berkas bukan gambar & >1 MB ditolak tanpa meninggalkan logo setengah jadi, logo sah tersimpan sebagai id berkas & dibaca kasir, ganti logo menunjuk berkas baru, hapus logo mengosongkan kolomnya
+bun scripts/verify-render.mjs                  # 832/832: kartu struk diklik di DOM tiruan — unggah/hapus logo (data URL di sesi, kotak 110 px × 110 px hitam putih di pratinjau & di setiap lembar struk kasir, tidak ikut melebar saat kertasnya 241 mm), logo yang sama sebagai penanda workspace di sidebar (ikon bawaan sebelum ada logo) & kartu identitas di halaman Panduan, pindah printer & kertas (pratinjau 48/40/80 kolom), rangkap 2 menampilkan lembar TEMBUSAN, catatan kaki tersimpan, thermal memangkas rangkap, kartu saran setelan otomatis (toko grosir disarankan dot matrix 76 mm dua rangkap — lencana dasarnya menyebut modulnya, alasannya terbaca, dan menekan “Pakai saran ini” memindahkan pilihan mesin tanpa menghapus catatan kaki yang sedang diketik, lalu tombolnya membaca “Sudah sesuai”), plus struk yang dicetak kasir memakai setelan yang sama, termasuk baris pembeli “Member : Cash” yang berganti jadi nama member begitu kasir memilihnya dan baris kasir “Kasir : Uji Struk”
+bun scripts/verify-backend.mjs                 # 837/837: tenants.updateReceipt & logo toko di server — izin billing.manage (kasir ditolak), rangkap ditolak di thermal, lebar tak didukung ditolak, catatan kaki >2 baris ditolak, berkas bukan gambar & >1 MB ditolak tanpa meninggalkan logo setengah jadi, logo sah tersimpan sebagai id berkas & dibaca kasir, ganti logo menunjuk berkas baru, hapus logo mengosongkan kolomnya
 ```
 
 Di **browser sungguhan** (Chromium/Playwright, `PLAYWRIGHT_DIR` di luar repo) lebar pratinjau, logo, & aturan
@@ -521,10 +692,10 @@ cetaknya diukur dari keadaan yang dihitung peramban sendiri:
 
 ```bash
 # PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-struk-browser.mjs http://localhost:5173
-#   93/93: pratinjau benar-benar 80 mm & 241 mm di layar, logo diunggah lewat input berkas (PNG dari
+#   100/100: pratinjau benar-benar 80 mm & 241 mm di layar, logo diunggah lewat input berkas (PNG dari
 #   canvas peramban, 96 px terbaca) lalu tampil 110 px × 110 px hitam putih di atas nama usaha (tetap
 #   110 px saat kertasnya jadi 241 mm) dan bertahan setelah muat ulang, logo yang sama jadi penanda
-#   workspace di sidebar kiri & tampil di halaman Panduan (badge 18 bagian · 12 gambar, plus kartu
+#   workspace di sidebar kiri & tampil di halaman Panduan (badge 19 bagian · 12 gambar, plus kartu
 #   panduan singkat kirim struk ke WhatsApp pembeli yang benar-benar terlihat beserta kedua tautannya), kartu saran
 #   setelan otomatis tampil di Chromium (lencana “Modul F&B” & mesin yang disarankan terbaca, catatan
 #   kertas menyebut lebar yang menyesuaikan sendiri saat printer diganti) dan menekan “Pakai saran ini”
@@ -547,7 +718,14 @@ cetaknya diukur dari keadaan yang dihitung peramban sendiri:
 #   PDF yang keluar saat halaman tergulir **sama persis** (byte & halaman) dengan yang keluar saat
 #   halaman belum tergulir; kertas A4 bawaan jasa cetak ponsel juga tetap satu halaman — dan berkas PDF
 #   yang benar-benar terunduh memuat logonya: objek gambar /DeviceGray 96 × 48 (tidak diperbesar, isinya
-#   dicocokkan piksel per piksel dengan logo yang diunggah), satu salinan untuk lembar rangkap (93/93)
+#   dicocokkan piksel per piksel dengan logo yang diunggah), satu salinan untuk lembar rangkap.
+#   Di ponsel, **dialog struknya sendiri** juga diperiksa pada layar pendek (360×720): kartunya dibatasi
+#   setinggi layar, isinya benar-benar bisa digulir, kontrol terbawahnya terjangkau setelah digulir sampai
+#   bawah, dan baris judul + tombol tutupnya tetap terlihat menempel di atas — sebelum diperbaiki isinya
+#   963 px (239 px di luar layar) dan tombol terakhirnya tidak terjangkau sama sekali. Alur dapurnya juga
+#   diperiksa: dialog struk yang baru terbuka menyebut pesanannya sudah dikirim ke dapur, dan notanya
+#   benar-benar menunggu di halaman **Dapur & Meja** — antreannya memuat pesanannya dan tiketnya
+#   menandai sendiri penjualannya lunas beserta cara bayarnya (100/100)
 ```
 
 ## Pembayaran tunai: tombol pecahan uang Rp 10.000 … Rp 500.000
@@ -570,7 +748,7 @@ kolom `Uang diterima`: **Rp 10.000, Rp 20.000, Rp 50.000, Rp 100.000, dan Rp 500
   supaya pembaca layar — dan harness peramban — bisa menyebutnya.
 
 ```bash
-bun scripts/verify-render.mjs                  # 738/738: lima tombol pecahan diklik di DOM tiruan — Rp 10.000 (belum cukup: kembalian Rp 0 & tombol simpan terkunci) → Rp 100.000 (cukup: kembalian, TOTAL/Bayar/Kembali di struk sementara, tombol simpan terbuka), kolom tetap bisa diketik sendiri, dan penjualan Tunai tercatat sebesar totalnya
+bun scripts/verify-render.mjs                  # 832/832: lima tombol pecahan diklik di DOM tiruan — Rp 10.000 (belum cukup: kembalian Rp 0 & tombol simpan terkunci) → Rp 100.000 (cukup: kembalian, TOTAL/Bayar/Kembali di struk sementara, tombol simpan terbuka), kolom tetap bisa diketik sendiri, dan penjualan Tunai tercatat sebesar totalnya
 # PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-struk-browser.mjs http://localhost:5173   # mode data apa pun
 #   → tombol pecahan diukur di Chromium sungguhan: kelima labelnya dirender Rp 10.000 … Rp 500.000 dan
 #     semuanya muat di dalam dialog (tidak meluber di panel 380 px), menekan Rp 100.000 mengisi kolom
@@ -799,10 +977,10 @@ bun scripts/verify-struk-pdf.mjs               # 59/59: berkas PDF diperiksa byt
   dengan `Content-Type: image/png` dan byte PNG-nya utuh di dalam badan multipart, pesan gambarnya berjenis
   `image` dengan `media_id` + `caption` dan tanpa kolom `filename` yang tidak dimiliki WhatsApp (badan pesan
   dokumen lama tetap diuji sebagai aturan murni yang masih dipakai berkas lain), plus batas unggah gambar 5 MB
-bun scripts/verify-render.mjs                  # 738/738: gerbang alur struknya diklik di DOM tiruan — keranjang yang belum dibayar belum menawarkan Cetak/Struk & kirim sama sekali, pembayaran lunas memunculkan keduanya beserta catatan nomor & total notanya, dan keranjang berikutnya tidak menggantikan struk yang dicetak; juga pembayaran lunas membuka dialog struk (bukan dialog cetak) — tiga pilihannya ada, cetakan masih 0 sampai Cetak ditekan,  nomor nota penjualan yang baru lunas disebut, Unduh PDF melaporkan nama berkas + ukurannya, tombol daftar PDF membuka berkas yang sudah dibuat (tautan `blob:`) lalu menutupnya kembali, **struk tanpa member (pembeli umum) diberi kolom nomor pembeli** yang menolak nomor belum lengkap, lalu nomor yang sah berhenti di ketiadaan kanvas (bukan ditolak soal penerimanya), member tanpa nomor WA diperingatkan lalu pengirimannya ditolak beserta sebabnya tetapi juga diberi kolom nomor, member yang punya nomor pun berhenti di titik yang sama (sebabnya disebut, bukan diklaim terkirim), dan menutup dialognya tidak menghapus notanya; plus **satu jalur bagikan**: dialognya menawarkan “Bagikan gambar struk” dan **tidak** lagi menawarkan tombol kedua, tanpa kanvas jawabannya mengarahkan ke Unduh PDF, dan walaupun `navigator.share`/`canShare` dipasang **tidak ada berkas kosong yang diserahkan** beserta tidak ada klaim “diserahkan” — gambar berlogonya sendiri diperiksa piksel per piksel di Chromium
+bun scripts/verify-render.mjs                  # 832/832: gerbang alur struknya diklik di DOM tiruan — keranjang yang belum dibayar belum menawarkan Cetak/Struk & kirim sama sekali, pembayaran lunas memunculkan keduanya beserta catatan nomor & total notanya, dan keranjang berikutnya tidak menggantikan struk yang dicetak; juga pembayaran lunas membuka dialog struk (bukan dialog cetak) — tiga pilihannya ada, cetakan masih 0 sampai Cetak ditekan,  nomor nota penjualan yang baru lunas disebut, Unduh PDF melaporkan nama berkas + ukurannya, tombol daftar PDF membuka berkas yang sudah dibuat (tautan `blob:`) lalu menutupnya kembali, **struk tanpa member (pembeli umum) diberi kolom nomor pembeli** yang menolak nomor belum lengkap, lalu nomor yang sah berhenti di ketiadaan kanvas (bukan ditolak soal penerimanya), member tanpa nomor WA diperingatkan lalu pengirimannya ditolak beserta sebabnya tetapi juga diberi kolom nomor, member yang punya nomor pun berhenti di titik yang sama (sebabnya disebut, bukan diklaim terkirim), dan menutup dialognya tidak menghapus notanya; plus **satu jalur bagikan**: dialognya menawarkan “Bagikan gambar struk” dan **tidak** lagi menawarkan tombol kedua, tanpa kanvas jawabannya mengarahkan ke Unduh PDF, dan walaupun `navigator.share`/`canShare` dipasang **tidak ada berkas kosong yang diserahkan** beserta tidak ada klaim “diserahkan” — gambar berlogonya sendiri diperiksa piksel per piksel di Chromium
 bunx convex env list --names-only            # kunci apa saja yang ada di deployment (tanpa nilainya)
 bunx convex run receiptWaData:channelStatus  # baca-saja: keadaan kanal WhatsApp di deployment — configured + nama kunci yang belum diisi
-VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 814/814: halaman data kirim struk di server — struk pembeli umum (tanpa `memberId`) diterima, nomornya boleh tidak ada/ belum sah dan ditolak beralasan dengan petunjuk mengisi kolom nomor pembeli, nomor yang tersimpan di data member tetap menang walau kasir mengetik nomor lain, member tanpa nomor ditolak beserta namanya, dan orang di luar workspace tidak bisa mengirim struk (semuanya dengan **gambar 0 byte**, jadi tidak ada satu pun permintaan yang keluar ke WhatsApp)
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 837/837: halaman data kirim struk di server — struk pembeli umum (tanpa `memberId`) diterima, nomornya boleh tidak ada/ belum sah dan ditolak beralasan dengan petunjuk mengisi kolom nomor pembeli, nomor yang tersimpan di data member tetap menang walau kasir mengetik nomor lain, member tanpa nomor ditolak beserta namanya, dan orang di luar workspace tidak bisa mengirim struk (semuanya dengan **gambar 0 byte**, jadi tidak ada satu pun permintaan yang keluar ke WhatsApp)
 # PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-struk-browser.mjs http://localhost:5173   # mode data apa pun
 #   → di Chromium sungguhan: dialog struk terbuka setelah pembayaran tunai tanpa satu pun panggilan
 #     `window.print`, **Unduh PDF menghasilkan unduhan sungguhan** yang byte-nya dibaca kembali di sini
@@ -846,7 +1024,7 @@ Tabel “Transaksi terakhir (shift ini)” yang dulu selalu terbuka di bawah hal
   transaksi yang baru juga menyebut “15 item”, sehingga pembacaan longgar itu menangkap angka yang salah.
 
 ```bash
-bun scripts/verify-render.mjs                  # 738/738: tombolnya bersimbol jumlah transaksi & daftarnya belum terbuka, menekannya membuka lembar role=dialog berisi baris sebanyak angka di tombol, barisnya menyebut nota/jam/item/metode/total + “Total daftar ini”, dan Escape menutupnya kembali
+bun scripts/verify-render.mjs                  # 832/832: tombolnya bersimbol jumlah transaksi & daftarnya belum terbuka, menekannya membuka lembar role=dialog berisi baris sebanyak angka di tombol, barisnya menyebut nota/jam/item/metode/total + “Total daftar ini”, dan Escape menutupnya kembali
 # PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-pos-transaksi-browser.mjs http://localhost:5173   # mode data apa pun
 #   → di Chromium sungguhan posisinya direkam **setiap bingkai** mulai sebelum tombol diklik: bingkai pertama
 #     masih di bawah layar, lalu naik (≥ 5 posisi berbeda) sampai menempel di tepi bawah (bottom = tinggi
@@ -854,6 +1032,194 @@ bun scripts/verify-render.mjs                  # 738/738: tombolnya bersimbol ju
 #     menambah jumlahnya & muncul di puncak daftar (8 baris membuktikan batas enam baris tabel lama hilang),
 #     dan ketiga cara menutupnya bekerja — silang, Escape, dan sentuhan di latar (14/14)
 ```
+
+## Gerbang kasir: tanpa shift terbuka, kasir tidak bisa menjual
+
+Kas yang belum dibuka bukan sekadar catatan yang hilang: penjualan yang tercatat tanpa shift tidak punya
+pemilik kas — uang kembalian awalnya tidak diketahui, dan selisih kasnya tidak bisa dicocokkan ke orang
+maupun jam. Halaman Kasir (`/app/pos`) karena itu **terkunci sampai ada shift yang terbuka di perangkat
+itu**, dan yang dikunci adalah pekerjaan menjualnya:
+
+- **Yang mati**: kartu produk (tidak ada barang yang bisa masuk keranjang), pemilih meja, tombol
+  **Hold**, tombol **Lanjutkan** pada transaksi yang ditahan, dan tombol **Bayar** — termasuk ketiga jalur
+  pembayarannya (tunai/kartu, tagihan QRIS dari keranjang, dan pelunasan tagihan yang sudah terbit).
+  Penjagaannya ada di **fungsinya**, bukan hanya di tombolnya: shift yang ditutup dari tab lain ikut
+  menutup pembayaran yang sedang terbuka — keadaan `mesinpos.shifts.v1` dibaca ulang saat peristiwa
+  `storage` — jadi tidak ada penjualan yang lolos dari tab yang keadaannya sudah basi.
+- **Yang tetap hidup**: mencari produk, membuka daftar transaksi shift yang lalu, dan halaman lain.
+  Gerbangnya mengunci pekerjaan yang mencatat uang, bukan seluruh aplikasi.
+- **Notisinya satu kartu, beserta jalan keluarnya**: kartu merah di atas katalog
+  (`data-testid="pos-gerbang-shift"`, `role="alert"`) berjudul **“Kasir terkunci — shift (kas) belum
+  dibuka”**, memuat kalimat “Buka shift (kas) terlebih dahulu di halaman Shift & Kas …”, dan tombol
+  **“Buka shift sekarang”** yang menuju `/app/shift`. Di panel keranjang ada catatan ringkas dengan tautan
+  yang sama: di ponsel, banner di atas katalog mudah tergulir keluar layar, sedangkan tombol Bayar yang
+  mati selalu terlihat.
+- **Satu aturan, di `src/convex/lib/shift.ts`** (`posShiftGate`, dipakai halaman Kasir dan harness):
+  terbuka = ada shift berjalan yang waktu bukanya bisa dibaca. Shift dengan waktu buka rusak **ikut
+  mengunci** — shift yang jamnya tidak bisa dipertanggungjawabkan sama saja dengan kas yang belum dibuka.
+  Badge “Kas belum dibuka” tetap ditampilkan apa adanya, dan peringatan tutup shift tetap muncul hanya
+  saat waktunya.
+- **Saklar “Pengingat tutup shift” di halaman Pengaturan hanya mematikan pengingatnya, bukan gerbangnya.**
+  Toko yang tidak ingin diingatkan tetap harus membuka shift sebelum menjual — membuka shift itu satu
+  langkah (kas awal diisi sekali di halaman Shift & Kas), sedangkan pengingatnya urusan kenyamanan.
+  Karena itu gerbangnya **selalu aktif**: ia tidak ikut konstanta jam/ambang di setelan, dan tidak bisa
+  dimatikan dari halaman Pengaturan.
+- **Kas itu milik toko, bukan perangkat.** Shift disimpan sebagai baris tabel `shifts` (`pos.openShift`
+  / `pos.closeShift`) dan dibaca semua perangkat lewat query `pos.till`: shift yang masih berjalan +
+  riwayat Z-report terakhir. Query-nya hanya menuntut **keanggotaan**, bukan `shift.manage` — kasir yang
+  melayani pembeli justru tidak memegang izin kas, dan justru ia yang perlu tahu kasnya sudah dibuka.
+  Jadi kas yang dibuka pemilik di ponselnya langsung membuka gerbang di perangkat kasir mana pun; mode
+  demo memakai penyimpanan perangkat (`mesinpos.shifts.v1`) dengan bentuk data yang sama.
+- **Penjualan ditempelkan ke shift yang berjalan** (`shiftId` di `pos.createSale`), sehingga Z-report
+  menghitung penjualan shift itu — termasuk penjualan yang dikirim lewat antrean offline.
+- **Membuka shift langsung membuka halaman Kasir.** Menekan **Buka shift** di halaman Shift & Kas
+  menyimpan shiftnya **lalu memindahkan** pemakainya ke `/app/pos` — halaman Kasir memang sudah membaca
+  keadaan kas yang sama, tetapi hanya kalau orangnya pindah ke sana; itulah keluhan “sudah buka shift,
+  halaman kasirnya tidak terbuka”. Perpindahannya hanya untuk peran yang memegang `pos.sell` (Pemilik,
+  Manajer, Kasir): peran “kas saja” (`shift.manage` tanpa `pos.sell`) tetap di halaman Shift & Kas —
+  halaman yang memang haknya — dan di sana tertulis bahwa halaman Kasir butuh izin “Melakukan
+  penjualan”, jadi tidak ada yang dilempar ke rute yang tertutup untuknya.
+- **Harness ikut menyesuaikan perilakunya**: sesi uji yang menekan tombol kasir sekarang membuka shiftnya
+  lebih dulu (persis seperti kasir sungguhan), dan blok yang memang menguji gerbangnya menghapus atau
+  mengganti isi `mesinpos.shifts.v1` sendiri.
+
+```bash
+bun scripts/verify-shift.mjs                   # 78/78: kas tanpa shift mengunci dengan pesan “Buka shift (kas) terlebih dahulu” & tombol “Buka shift sekarang”, shift yang terbuka (walau dibuka kemarin) membukanya kembali, waktu buka dalam milidetik (kas toko dari `pos.till`) juga membukanya, waktu buka yang rusak/0 tetap terkunci, dan gerbang yang terbuka tidak meninggalkan kalimat sisa
+VITE_CONVEX_URL=https://mellow-narwhal-477.convex.cloud bun scripts/verify-backend.mjs   # 914/914 (7 cek kas toko): kasir tanpa izin `shift.manage` melihat kas yang dibuka pemilik lewat `pos.till` (kas belum masuk riwayat sebelum ditutup, `current` kembali `null` setelah ditutup, Z-report-nya masuk riwayat), kas kedua di toko yang sama ditolak walau aktornya manajer, pembaca di luar tenant ditolak, dan kasir tetap tidak bisa membuka kasnya sendiri
+bun scripts/verify-render.mjs                  # 936/936: kartu produk & Bayar benar-benar nonaktif dan keranjang tetap “0 item” walau kartunya ditekan, gerbangnya menautkan `/app/shift`, dan shift yang tersemai membuka gerbangnya kembali (produk masuk keranjang & Bayar hidup)
+# PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-mobile-overflow.mjs   # 169/169 (4 cek baru): gerbangnya utuh di 360 px — pesannya tidak terpotong, tombol “Buka shift sekarang” terjangkau, dan tidak ada isi yang terpotong di halaman yang terkunci
+bun scripts/verify-shift-pos.mjs               # 20/20: tombol Buka shift benar-benar memindahkan pemakainya ke halaman Kasir (halaman Kasir terbuka & tidak terkunci, produk masuk keranjang), halaman Kasir yang dibuka sendiri/dari tab lain membaca keadaan kas yang sama (peristiwa `storage`), menutup shift mengunci Kasir lagi, dan peran “kas saja” tetap di halaman Shift & Kas beserta alasannya
+# PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-pos-transaksi-browser.mjs   # 14/14: alur transaksi di Chromium sungguhan tetap jalan setelah harnessnya membuka shift lebih dulu
+```
+
+## Pengingat “jangan lupa tutup shift” di layar kasir
+
+Kas yang masih terbuka padahal hari sudah berakhir cuma ketahuan besok pagi — saat selisih uangnya
+sudah bercampur dengan penjualan hari berikutnya. Sekarang kasir diberi tahu **di layar tempat ia
+bekerja**, bukan hanya di halaman Shift & Kas yang harus ia buka sendiri.
+
+- **Badge di atas katalog kasir jujur.** Tulisan tetap “Shift terbuka · Kasir: Rani · buka 08:00”
+diganti keadaan kas yang sebenarnya (`store.till`, dari `shifts` di server; mode demo dari
+`mesinpos.shifts.v1`): kalau kas belum dibuka, yang tampil **“Kas belum dibuka”** dengan satu kalimat
+yang mengarahkan ke halaman Shift & Kas; kalau terbuka, yang tampil nama kasir yang sedang masuk + jam
+bukanya (`buka 08:00`, `buka kemarin 21:10`).
+- **Peringatan muncul sendiri** begitu salah satu ambangnya lewat, dan kalimatnya sama di halaman Kasir
+maupun halaman Shift & Kas (satu modul, `src/convex/lib/shift.ts`):
+  - **pukul 21:00** (bawaan; jam khas toko/kafe tutup) — pengingat ringan: uang fisik belum dicocokkan dan
+    Z-report hari itu belum tersimpan; shift yang masih wajar di siang hari **tidak** diganggu;
+  - **shift berjalan ≥ 14 jam** (bawaan) — naik ke peringatan keras, karena uang fisik belum dicocokkan seharian;
+  - **shift kemarin belum ditutup** — peringatan paling keras, jam bukanya disebut (`sejak kemarin 21:10`).
+- **Jam & ambangnya diatur pemilik toko**, bukan angka tetap di kode: kartu **Pengingat tutup shift** di
+halaman Pengaturan (`/app/settings`) menyimpan setelannya ke baris tenant (`tenants.shift`, mutasi
+`tenants.updateShift`, izin `billing.manage`) — jam pengingatnya bisa dipilih 0–23, ambang “shift terlalu
+lama” 1–24 jam, dan pengingatnya bisa **dimatikan** (kafe yang buka 24 jam). Nilai janggal ditolak dengan
+alasannya sebelum satu bidang pun tersimpan, dan lencana di kartunya menunjukkan setelan yang sedang
+berlaku (`22:00 · 8 jam`). Halaman Kasir & Shift & Kas membaca setelan yang sama, jadi pengingat yang
+dilihat kasir tidak pernah berbeda dari yang diatur pemilik toko.
+- **Ada jalan menutupnya dari peringatan itu**: banner kasir menautkan ke `/app/shift` (“Tutup shift
+sekarang →”), dan halaman Shift & Kas menampilkan kartu pengingat yang sama di atas rekapnya.
+- **Bukan notifikasi push dan bukan penutupan otomatis.** Peringatannya tampil di dalam aplikasi, jadi
+ia muncul saat kasir membuka halaman Kasir/Shift & Kas — shift tetap ditutup oleh manusia, dan
+penutupan shift tetap manual. Aturan ambangnya diuji murni, terpisah dari tampilan.
+- **Pelajaran yang ikut diperbaiki: warna “bahaya” ternyata tidak pernah ada di palet.** Kelas
+`text-destructive` / `bg-destructive/10` / `border-destructive/40` dipakai di 24 berkas (182 tempat) — teks
+galat, batas peringatan, sampai judul dialog Hapus produk — tetapi `tailwind.config.js` tidak punya token `destructive` dan
+`src/index.css` tidak punya `--destructive`, jadi Tailwind tidak pernah membuat kelasnya dan setiap
+peringatan galat tampil **seperti teks biasa**. Tokennya ditambahkan di kedua tema (terang `0 74% 42%`,
+gelap `0 72% 60%`), dan peringatan paling keras di banner kasir kini benar-benar merah — diukur di
+Chromium: latar `rgba(186, 28, 28, 0.1)`, teks `rgb(186, 28, 28)`, tanpa galat konsol, tanpa luapan
+mendatar di 1280×800.
+
+```bash
+bun scripts/verify-shift.mjs                   # 42/42 (angka pengingat + 4 cek gerbang di bagian sebelumnya): data shift yang rusak/tanpa waktu buka dibuang (bukan “buka NaN”), label jam & lama shift, ambang pengingatnya (20:59 tenang · 21:00 sudah diingatkan · shift 14 jam & shift kemarin naik ke level keras · jam perangkat mundur tidak menuduh kasir), dan setelannya: bawaan tetap aktif · 21:00 · 14 jam, bidang rusak kembali ke bawaan, nilai di luar batas ditolak dengan alasan (jam 24, ambang 0, setengah jam), serta pengingat yang benar-benar mengikuti setelan (jam 23:00, ambang 2 jam, saklar mati)
+bun scripts/verify-render.mjs                  # 862/862 (24 cek pengingat + 6 cek gerbang di bagian sebelumnya): kasir tanpa shift menyebut “Kas belum dibuka” (bukan mengklaim “Shift terbuka”), shift kemarin memunculkan banner `data-level="late"` yang menyebut “uang fisik” & “Z-report” beserta tautan `/app/shift`, shift yang sudah ditutup tidak lagi diingatkan, halaman Shift & Kas menampilkan kartu pengingat yang sama, saklar “mati” benar-benar mematikan bannernya, ambang 1 jam dari setelan dipakai kasir, dan kartu halaman Pengaturan menampilkan nilai tersimpan ↔ menolak jam 99 ↔ menyimpan 20:00 sampai ke sesi/store
+bun scripts/verify-backend.mjs                 # (awan) 849/849 (12 cek baru): `tenants.updateShift` menolak kasir (izin `billing.manage`) & orang luar, menolak jam 24 dan ambang 0 tanpa menulis apa pun, menyimpan 22:00/8 jam apa adanya, dibaca kembali sama persis oleh pemilik **dan** kasir, tidak menulis audit saat nilainya sama, dan menyimpan keadaan “mati”
+# PLAYWRIGHT_DIR=/tmp/pw node scripts/verify-mobile-overflow.mjs   # 169/169 (8 cek pengingat + 4 cek gerbang di bagian sebelumnya): peringatannya utuh di 360 px — bannernya di dalam layar, tautan “Tutup shift” terjangkau, dan tidak ada isi yang terpotong di Kasir maupun Shift & Kas
+bun scripts/verify-theme.mjs                   # 50/50: paritas palet terang/gelap tetap utuh sesudah `--destructive` masuk ke kedua tema
+# PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-bip-warna-browser.mjs   # 23/23: warna POS & dialognya tidak berubah oleh token baru
+```
+
+## Pemberitahuan ke pemilik toko: kas belum dibuka & shift belum ditutup
+
+Kedua keadaan ini cuma kelihatan di **perangkat yang memegang kasnya** — dan pemilik toko sering tidak
+sedang berdiri di depannya. Pengingat tutup shift (bagian di atas) mengingatkan **kasirnya**; yang ini
+**mengabarkan ke pemiliknya**, karena itu syaratnya pun berbeda.
+
+- **Kas belum dibuka** dikabarkan hanya **di dalam jam operasional**, setelah jeda **30 menit** dari jam
+  buka (`opening-grace`): sebelum itu kasirnya masih menghitung uang kembalian, dan di luar jam operasional
+  toko memang belum berjualan. Toko yang buka **24 jam** (jam buka = jam tutup) tidak pernah menerima kabar
+  ini.
+- **Shift belum ditutup** dikabarkan begitu salah satu ini benar: shiftnya dibuka **hari sebelumnya**
+  (`cross-day`), toko **sudah tutup** menurut jam operasional (`after-close`), atau shiftnya sudah berjalan
+  lebih lama dari ambangnya (`long-shift`).
+- **Jam operasionalnya diatur pemilik toko**, bukan angka tetap di kode: kartu **Pengingat tutup shift** di
+  halaman Pengaturan (`/app/settings`) menambah kolom **Jam buka toko** & **Jam tutup toko** (0–23, lebih
+  kecil dari jam buka berarti buka lintas malam — mis. 20 → 2), plus **saklar pemberitahuan ke pemilik
+  toko**. Nilai janggal ditolak dengan alasannya sebelum satu bidang pun tersimpan, dan kalimat di bawah
+  kolomnya (`shiftOwnerAlertHint`) menyebut akibat setelan yang sedang diketik apa adanya — termasuk saat
+  pemberitahuannya dimatikan.
+- **Perangkat melapor, server memutuskan ulang.** Keadaan shift hidup di perangkat
+  (`mesinpos.shifts.v1`) supaya kasir tetap bisa menjual saat internetnya putus, jadi perangkat yang
+  melaporkan keadaannya **beserta jam lokalnya** (`shiftAlerts.report`, izin `shift.manage`). Server menjalankan
+  aturan murni yang sama (`shiftOwnerAlert` di `src/convex/lib/shift.ts`) dengan jam yang dilaporkan itu —
+  jadi laporan yang jenisnya tidak cocok dengan keadaannya, atau yang datang di luar jam operasional,
+  **berhenti di server** dan tidak pernah menjadi pemberitahuan palsu.
+- **Sekali per hari per jenis.** Kunci `(tenantId, kind, dayKey)` dijaga indeks `by_tenant_kind_day`,
+  sehingga kasir yang membuka halaman Kasir berkali-kali tidak mengirim kabar yang sama berkali-kali;
+  perangkat juga punya penandanya sendiri (`mesinpos.shift-alerts.v1`) supaya halaman yang dimuat ulang
+  tidak menembak laporan yang sama.
+- **Jalur utamanya email ke pemilik toko, bukan webhook.** Sebelum ini kabarnya hanya tersedia lewat
+  langganan webhook — dan yang memasang endpoint sendiri cuma sebagian kecil workspace, jadi kabarnya
+  berhenti di tabelnya sendiri. Sekarang setiap laporan **dijadwalkan sebagai email** ke pemilik workspace
+  (`tenants.ownerId` + anggota berperan `owner`, unik & ternormalisasi — `shiftAlertOwnerRecipients`),
+  lewat aksi terpisah `shiftAlertEmail.send` (`"use node"`) yang memakai jalur email yang sudah ada:
+  `RESEND_API_KEY` + `OTP_EMAIL_FROM`, dengan `SITE_URL` untuk tautan halaman Shift & Kas. Alamat uji
+  `.test` tidak dikirimi email dan dicatat sebagai `uji`, alamat tanpa pemilik tidak dikirimi ke mana pun.
+  Hasilnya disimpan di baris kabarnya (`emailRecipients`, `emailVia`, `emailDeliveredAt`, `emailError`),
+  jadi “sudah dikabari” bisa diperiksa ulang, bukan cuma diklaim.
+- **Kirimannya juga masuk event webhook `shift.alert`** — jenis di katalog webhook (`api.access`), berisi
+  jenis, alasan, hari, jam lokal, judul, isi kabar, waktu buka shift, dan jam operasional yang berlaku.
+  Pengirimannya memakai antrean yang sudah ada (`enqueueWebhookEvent` + pekerja percobaan ulang), jadi
+  kabar yang gagal sampai ikut dicoba ulang. Kalau workspace itu **belum** punya endpoint pelanggannya,
+  kalimatnya menyebut itu apa adanya (“Belum ada endpoint webhook yang melanggan `shift.alert`”) — sambil
+  menyebut penerima emailnya, karena itulah jalur yang benar-benar sampai ke pemiliknya.
+- **Yang terlihat di layar**: banner di halaman Kasir (`pos-pemberitahuan-pemilik`) yang menyebut keadaan,
+  status laporannya (`sedang mengirim` / `pemilik diberi tahu` / `sudah diberi tahu hari ini` / `belum ada
+  kabar yang dikirim` / `gagal` beserta sebabnya) dan tautan ke `/app/shift`; kartu **Pemberitahuan ke
+  pemilik toko** di halaman Shift & Kas yang membaca daftarnya dari server (`shiftAlerts.list`) beserta
+  tombol **Tandai ditangani** (`shiftAlerts.resolve`, idempoten, jejaknya tetap tersimpan); dan lencana
+  **Aktif/Mati** di kartu yang sama sesuai saklar di halaman Pengaturan. Tiap barisnya menyebut penerima
+  emailnya beserta hasilnya (`shiftAlertDeliveryText`: terkirim / sedang dikirim / gagal beserta pesan
+  penyedianya / alamat uji / mode demo) lalu jumlah endpoint webhook yang ikut menerimanya.
+
+Ringkasan yang sama juga ada di berkas PDF panduan sebagai **bagian 19** — jam operasionalnya, kapan
+pemilik toko dikabari, dan apa yang tercatat di halaman Shift & Kas — jadi panduan yang diunduh pemilik
+toko tidak ketinggalan fitur ini.
+
+```bash
+bun scripts/verify-shift.mjs                   # 77/77 (+8 cek kanal email): aturan shiftOwnerAlert (jeda 30 menit, di luar jam operasional diam, lintas malam, toko 24 jam, cross-day/after-close/long-shift, saklar mati), jam operasional & saklar yang ditolak beralasan, setelan sebagian dibaca sebagai bawaan, plus penerima email pemilik (kembar & nonaktif dibuang, alamat `.test` tidak dihitung), isi emailnya, kalimat balikan yang membedakan “dijadwalkan” dari “kanal belum dikonfigurasi”, dan kalimat riwayat yang membedakan terkirim / gagal / alamat uji / mode demo
+bun scripts/verify-render.mjs                  # 903/903: banner kasir beserta statusnya, kartu halaman Shift & Kas + “Tandai ditangani”, kenyataan mode demo (tidak ada kanal email server maupun endpoint webhook) dikatakan apa adanya, dan kolom jam buka/tutup & saklar pemberitahuan di halaman Pengaturan benar-benar diklik (jam 24 ditolak, 06:00/23:00 + saklar mati tersimpan ke store)
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 907/907 (+17 cek shiftAlerts, +6 pemisahan dapur/kas): kabar “kas belum dibuka” tercatat, penerima emailnya alamat pemilik workspace, alamat uji `.test` ditandai `uji` oleh aksi terjadwal (tanpa mengaku terkirim), kabar kedua di hari yang sama duplikat, jenis yang tidak cocok & hari yang bukan YYYY-MM-DD ditolak, di luar jam operasional tidak menjadi pemberitahuan, saklar pemilik mati menghentikan kabar, after-close untuk shift yang belum ditutup, kedua kiriman masuk antrean webhook, daftar terbaru dulu, resolve idempoten, orang luar ditolak, tenant professional ditolak modul api.access
+PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-mobile-overflow.mjs http://localhost:5173   # 181/181 (+12 cek pemberitahuan pemilik): di HP 360 px banner pemilik tidak terpotong, tautan “Buka Shift & Kas” terjangkau, kolom teksnya tidak terjepit (dulu 129 px → 250 px), kartu & tombol “Tandai ditangani” muat, dan tidak ada isi yang terpotong di Kasir maupun Shift & Kas
+```
+
+Batasan yang jujur: ini **bukan notifikasi push** — kabarnya berangkat saat halaman Kasir/Shift & Kas
+terbuka di perangkat yang memegang shiftnya (keadaan shift memang hidup di perangkat), lalu diteruskan
+server sebagai **email ke pemilik workspace** (plus langganan webhook kalau ada). Kanal emailnya memakai
+`RESEND_API_KEY` + `OTP_EMAIL_FROM` yang sama dengan kode masuk & undangan; kalau kuncinya belum diset di
+deployment, laporannya tetap tercatat dan halaman Shift & Kas mengatakan emailnya belum berangkat beserta
+sebabnya. Di **mode demo** tidak ada kanal email server maupun endpoint webhook, jadi kabarnya hidup di
+sesi saja dan layarnya mengatakan pemilik belum menerimanya.
+
+Banner ini **sudah diukur di peramban sungguhan** pada 360 px (dan 320 px) oleh
+`verify-mobile-overflow.mjs`: tidak ada isi yang terpotong di Kasir maupun Shift & Kas, tautan “Buka
+Shift & Kas” terjangkau, kartu “Pemberitahuan ke pemilik toko” beserta tombol “Tandai ditangani” muat di
+layar. Pengukuran itu menemukan satu cacat yang tidak terlihat dari daftar teks — **kolom teksnya
+terjepit** jadi 129 px karena tautan `shrink-0` ikut sebaris, sehingga bannernya setinggi 466 px di HP.
+Sekarang tautannya turun ke barisnya sendiri di layar sempit (`w-full sm:w-auto`), dan kolom teksnya
+selebar 250 px (320 px: 210 px) — aturan yang sama dipakai banner pengingat tutup shift (dulu 107 px)
+beserta kartu gerbang kasir di halaman yang sama. Harness-nya menguji ambang itu, bukan cuma “tidak
+terpotong”.
 
 ## Modul plug-in (Phase 2)
 
@@ -881,17 +1247,19 @@ selisihnya harus diputuskan manusia, dan tagihan bersengketa menahan pembayaran 
 beberapa tagihan dibayar sekaligus dengan satu nomor `PAY-…`; lihat bagian *Pencocokan 3 arah*
 di bawah.
 
-**Phase 4 (Enterprise Intelligence)** sudah berjalan tiga slice: **analitik lanjutan**
-(`report.advanced`) hidup di halaman Laporan — tren omzet harian, margin kotor, produk &
-kategori teratas, jam tersibuk, pola hari, perbandingan dengan periode sebelumnya, dan kalimat
-temuan yang bisa langsung dipakai mengambil keputusan — **peran kustom** (`rbac.custom`) hidup
-di halaman Tim & Peran, tempat izin tiap staf dirancang sendiri dan ditugaskan per anggota, dan
+**Phase 4 (Enterprise Intelligence)** sudah berjalan tiga slice:**analitik lanjutan** (`report.advanced`) hidup di halaman Laporan — tren omzet harian, margin kotor, produk &
+kategori teratas, jam tersibuk, pola hari, perbandingan dengan periode sebelumnya, kalimat
+temuan yang bisa langsung dipakai mengambil keputusan, plus dua laporan **enterprise**:
+**proyeksi akhir periode** (laju hari-hari penuh) dan **analisis keranjang** (ukuran keranjang &
+produk yang sering dibeli bersama) — **peran kustom** (`rbac.custom`) hidup
+di halaman Tim & Peran, tempat izin tiap staf dirancang sendiri dan ditugaskan per anggota,
+**sekaligus izin peran bawaan yang bisa disesuaikan per workspace** (Pemilik tetap dikunci), dan
 **akses API & webhook** (`api.access`) hidup di halaman API & Webhook: kunci API bercakupan untuk
 endpoint `/api/v1/*` (termasuk jalur **tulis** `POST /api/v1/sales` untuk pesanan dari sistem luar)
 plus webhook keluar bertanda tangan HMAC yang **benar-benar berangkat saat kejadiannya** (penjualan
 & opname, dokumen yang jatuh tempo, tiket dukungan) dan percobaan ulangnya dijalankan pekerja
 terjadwal (`src/convex/crons.ts`); lihat bagian *Analitik
-lanjutan*, *Peran kustom*, dan
+lanjutan*, *Peran kustom & peran bawaan*, dan
 *Akses API & webhook* di bawah.
 
 **Phase 5 (Dukungan khusus & skala franchise)** sudah berjalan dua klausanya:
@@ -973,7 +1341,7 @@ Produk yang memakai tier/satuan **tidak boleh dijual** ketika modul Grosir mati 
 dengan pesan yang menyuruh mengaktifkan modulnya), supaya harga pelanggan tidak berubah diam-diam.
 
 ```bash
-bun scripts/verify-panduan.mjs                 # 14/14: berkas PDF panduan dibongkar ulang — halaman, footer, daftar isi (18 bagian), langkah kunci (termasuk logo toko, printer & kertas struk, serta kirim struk ke WhatsApp pembeli), batas gambar (1–12), tautan halaman, plus panduan singkat kirim struk ke WhatsApp pembeli di sumber halamannya
+bun scripts/verify-panduan.mjs                 # 14/14: berkas PDF panduan dibongkar ulang — halaman, footer, daftar isi (19 bagian), langkah kunci (termasuk izin dapur & kas yang berdiri sendiri, logo toko, printer & kertas struk, kirim struk ke WhatsApp pembeli, serta jam operasional & pemberitahuan ke pemilik toko), batas gambar (1–12), tautan halaman, plus panduan singkat kirim struk ke WhatsApp pembeli di sumber halamannya
 bun scripts/verify-modules.mjs                 # 34/34: aturan aktivasi modul + urutan paket & aturan pindah paket (murni)
 bun scripts/verify-wholesale.mjs               # 31/31: harga bertingkat + konversi satuan (murni)
 bun scripts/verify-ar.mjs                      # 54/54: piutang B2B + credit limit (murni)
@@ -982,9 +1350,9 @@ bun scripts/verify-inventory.mjs               # 42/42: gudang + perpindahan sto
 bun scripts/verify-purchasing.mjs              # 60/60: PR/PO/GRN pembelian (murni)
 bun scripts/verify-payables.mjs                # 44/44: hutang usaha & tempo supplier (murni)
 bun scripts/verify-opname.mjs                  # 48/48: stock opname & audit selisih (murni)
-bun scripts/verify-fnb.mjs                     # 95/95: denah meja + antrean dapur + pagar hapus meja + urutan & impor denah + penanda kanal/momen pelunasan tiket + kapan tagihan QR baru boleh diberitahukan (bunyi & kilat: sekali per tagihan, hanya yang baru) (murni)
+bun scripts/verify-fnb.mjs                     # 124/124: denah meja + antrean dapur + pagar hapus meja + urutan & impor denah + penanda kanal/momen pelunasan tiket + kapan tagihan QR baru boleh diberitahukan (bunyi & kilat: sekali per tagihan, hanya yang baru) + dua sumber tiket (tertahan & penjualan lunas yang otomatis dikirim ke dapur) beserta label pembayarannya (murni)
 bun scripts/verify-modifiers.mjs               # 46/46: modifier item + harga tambahan (murni)
-bun scripts/verify-analytics.mjs               # 65/65: analitik lanjutan report.advanced (murni)
+bun scripts/verify-analytics.mjs               # 81/81: analitik lanjutan report.advanced + proyeksi akhir periode & analisis keranjang (murni)
 bun scripts/verify-rbac.mjs                    # 45/45: peran kustom rbac.custom (murni)
 bun scripts/verify-api.mjs                     # 225/225: kunci API, webhook, pekerja retry & pemicu event/kalender (murni)
 bun scripts/verify-support.mjs                 # 61/61: dukungan khusus support.dedicated + kanal keluarnya (murni)
@@ -992,16 +1360,16 @@ bun scripts/verify-scale.mjs                   # 42/42: skala franchise scale.fr
 bun scripts/verify-payments.mjs                # 72/72: pembayaran digital payment.digital (murni)
 bun scripts/verify-sync.mjs                    # 47/47: sinkronisasi real-time sync.realtime (murni)
 bun scripts/verify-otp.mjs                     # 79/79: kode OTP masuk tanpa kata sandi (murni)
-bun scripts/verify-render.mjs                  # 795/795: beranda + 21 halaman dirender di klien + alur aksi (termasuk alur OTP, pembatalan pesanan tamu, serta tambah/ubah/hapus/geser meja dan impor denah) + header beranda tetap di atas saat digulir + shell /app/pos terbuka sungguhan (shell setinggi layar, satu area gulir, header & sidebar di luarnya, permukaan sidebar gelapnya terpasang) + lencana sumber data & catatan halaman pemilik toko menyebut “server”, bukan merek backend + notis kegagalan sambung-tenant + baris “Workspace saya” di backstage + tombol naik paket yang benar-benar pindah paket + alur isi stok yang benar-benar diklik (Tambah produk dengan stok awal & Sesuaikan stok) + unggah/hapus gambar produk dari kartu Produk baru & Atur harga sampai batas 8 + tombol Buat otomatis, simpan dengan kolom SKU kosong, serta SKU yang ikut kategori baru dari form & dari kartu Atur harga
+bun scripts/verify-render.mjs                  # 832/832: beranda + 21 halaman dirender di klien + alur aksi (termasuk alur OTP, pembatalan pesanan tamu, serta tambah/ubah/hapus/geser meja dan impor denah) + header beranda tetap di atas saat digulir + shell /app/pos terbuka sungguhan (shell setinggi layar, satu area gulir, header & sidebar di luarnya, permukaan sidebar gelapnya terpasang) + lencana sumber data & catatan halaman pemilik toko menyebut “server”, bukan merek backend + notis kegagalan sambung-tenant + baris “Workspace saya” di backstage + tombol naik paket yang benar-benar pindah paket + alur isi stok yang benar-benar diklik (Tambah produk dengan stok awal & Sesuaikan stok) + unggah/hapus gambar produk dari kartu Produk baru & Atur harga sampai batas 8 + tombol Buat otomatis, simpan dengan kolom SKU kosong, serta SKU yang ikut kategori baru dari form & dari kartu Atur harga
 bun scripts/verify-product-images.mjs          # 25/25: gambar produk — batas 8, tipe & ukuran berkas, label slot (murni)
 bun scripts/verify-product-sku.mjs             # 39/39: SKU otomatis — format, kode kategori, nomor urut per tenant, recode saat kategori berganti (murni)
 bun scripts/verify-menus.mjs                   # 406/406: setiap menu sidebar × setiap peran — menu yang tampil, halaman yang terbuka, penolakan URL langsung & gerbang modul
 bun scripts/verify-theme.mjs                   # 50/50: tema terang/gelap — aturan, paritas palet, permukaan sidebar (gelap + beda nyata dari latar + teks terang), bootstrap index.html, tombol di DOM
-bun scripts/verify-pwa.mjs                     # 1492/1492: manifest display fullscreen, ikon, service worker dieksekusi, ajakan install 10 detik + tombol di header
+bun scripts/verify-pwa.mjs                     # 1527/1527: manifest display fullscreen (termasuk rujukan diri untuk menanyakan “sudah terpasang?” & ikon raster didahulukan), ikon dibaca sampai piksel, service worker dieksekusi, ajakan install 10 detik + tombol di header, perangkat yang sudah memasang tidak ditawari lagi, dan peringatan “alamat sementara”
 bun scripts/verify-version.mjs                 # 44/44: ajakan “Versi baru tersedia — muat ulang” — aturan murni (berkas mana yang dihitung bundel, kapan ajakan ditahan), perilaku DOM (jadwal, muat ulang, “Nanti” per tab), jalur diam (luring/galat/mode dev/tab tersembunyi), dan pemasangan di shell /app/pos sungguhan
 bun scripts/verify-qr.mjs                      # 11/11: payload QRIS → kode QR → dibaca ulang pemindai (murni)
 bun scripts/verify-impersonation.mjs           # 52/52: sesi pendampingan platform & jejak auditnya (murni)
-VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 795/795 (termasuk pembatalan pesanan tamu dari ponselnya, tagihan QR meja yang dibatalkan kasir melepas pagar hapus meja, ubah/hapus meja beserta pagar hapusnya, serta urutan denah & impor sekaligus, pemicu event nyata, kalender, kode OTP tanpa kata sandi, akun platform & pendampingan, kontrak hasil pindah paket, unggah gambar produk sungguhan ke penyimpanan — batas 8 & berkas terhapus jadi 404, serta SKU otomatis PBB-<KATEGORI>-<nomor urut>, bentroknya dengan SKU manual, dan pindah kategori produk yang ikut mengganti kode SKU-nya)
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 837/837 (termasuk pembatalan pesanan tamu dari ponselnya, tagihan QR meja yang dibatalkan kasir melepas pagar hapus meja, ubah/hapus meja beserta pagar hapusnya, serta urutan denah & impor sekaligus, pemicu event nyata, kalender, kode OTP tanpa kata sandi, akun platform & pendampingan, kontrak hasil pindah paket, unggah gambar produk sungguhan ke penyimpanan — batas 8 & berkas terhapus jadi 404, serta SKU otomatis PBB-<KATEGORI>-<nomor urut>, bentroknya dengan SKU manual, dan pindah kategori produk yang ikut mengganti kode SKU-nya)
 VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-webhook-retries.mjs   # 6/6 (tunggu ~2 menit)
 ```
 
@@ -1009,13 +1377,44 @@ VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-webhook-ret
 
 Aturannya ada di `src/convex/lib/fnb.ts` — satu modul murni yang dipakai backend, klien, dan harness:
 
-- **status meja tidak disimpan.** Meja terisi kalau ada pesanan berstatus `held` yang menunjuknya,
-  jadi menyelesaikan atau membatalkan pesanan otomatis mengosongkan mejanya.
+- **status meja tidak disimpan.** Meja terisi kalau ada **tiket dapur** yang menunjuknya
+  (`tableHolders`) — pesanan tertahan (`status: "held"`) **maupun** penjualan yang sudah lunas tetapi
+  tiketnya belum ditandai selesai oleh dapur. Jadi menyelesaikan/membatalkan pesanan atau menekan
+  **Selesai** di layar dapur otomatis mengosongkan mejanya, tanpa patch tambahan yang bisa terlewat.
 - **Satu meja hanya boleh punya satu pesanan terbuka.** Dua pesanan di satu meja tidak bisa
   dipisahkan lagi tagihannya, jadi yang kedua ditolak (`seatTable`).
 - Nama meja unik per toko (tanpa peka huruf besar-kecil), kursi 1–24, nama maksimal 16 karakter dan
   dinormalkan (spasi dirapatkan).
 - **Pesanan tertahan belum menggerakkan stok**; stok bergerak saat ditandai selesai di layar dapur.
+- **Dua sumber tiket, satu antrean** (`isKitchenTicket`): pesanan tertahan (`status: "held"`) **dan**
+  penjualan yang **sudah lunas** yang dikirim ke dapur pada momen pembayarannya. Yang kedua lahir
+  sendiri — begitu kasir mencatat uangnya (tunai, QRIS, atau VA) server menulis `kitchenFiredAt`
+  (`pos.createSale`, gerbangnya fitur `pos.kds`), jadi dapur menerima pesanannya tanpa kasir menekan
+  tombol kedua di depan antrean. Tiketnya menandai dirinya `settled` beserta cara bayarnya
+  (`Lunas Tunai · diterima dapur pukul 13:42`, aturan murni `ticketPaidLabel`), dan dialog struk yang
+  terbuka otomatis sesudah pembayaran menyebutkan bahwa pesanannya sudah diterima dapur.
+- **Tombol Selesai di dapur berarti dua hal, dan yang memutuskan adalah server** (`pos.kitchenDone`,
+  satu panggilan store `finishKitchenTicket`): pesanan **tertahan** diselesaikan di situ — stok bergerak
+  (`finalizeHeldSale`) — sedangkan tiket yang **sudah lunas** hanya ditandai `kitchenDoneAt`. Stok
+  penjualan lunas sudah bergerak saat uangnya dicatat, jadi menyelesaikannya untuk kedua kalinya akan
+  mengurangi stok dua kali; itulah yang ditolak jalur ini.
+- **Meja yang pesanannya sudah dibayar tetap terkunci sampai dapur menekan Selesai.** Begitu uangnya
+  diterima, meja tamu itu masih dipakai tamunya — makanannya belum datang — jadi kasir **tidak bisa**
+  memilihnya lagi untuk pembeli berikutnya (`seatTable` menolaknya dengan kalimat “sudah dibayar,
+  tunggu dapur menekan Selesai”), dan denah menandainya terisi baik di kasir maupun di layar dapur
+  (`paid` di `TableState`). Meja yang sedang menunggu dapur juga tidak bisa dinonaktifkan dari denah.
+  Penjualan yang **belum pernah** sampai ke dapur (workspace tanpa layar dapur) tidak menahan meja —
+  tanpa tiket di antrean, tidak ada yang bisa melepaskannya. Di daftar **Pesanan di dapur** pada
+  halaman kasir, tiket yang sudah lunas ditandai **sudah lunas** supaya tidak terbaca sebagai tagihan
+  yang masih menunggu uang.
+- **Tombol Hold menahan transaksi yang sedang berjalan.** Keranjang yang belum dibayar bisa ditahan
+  sementara (tombol **Hold** di panel keranjang) supaya pembeli berikutnya dilayani lebih dulu, lalu
+  transaksinya dilanjutkan dari daftar **Transaksi ditahan** di kolom kiri halaman kasir (`Lanjutkan`,
+  atau `Buang` kalau pembelinya batal). Isinya kembali utuh berikut meja, member, dan diskonnya, dengan
+  harga yang dihitung ulang dari katalog sekarang; meja yang sudah dipilih ikut ditahan selama
+  transaksinya ada di daftar itu. Ini murni urusan layar kasir: selama ditahan belum ada uang, stok,
+  maupun tiket dapur yang tercatat, jadi memuat ulang halaman mengosongkan tahanannya (kasir memindai
+  ulang barangnya) tanpa ada catatan yang menggantung.
 - Antrean dapur diurutkan **paling lama menunggu di depan**, dengan ambang tanda “lama” 15 menit.
 - **Urutan denah disimpan, bukan diturunkan dari nama.** Meja punya `sortOrder` eksplisit, jadi denah
   yang sudah ditata pemiliknya tidak berubah sendiri saat ada meja baru ditambahkan di antaranya; meja
@@ -1038,18 +1437,42 @@ Aturannya ada di `src/convex/lib/fnb.ts` — satu modul murni yang dipakai backe
   penjualan tidak kehilangan mejanya. Dialog hapus di denah membaca pagar itu lebih dulu
   (`tables.deletionCheck`), jadi tombol Hapusnya sudah tahu jawabannya sebelum ditekan.
 
-Alurnya: kasir memilih meja lalu **Ke dapur** (`pos.createSale` dengan `status: "held"`), dapur
-melihat antreannya di halaman **Dapur & Meja** (`/app/kds`), dan menekan **Selesai**
-(`pos.finalizeHeldSale`) — di titik itu stok berkurang dan mejanya kosong lagi.
+Ada dua alur, dan keduanya berakhir di antrean yang sama di halaman **Dapur & Meja** (`/app/kds`):
+
+1. **Pembeli membayar dulu** (paling sering di kafe/restoran cepat): kasir menyusun pesanan, menekan
+   **Bayar** dan mencatat uangnya (tunai, QRIS, atau VA). Penjualannya tersimpan sekaligus menjadi
+   tiket dapur (`kitchenFiredAt`), stoknya berkurang di titik itu, dan dialog struk terbuka dengan
+   pilihan cetak/unduh/bagikan — kasir tidak perlu memilih meja maupun menekan tombol kedua. Dapur
+   menutup tiketnya dengan **Selesai** (`pos.kitchenDone`, hanya menandai beres).
+2. **Dapur menyiapkan dulu, uangnya menyusul** (pesanan tertahan, mis. dari API atau tamu QR meja):
+   yang tersimpan adalah `pos.createSale` dengan `status: "held"` — stok belum bergerak, mejanya jadi
+   terisi, dan **Selesai** di layar dapur (`pos.finalizeHeldSale`) yang menyelesaikan penjualannya,
+   sehingga stok berkurang dan mejanya kosong lagi. Di halaman kasir jalur ini digantikan tombol
+   **Hold** (lihat butir Hold di atas): yang ditahan hanya keranjang kasir, bukan pesanan di dapur,
+   karena pesanan yang belum dibayar tidak boleh masuk dapur lebih dulu di alur F&B ini.
+
+Meja yang dipakai alur 1 maupun 2 **tetap terkunci** untuk kasir sampai dapurnya menekan Selesai,
+sehingga tidak ada dua tagihan berbeda yang tercampur di satu meja.
 
 Gerbangnya tiga lapis dan bukan kosmetik: menu sidebar ikut menyembunyikan halaman, rute memeriksa
-izin yang sama, dan server menolak — `pos.kdsTickets` butuh fitur `pos.kds`, `tables.*` butuh fitur
+izin yang sama, dan server menolak — `pos.kdsTickets` butuh fitur `pos.kds` **dan** izin `kds.manage`
+(peran “dapur saja” cukup dengan izin itu, tanpa `pos.sell`), `tables.*` butuh fitur
 `pos.table` **dan** izin `table.manage` (pemilik/manajer; kasir memakai meja, bukan mengubah denah),
 dan `pos.createSale` dengan `tableId` butuh fitur `pos.table`. Menambah meja saat modul F&B mati
 ditolak dengan pesan yang menyuruh mengaktifkan modulnya.
 
-Kirim ke dapur sengaja **tidak** lewat antrean offline: dapur hanya boleh melihat pesanan yang benar-
-benar sudah diterima server, jadi tanpa koneksi kasir diberi tahu untuk menunggu.
+Pengiriman ke dapur sengaja **tidak** lewat antrean offline (baik penjualan lunas maupun pesanan
+tertahan lewat `holdSale`): dapur hanya boleh melihat pesanan yang benar-benar sudah diterima server,
+jadi tanpa koneksi kasir diberi tahu untuk menunggu. Penjualan yang masih menunggu sinkronisasi juga
+belum menjadi tiket — tiketnya lahir saat server menyimpannya (itulah `kitchenFired` yang kosong di
+hasil `createSale` selama penjualannya masih di antrean offline). Tombol **Hold** tidak menyentuh
+jaringan sama sekali: yang ditahan hanya keranjang di layar kasir.
+
+```bash
+bun scripts/verify-fnb.mjs           # 124/124: dua sumber tiket (`isKitchenTicket`) — tertahan, lunas yang sudah dikirim, yang sudah ditandai selesai, dan yang dibatalkan — penentu kirim otomatis saat penjualan lunas (`fireKitchenOnSale`, termasuk paket tanpa layar dapur & pesanan tertahan yang tidak dikirim dua kali), label pembayaran tiket (`Lunas Tunai/QRIS/Transfer · diterima dapur pukul HH:MM`, metode tak dikenal tidak dihilangkan diam-diam), satu antrean berisi kedua jenis tiket, serta **kunci meja**: tiket lunas menahan mejanya (`tableHolders`/`ticketTableHolders`), penolakannya menyebut “sudah dibayar, tunggu dapur Selesai”, dan penjualan yang tidak pernah ke dapur tidak menahan meja (murni)
+bun scripts/verify-render.mjs         # 837/837: kasir F&B benar-benar diklik — tekan produk → Bayar → Rp 100.000 → Selesaikan pembayaran, dialog struk menyebut “dikirim ke dapur”, stok bergerak sekali, tiketnya muncul sebagai `settled` bertanda “Lunas Tunai”, daftar Pesanan di dapur menandainya “sudah lunas”, dan Selesai di dapur mengeluarkan tiket lunas dari antrean tanpa mengurangi stok lagi; plus **Hold** (keranjang ditahan, pembeli berikutnya dilayani, transaksinya dilanjutkan dengan nominal yang sama, tahanan bisa dibuang) dan **kunci meja** (meja terkunci begitu uangnya diterima & tidak bisa diklik, kartu dapur menandainya terisi, terbuka lagi setelah Selesai diklik)
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 907/907: di server — `createSale` melaporkan `kitchenFired` (tunai **maupun QRIS**, labelnya ikut kanalnya), tiket `settled` + `paidLabel` masuk `pos.kdsTickets`, meja **terkunci** selama tiket lunasnya menunggu dapur (pesanan kedua di meja itu & menonaktifkan mejanya ditolak dengan kalimat “sudah dibayar”), meja bebas lagi & bisa dipakai penjualan berikutnya setelah `kitchenDone`, `pos.kitchenDone` menutup tiket tanpa mengurangi stok dua kali (dan menolak dipanggil dua kali), `kitchenDone` atas pesanan tertahan tetap menyelesaikan penjualannya, serta workspace tanpa fitur `pos.kds` tidak mengklaim pesanannya ke dapur
+```
 
 ### Modul F&B: pesanan QR meja — tamu memesan & membayar dari ponselnya
 
@@ -1173,8 +1596,8 @@ bisa dicoba tanpa gateway; di mode Convex pelunasan dicatat sungguhan (kasir yan
 ```bash
 bun scripts/verify-meja.mjs          # 72/72: token `mj_`/`mjo_`, keranjang tamu, total tamu = total kasir, cara bayar QRIS/VA & nomor VA-nya, gambar QRIS (screenshot) bisa dipindai balik, pagar pembatalan tamu, dan “masih menunggu pelunasan” (`isAwaitingPayment`) (murni)
 PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-meja-browser.mjs http://localhost:5173   # 93/93 di Chromium: kartu QR → tamu QRIS (unduhan PNG sungguhan) & tamu Virtual Account → tagihan dilunasi dari halaman Pembayaran → tiket dapur bertanda “Lunas QRIS/Lunas VA BRI dari meja · diterima dapur pukul HH:MM”, pesanan yang belum dibayar hanya dihitung di kartu antrean dapur (lencana jumlah + tombol ke Pembayaran yang benar-benar diklik, lalu kartu itu benar-benar berkilat — animasi `kilat` terpasang — dan saklar bunyinya bisa dimatikan dari kartu antrean itu sendiri tanpa mematikan kilatnya), tamu membatalkan pesanannya sendiri (mejanya kembali kosong), tambah/ubah/hapus/geser meja beserta penolakan pagar hapusnya, dan impor beberapa meja sekaligus
-bun scripts/verify-backend.mjs       # rantai penuh di server: kartu QR → menu publik tanpa sesi → pesanan (QRIS & VA) → tagihan → lunas dari halaman Pembayaran → tiket dapur, pembatalan oleh tamu, tagihan QR yang dibatalkan kasir melepas pagar hapus meja, ubah/hapus meja, serta urutan denah (`tables.move`) & impor sekaligus (`tables.importBatch`) (795/795)
-bun scripts/verify-render.mjs        # halaman tamu (pemilih cara bayar, kartu VA, tombol screenshot, tombol batal), alur tamu → dapur → Pembayaran dalam satu store (dapur hanya menerima yang lunas, tiket bertanda momen pelunasan), serta kartu QR + denah meja (dialog ubah/hapus, geser, impor) di DOM tiruan (795/795) — termasuk penghitung + tombol ke halaman Pembayaran yang menempel di kartu antrean dapur (bukan di kolom denah), bunyi & kilat notifikasi tagihan QR baru (satu kali per tagihan, tidak diulang saat layar dibuka ulang, mati bunyi = benar-benar senyap tetapi kilatnya tetap berjalan)
+bun scripts/verify-backend.mjs       # rantai penuh di server: kartu QR → menu publik tanpa sesi → pesanan (QRIS & VA) → tagihan → lunas dari halaman Pembayaran → tiket dapur, pembatalan oleh tamu, tagihan QR yang dibatalkan kasir melepas pagar hapus meja, ubah/hapus meja, serta urutan denah (`tables.move`) & impor sekaligus (`tables.importBatch`) (837/837)
+bun scripts/verify-render.mjs        # halaman tamu (pemilih cara bayar, kartu VA, tombol screenshot, tombol batal), alur tamu → dapur → Pembayaran dalam satu store (dapur hanya menerima yang lunas, tiket bertanda momen pelunasan), serta kartu QR + denah meja (dialog ubah/hapus, geser, impor) di DOM tiruan (832/832) — termasuk penghitung + tombol ke halaman Pembayaran yang menempel di kartu antrean dapur (bukan di kolom denah), bunyi & kilat notifikasi tagihan QR baru (satu kali per tagihan, tidak diulang saat layar dibuka ulang, mati bunyi = benar-benar senyap tetapi kilatnya tetap berjalan)
 ```
 
 ### Modul F&B: modifier item (level pedas, ukuran, topping)
@@ -1474,10 +1897,39 @@ Laporan, dan harness), dengan lima prinsip:
   menyumbang ≥40% omzet (ketergantungan), ada produk terjual di bawah harga beli, hari tanpa
   penjualan, jam tersibuk, dan hari paling ramai.
 
+Dua bagian **enterprise** menutup laporan ini — keduanya dari baris penjualan yang sama, tanpa data
+baru dan tanpa kueri tambahan:
+
+- **Proyeksi akhir periode** memakai laju hari-hari **penuh** yang sudah lewat, bukan rata-rata
+  seluruh periode: hari yang sedang berjalan akan menyeret rata-ratanya turun di pagi hari dan
+  menaikkannya lagi sore hari, dan angka yang berubah mengikuti jam lebih buruk daripada proyeksi
+  yang mengaku belum punya dasar. Jadi `elapsedDays` (hari penuh), `todayNet` (bagian hari yang
+  sudah lewat), dan `netRunRate` dipisahkan; proyeksinya = hari-hari penuh + hari ini pada laju
+  hariannya, dan **tidak pernah** lebih rendah daripada yang sudah masuk hari ini. Kalau belum ada
+  satu hari penuh pun (periode baru mulai), `hasBasis` false dan yang ditampilkan adalah angka yang
+  sudah tercatat — bukan ramalan. Pembandingnya juga bukan periode sebelumnya penuh, melainkan
+  periode sebelumnya pada **jumlah hari penuh yang sama** (29 hari penuh diadu dengan 29 hari
+  pertama periode lalu), supaya hari yang belum selesai tidak membuat lajunya selalu terlihat turun.
+- **Analisis keranjang** menjawab “pelanggan biasanya belanja berapa barang, dan produk mana yang
+  benar-benar dibeli **bersama**”. Ukuran keranjang dipecah empat rentang (1 / 2 / 3–5 / 6+ barang)
+  beserta jumlah nota, pangsa, dan omzetnya; pasangan produk dihitung **sekali per nota** (dua baris
+  produk yang sama tidak memasangkan produk dengan dirinya sendiri), lalu dilaporkan dengan pangsa
+  nota (`supportPct`) dan **`lift`** — berapa kali lebih sering keduanya muncul bersama dibanding
+  kalau keduanya saling bebas. Produk laris memang sering muncul di mana-mana, jadi pasangan yang
+  sering tetapi ber-`lift` ≈1 bukan temuan. Pemindaian pasangannya **beranggaran** (`BASKET_PAIR_SCAN_LIMIT`,
+  20.000 pasangan): satu nota dengan 60 jenis barang sudah 1.770 pasangan, jadi batasnya ada — dan
+  kalau tersentuh, `truncated` **dilaporkan** ke halaman, berkas PDF/Excel, dan keterangannya,
+  bukan disembunyikan.
+
 Halaman Laporan (`/app/reports`, izin `report.view`) menambahkan bagian **Analitik lanjutan
 (Enterprise)**: KPI omzet bersih / rata-rata keranjang / margin kotor lengkap dengan “vs periode
 sebelumnya”, grafik tren omzet harian, daftar produk teratas & rincian per kategori (dengan porsi
-omzet), jam tersibuk dan pola hari, serta daftar temuan. Paket yang tidak memuat fiturnya tetap
+omzet), jam tersibuk dan pola hari, daftar temuan, lalu **Proyeksi akhir periode** (proyeksi omzet
+bersih / laba kotor / transaksi, laju per hari, dan perbandingan laju) serta **Keranjang & pasangan
+produk** (sebaran ukuran keranjang, rata-rata barang per nota, dan daftar pasangan dengan pangsa &
+`lift`). Angka yang sama ikut ke berkas yang diunduh sebagai tiga bagian baru — *Proyeksi akhir
+periode* (11 baris), *Ukuran keranjang*, dan *Produk sering dibeli bersama* — jadi berkasnya tidak
+bisa berbeda dari layar. Paket yang tidak memuat fiturnya tetap
 melihat laporan harian seperti biasa plus alasan singkat **kenapa** analitik lanjutannya mati
 (mis. “tidak termasuk paket Starter”) — bukan grafik kosong yang menyesatkan. Di store demo, angka
 laporan ini dihitung dari riwayat penjualan yang sama dengan yang dibaca kasir, jadi menjual satu
@@ -1489,22 +1941,33 @@ PPh final UMKM, PPh sewa, dan setoran pengusaha — aturannya dijelaskan di bagi
 F&B** di README ini.
 
 ```bash
-bun scripts/verify-analytics.mjs               # 65/65: aturan analitik lanjutan (murni)
+bun scripts/verify-analytics.mjs               # 81/81: aturan analitik lanjutan + proyeksi akhir periode & analisis keranjang (murni)
 bun scripts/verify-fnb-tax.mjs                 # 126/126: laporan pajak & pungutan F&B per bulan (murni)
-bun scripts/verify-render.mjs                  # 738/738: halaman Laporan dirender di DOM klien, termasuk tabel pajak F&B 12 bulan
+bun scripts/verify-render.mjs                  # 929/929: halaman Laporan dirender di DOM klien, termasuk tabel pajak F&B 12 bulan, proyeksi & keranjang
+bun scripts/verify-laporan.mjs                 # 263/263: berkas PDF/Excel/CSV memuat ketiga bagian baru itu (angka, keterangan, lembar Excel-nya)
 ```
 
-## Peran kustom: izin yang dirancang sendiri (`rbac.custom`)
+## Peran: dirancang sendiri **dan** peran bawaan yang disesuaikan (`rbac.custom`)
 
 Slice kedua Phase 4. Peran bawaan (Pemilik, Manajer, Kasir, Staf Gudang, Keuangan) adalah kontrak
 produk yang sudah dipisah tugasnya; yang tidak bisa dijawabnya adalah kebutuhan nyata tenant:
 “kasir shift malam boleh menjual tetapi tidak boleh membatalkan transaksi”, “admin harga hanya
-menyentuh katalog”. Aturannya ada di `src/convex/lib/rbac.ts` (dipakai server lewat
-`requirePermission`, halaman Tim & Peran, kedua store, sesi klien, dan harness), dengan lima prinsip:
+menyentuh katalog”. Lingkupnya **semua peran**, bukan hanya peran baru: tenant boleh membuat peran
+kustom, **dan** menyesuaikan izin peran bawaan, menonaktifkannya, atau menghapusnya dari daftar
+penugasan. Aturannya ada di `src/convex/lib/rbac.ts` + `src/convex/lib/roleSettings.ts` (dipakai
+server lewat `requirePermission`, halaman Tim & Peran, kedua store, sesi klien, dan harness),
+dengan lima prinsip:
 
-- **Peran kustom menggantikan, bukan menambah.** Anggota yang ditugaskan ke sebuah peran kustom
-  memakai daftar izin peran itu persis. Kalau hanya menambah, “kasir yang tidak boleh membatalkan
-  transaksi” mustahil dibuat — peran bawaan kasir sudah punya izin itu.
+- **Peran tambahan berdiri sendiri, bukan menambah.** Anggota yang ditugaskan ke sebuah peran
+  kustom memakai daftar izin peran itu persis, dan **tidak** menumpang peran bawaan mana pun. Kalau
+  hanya menambah, “kasir yang tidak boleh membatalkan transaksi” mustahil dibuat — peran bawaan
+  kasir sudah punya izin itu. Karena berdiri sendiri, satu anggota hanya punya **satu** peran — yang
+  tersimpan di baris keanggotaan adalah `role` (peran bawaan) **atau** `customRoleId` (peran
+  tambahan), tidak pernah keduanya: `memberships.role` sengaja opsional, dan penugasan peran
+  tambahan melepas peran bawaan yang tersimpan (`roles.assign`/`members.update`/store demo).
+  Konsekuensinya, status sebuah peran bawaan (nonaktif atau dihapus dari daftar penugasan) **tidak**
+  menghalangi penugasan peran tambahan, dan anggota yang peran tambahannya dilepas **tidak**
+  diam-diam jatuh ke izin peran bawaan — ia tanpa peran sampai pemilik menugaskan peran berikutnya.
 - **Tidak ada eskalasi lewat nama baru.** Pembuat peran tidak bisa memberi izin yang dia sendiri
   tidak punya, dan pagar itu berlaku lagi saat **menugaskan**: peran hasil buatan pemilik yang
   berisi `billing.manage` tetap ditolak bila yang menugaskan manajer. Tanpa pagar ini, satu peran
@@ -1519,27 +1982,124 @@ menyentuh katalog”. Aturannya ada di `src/convex/lib/rbac.ts` (dipakai server 
   pola opname & multi-warehouse: **membuat/mengubah** peran dan **menugaskannya** butuh fitur
   `rbac.custom` (paket Enterprise), tetapi **melihat**, **melepas penugasan**, **menonaktifkan**, dan
   **menghapus peran yang tidak dipakai** selalu boleh. Peran yang masih dipakai anggota tidak bisa
-  dihapus; peran yang dinonaktifkan otomatis tidak berlaku dan anggotanya kembali ke peran bawaan.
-  Peran kustom yang barisnya hilang/rusak juga jatuh kembali ke peran bawaan, bukan mengunci orang.
+  dihapus; peran yang dinonaktifkan otomatis tidak berlaku. Anggota yang **memang hanya** memakai
+  peran tambahan tidak jatuh ke peran bawaan mana pun ketika peran itu dinonaktifkan/dihilangkan —
+  ia tanpa izin sampai pemilik menugaskan peran lagi, dan halaman Tim & Peran menyebut keadaan itu
+  apa adanya di kolom Peran (“Belum diberi peran”). Baris lama (ditulis sebelum 2026-10-17) yang
+  masih menyimpan peran bawaan di samping peran tambahannya **dirapikan** lewat
+  `members.cleanupLegacyRoles` (internal mutation, lihat di bawah), bukan dibiarkan menumpuk dan
+  bukan dicabut aksesnya diam-diam.
 
-Halaman **Tim & Peran** (`/app/team`, izin `team.manage`) memuat daftar anggota beserta **izin
-efektif** masing-masing (peran bawaan atau peran kustom yang berlaku), daftar peran kustom beserta
-jumlah pemakainya, dan editor peran berupa checklist izin yang dikelompokkan. Pratinjau di editor
-memakai fungsi validasi yang sama dengan server, jadi apa yang terbaca di layar itulah yang akan
-dijawab backend — termasuk saat yang membuka halaman seorang manajer.
+### Membersihkan baris lama: peran bawaan + peran tambahan sekaligus
 
-Gerbangnya tiga lapis seperti fitur lain: menu sidebar dan rute memakai izin efektif yang sama
-(`actingPermissions` di sesi klien, diisi `roles.myAccess` dari server), dan server memeriksa ulang
-setiap permintaan. Bukti backend-nya bukan tampilan: kasir yang ditugaskan peran berisi
-`inventory.view` benar-benar bisa membuka stok per gudang, dan **kehilangan** `ar.view` yang tadinya
-bawaan — pesan penolakannya menyebut peran kustom yang berlaku.
+Baris keanggotaan yang ditulis sebelum aturan “satu anggota = satu peran” menyimpan dua peran: peran
+bawaan (biasanya `cashier`) **dan** `customRoleId`. Kode sekarang tidak pernah menulis baris seperti
+itu lagi, tetapi datanya tetap ada sampai dibersihkan. Pemersihnya internal mutation
+`members.cleanupLegacyRoles` (`src/convex/members.ts`, aturan murninya
+`legacyRoleCleanupDecision` di `src/convex/lib/team.ts`), dengan sifat:
+
+- **Akses orangnya tidak berubah** — yang dilepas selalu peran yang **tidak berlaku** sekarang:
+  peran tambahan yang sah (aktif, milik tenant yang sama) → peran bawaan yang dilepas; peran tambahan
+  yang hilang/nonaktif/milik tenant lain → peran tambahannya yang dilepas sehingga peran bawaan yang
+  tersimpan tetap berlaku.
+- **Pemilik tetap Pemilik** — anggotanya `owner` selalu mempertahankan peran Pemilik (seluruh izin,
+  termasuk `billing.manage`); peran tambahannya yang dilepas. Melepas peran Pemilik bisa
+  menghilangkan pemilik aktif terakhir dan mengunci workspace dari langganannya sendiri.
+- **Idempoten & bertahap** — baris yang sudah satu peran dilewati, dan satu panggilan memproses satu
+  batch (bawaan 100 baris, maksimal 200) lalu menjadwalkan batch berikutnya sampai habis; batas
+  baca/tulis satu transaksi Convex tidak pernah tersentuh.
+- **Bisa diuji tanpa menulis** — `dryRun` hanya melaporkan baris dan keputusannya, dan
+  `members.legacyRoleReport` (internal query, baca-saja) menghitung baris yang **masih** tersisa.
 
 ```bash
-bun scripts/verify-rbac.mjs                    # 45/45: aturan peran kustom (murni)
-bun scripts/verify-team.mjs                    # 47/47: nomor WA, pesan wa.me, dan pagar ubah/nonaktif/hapus anggota (murni)
-bun scripts/verify-backend.mjs                 # termasuk 24 cek peran kustom di backend + 21 cek undangan WA & kelola anggota
-bun scripts/verify-render.mjs                  # halaman Tim & Peran + gerbang rute peran kustom + aksi undangan WA/ubah/nonaktif/hapus
+bunx convex run members:legacyRoleReport                       # baca-saja: baris lama yang tersisa + keputusannya
+bunx convex run members:cleanupLegacyRoles '{"dryRun":true}'    # lihat apa yang akan diubah
+bunx convex run members:cleanupLegacyRoles                      # rapikan (menjadwalkan batch berikutnya sendiri)
 ```
+- **Peran bawaan diatur izinnya, bukan namanya.** Yang disimpan tenant ada di tabel `roleSettings`
+  (izin, status aktif, penanda dihapus) — satu baris per peran bawaan. **Nama** peran bawaan sengaja
+  tidak bisa diubah: `ROLE_LABELS` dipakai struk, sidebar, pesan penolakan, dan jejak audit, jadi ia
+  harus sama di semua workspace. **Pemilik tenant dikunci** dari tiga-tiganya (`OWNER_ROLE_LOCK_REASON`):
+  izinnya tidak bisa dipersempit, statusnya tidak bisa dimatikan, dan perannya tidak bisa dihapus —
+  tenant tidak boleh terkunci dari langganannya sendiri. Pagar eskalasi di sini memakai izin
+  **efektif** penyunting (sudah termasuk penyesuaian workspace), jadi manajer yang izinnya sudah
+  dipersempit tidak bisa memakainya untuk mengembalikan izin yang tidak dia punya; karena itu tombol
+  “Kembalikan izin bawaan” pun butuh fitur `rbac.custom`. Baris yang tidak menyimpan apa-apa
+  **dihapus**, bukan dibiarkan kosong, supaya workspace baru berjalan persis seperti sebelum fitur
+  ini ada.
+
+Halaman **Tim & Peran** (`/app/team`, izin `team.manage`) memuat daftar anggota beserta **izinefektif** masing-masing, **satu daftar peran** dengan dua bagian — **Peran bawaan** (izin yang
+berlaku + lencana “izin disesuaikan”, ubah izin, kembalikan izin bawaan, nonaktifkan/aktifkan,
+Pulihkan, dan hapus dengan konfirmasi dua langkah) dan **Peran tambahan** (buat, ubah, aktif/nonaktif,
+hapus; jumlah pemakainya ditampilkan) — serta satu editor peran berupa checklist izin yang
+dikelompokkan. Keduanya satu daftar, bukan dua kartu terpisah: pengelolaan peran (buat, edit,
+aktif/nonaktif, hapus) berfokus pada peran yang **ada**, dan peran tambahan yang dibuat langsung
+muncul sebagai pilihan peran di formulir undangan. Pratinjau di editor memakai fungsi validasi yang
+sama dengan server — termasuk untuk peran bawaan — jadi apa yang terbaca di layar itulah yang akan
+dijawab backend.
+
+Gerbangnya tiga lapis seperti fitur lain: menu sidebar dan rute memakai izin efektif yang sama
+(`actingPermissions` di sesi klien, diisi `roles.myAccess` dari server — peran bawaan yang izinnya
+diatur ikut terbaca dari `rolePermissions`), dan server memeriksa ulang setiap permintaan. Bukti
+backend-nya bukan tampilan: kasir yang ditugaskan peran berisi `inventory.view` benar-benar bisa
+membuka stok per gudang, dan **kehilangan** `ar.view` yang tadinya bawaan — pesan penolakannya
+menyebut peran kustom yang berlaku; izin yang dilepas dari **peran bawaan** pun langsung ditolak
+server, sementara izin yang dipertahankan tetap bekerja.
+
+```bash
+bun scripts/verify-rbac.mjs                    # 48/48: aturan peran kustom (murni)
+bun scripts/verify-role-settings.mjs           # 62/62: aturan peran bawaan — izin, status, hapus/pulihkan, pagar Pemilik, aksi kartu halaman (murni)
+bun scripts/verify-team.mjs                    # 61/61: nomor WA, pesan wa.me, isi email undangan (peran tambahan disebut sebagai **satu** peran, bukan “Kasir (peran kustom: …)”), nilai pemilih peran gabungan (`roleChoiceValue`/`parseRoleChoice` — peran tambahan tidak membawa peran bawaan mana pun), pagar ubah/nonaktif/hapus anggota, dan keputusan pembersihan baris lama (`legacyRoleCleanupDecision`: peran tambahan sah → peran bawaan dilepas; peran tambahan hilang/nonaktif/tenant lain → peran tambahan dilepas; Pemilik tetap Pemilik) (murni)
+bun scripts/verify-backend.mjs                 # 924/924: di antaranya cek peran kustom & peran bawaan di backend — jalur **undangan dengan peran kustom** (tersimpan di keanggotaan baru tanpa peran bawaan, `null` melepasnya, peran nonaktif ditolak, pemilik ditolak, eskalasi manajer ditolak), undangan berperan tambahan yang **tetap diterima walau Kasir dinonaktifkan** sementara undangan berperan bawaan Kasir ditolak, **`roles.myAccess`/`roles.effective` yang melaporkan `role: null` + `rolePermissions: []`** untuk anggota berperan tambahan, peran tambahan yang dilepas **tidak** jatuh ke peran bawaan, dan pengangkatan pemilik yang **melepas** peran tambahan yang menempel, plus izin yang dilepas ditolak server dan pemisahan dapur/kas dari `pos.sell`
+bun scripts/verify-render.mjs                  # 946/946: halaman Tim & Peran — satu daftar peran (ubah izin, nonaktifkan, kembalikan, pulihkan, hapus) & peran tambahan diklik di DOM tiruan, termasuk **satu pemilih peran** di formulir pendaftaran anggota baru (peran bawaan + peran tambahan, tanpa pemilih kedua), kolom Peran di daftar anggota yang benar-benar menggantikan peran, dan formulir Ubah yang tidak lagi menanyakan peran
+bun scripts/verify-role-coverage.mjs           # 61/61: audit cakupan — 21 menu (20 berizin + Profil), 29 izin semuanya punya gerbang server & tampil di checklist, token asing 0, izin lintas-menu dicatat
+```
+
+### Cakupan peran: apa yang sudah bisa diatur merchant, dan apa yang belum
+
+`scripts/verify-role-coverage.mjs` menjawab pertanyaan yang tidak dijawab harness lain: **semua yang
+terlihat di aplikasi sudah masuk ke sistem peran atau belum?** Hasil audit pada keadaan sekarang:
+
+- **Menu: 21, semuanya bermuara pada izin** kecuali `/app/profil` — halaman profil orang yang sedang
+  masuk, dan kartu **profil usaha** di dalamnya tetap dijaga `billing.manage`. Setiap izin menu juga
+  tampil di checklist Tim & Peran dan dipegang Pemilik, jadi tidak ada halaman yang tidak bisa dibuka
+  pemiliknya sendiri.
+- **Izin: 29, sembilan grup checklist, semuanya punya gerbang `requirePermission`/`requireFeature` di
+  server** — tidak ada izin hantu yang tampil di checklist tetapi tidak mengatur apa pun. Empat belas
+  di antaranya hanya menjaga tombol/aksi di dalam halaman (mis. `pos.void`, `purchase.approve`,
+  `payment.manage`) dan memang tidak punya menu sendiri.
+- **Fitur modul:** fitur yang menjadi gerbang menu (`pos.kds`, `ar.creditlimit`, `member.discount`)
+  semuanya ada di katalog paket dan modul. Empat fitur tidak punya gerbang peran karena memang bukan
+  pekerjaan staf (`pos.quickgrid`, `peripheral.escpos`, `report.daily`, `inventory.basic`) — ia hidup
+  mengikuti paket/perangkat, bukan peran.
+
+Yang **belum** bisa dipisah merchant, dan tercatat sebagai inventaris di harness (penambahan menu ke
+izin yang sama akan menggagalkan cek sampai diputuskan):
+
+| Izin | Menu yang ikut | Akibatnya |
+| --- | --- | --- |
+| `billing.manage` | Modul, **Pengaturan**, Langganan | Setelan operasional (PPN, pajak & pungutan F&B, struk, logo, printer, jam operasional, pengingat shift) menumpang izin tagihan. Merchant tidak bisa memberi manajer operasional akses setelan struk/printer tanpa sekaligus memberi akses langganan. |
+| `inventory.view` | Gudang & Stok, Opname | Melihat opname selalu ikut dengan akses gudang; belum ada izin opname tersendiri. |
+| `report.view` | Dashboard, Laporan, **Panduan** | Panduan operasional hanya terbaca oleh yang boleh melihat laporan; kasir/staf gudang tanpa `report.view` tidak bisa membukanya. |
+
+**Yang sudah diperbaiki dari daftar ini:** dapur dan kas tidak lagi menumpang `pos.sell` — keduanya
+kini punya izin sendiri, `kds.manage` (menu & antrean Dapur, tiket dapur, termasuk menutup tiket dari
+peran kustom “dapur saja”) dan `shift.manage` (menu Shift & Kas, buka/tutup kas, serta kabar kas ke
+pemilik toko). Peran bawaan Pemilik, Manajer, dan Kasir memegang keduanya supaya tidak ada kemampuan
+yang hilang; staf gudang dan keuangan tidak diberi keduanya, sama seperti sebelumnya. Satu hal yang perlu diketahui merchant: penjualan
+menuntut shift terbuka, jadi peran yang **menjual** harus memegang `pos.sell` **dan** `shift.manage` —
+halaman Kasir sudah mengatakannya apa adanya saat izinnya kurang (tidak lagi menawarkan tombol menuju
+halaman yang tertutup untuknya).
+
+Dua ketidakcocokan kecil yang juga ditemukan audit, sengaja **belum** diubah karena menyangkut
+kontrak produk:
+
+1. Rute **Produk & Stok** dijaga `stock.adjust`, sedangkan halamannya berisi aksi `product.manage` dan
+   `category.manage`. Peran kustom yang boleh mengelola produk tetapi tidak boleh menyesuaikan stok
+   bisa melihat tombolnya di checklist, tetapi tidak bisa membuka halamannya.
+2. Mengubah izin **peran bawaan** memerlukan fitur `rbac.custom` (paket Enterprise) — sama seperti peran
+   kustom. Di paket lain tombol **Ubah izin** masih tampil, dan penolakan baru muncul saat menyimpan;
+   spanduk “Peran kustom terkunci” belum menyebut izin peran bawaan ikut terkunci.
 
 ## Akun platform: pengembang di luar RBAC tenant
 
@@ -2085,6 +2645,35 @@ tetapi **jalur masuk tenant belum dipindahkan** ke Convex Auth, jadi permukaan t
 (Convex Auth) dan itulah yang dipakai jalur backstage platform: di sana `ctx.auth.getUserIdentity()`
 terisi dan gerbangnya menuntut identitas terverifikasi.
 
+### Membatalkan pendaftaran: email yang dipakai mendaftar **benar-benar dihapus**
+
+Halaman onboarding (`/onboarding`) menampilkan kartu **“Berubah pikiran di tengah pendaftaran?”** dengan
+tautan **Batalkan**. Tautan itu tidak sekadar keluar dari sesi: akun yang baru lahir dari kode OTP
+**dihapus**, jadi emailnya bebas dipakai mendaftar dari awal kapan saja (bukan berstatus “sudah terdaftar”
+padahal pendaftarannya tidak pernah selesai). Sesudahnya pengguna kembali ke **beranda**.
+
+Urutan kerjanya dijaga, bukan kebetulan:
+
+- **Server dihubungi lebih dulu** (`store.cancelRegistration()` → `users.cancelRegistration`). Halaman baru
+  melepas sesi dan berpindah ke beranda setelah server menjawab — kalau server menolak, sesinya tidak
+  disentuh dan alasan penolakannya tampil di kartu itu (`batalkan-galat`).
+- **Yang dihapus:** baris `users` untuk email itu beserta jejak masuknya (`authSessions`,
+  `authRefreshTokens`, `authAccounts`, `authVerificationCodes`), sehingga tidak ada token hidup yang
+  menunjuk akun yang sudah tidak ada. Baris `emailOtps` sengaja tetap: isinya hash kode yang sudah
+  kedaluwarsa dan dipakai sebagai bukti/batas kirim ulang.
+- **Yang ditolak** (aturan murni `src/convex/lib/account.ts`, dipakai server & harness): akun yang **sudah
+  punya keanggotaan** — barisnya bisa pemilik workspace beserta seluruh datanya — dan **akun platform**
+  (`platformRole`), yang penandanya hanya boleh dicabut lewat akses deployment. Pemanggilnya juga harus
+  memegang identitas baris yang sama (`verifyActor`), jadi id orang lain tidak bisa dipakai menghapus akun.
+- **Mode demo** tidak punya akun di server: yang dikembalikan hanya email sesi, dan pengguna tetap
+  dibawa ke beranda.
+
+```bash
+bun scripts/verify-authz.mjs     # +5 cek aturan pembatalan: pendaftaran baru boleh, workspace & akun platform ditolak
+bun scripts/verify-render.mjs    # 936/936: onboarding menawarkan tautan “Batalkan”; ditekan → server dipanggil, sesi dilepas, mendarat di beranda; penolakan server tampil sebagai pesan dan sesinya tidak dilepas
+bun scripts/verify-backend.mjs   # 901/901: akun benar-benar hilang, email yang sama bisa mendaftar lagi sebagai akun baru, dan akun ber-workspace ditolak
+```
+
 ## Halaman Profil: identitas orangnya & identitas usahanya, di satu halaman (`/app/profil`)
 
 Dua profil yang berbeda pemiliknya diubah berdampingan di **satu halaman**, dan pembagian izinnya
@@ -2113,7 +2702,7 @@ membingungkan daripada tidak tersimpan sama sekali.
 ```bash
 bun scripts/verify-profile.mjs   # 59/59: aturan murni (nama, alamat, email, nomor wa.me, batal-semua) + halaman aslinya diketik & disimpan di DOM tiruan — kedua kartu, notis, lencana, terkunci untuk kasir, dan keluar
 bun scripts/verify-menus.mjs     # 427/427: rute /app/profil tanpa gerbang izin terbuka untuk kelima peran, dan menunya ada di sidebar
-VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 814/814: kontrak deployment `users.updateProfile` (baris sendiri lewat `verifyActor`, tanpa izin peran) & `tenants.updateProfile` (izin `billing.manage`, nomor jadi `628…`, satu kolom salah = batal semua, anggota nonaktif & orang luar ditolak)
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 837/837: kontrak deployment `users.updateProfile` (baris sendiri lewat `verifyActor`, tanpa izin peran) & `tenants.updateProfile` (izin `billing.manage`, nomor jadi `628…`, satu kolom salah = batal semua, anggota nonaktif & orang luar ditolak)
 ```
 
 ## Satu akun = satu bisnis: workspace yang berdiri sendiri
@@ -2220,10 +2809,19 @@ Anggota tim tidak membuat bisnis baru: yang dibuat adalah **akun di workspace in
 halaman **Tim & Peran** (`/app/team`, izin `team.manage`):
 
 1. Isi **Email** orangnya (wajib), **Nama** (opsional), **Nomor WhatsApp** (opsional, dipakai tombol
-   *Kirim via WA*), dan **Peran** bawaan — Kasir, Manajer, Gudang, atau Keuangan. Peran **Pemilik**
-   hanya ditawarkan kepada pemilik tenant, karena hanya pemilik yang boleh menetapkan pemilik lain.
+   *Kirim via WA*), dan **Peran** — **satu** pertanyaan untuk satu orang: kelompok *Peran bawaan*
+   (Kasir, Manajer, Staf Gudang, Keuangan, dan Pemilik bila Anda pemilik tenant) lalu kelompok *Peran
+   tambahan* berisi peran kustom aktif yang sudah dibuat di daftar **Peran**. Dulu ada dua pemilih
+   terpisah (“Peran” + “Peran kustom (opsional)”), dan itu yang membuat satu orang seolah memakai
+   dua peran; sekarang tidak. Pilihannya disaring dengan pagar yang sama seperti penugasan biasa
+   (hanya peran **aktif** dan yang izinnya tidak melewati wewenang pengundang), dan pemilik tenant
+   tidak ditawari peran tambahan karena seluruh izin sudah dipegangnya. Pil di kanan labelnya menuliskan
+   akibat pilihannya — “peran bawaan” atau “N izin · peran tambahan”.
 2. Tekan **Daftarkan ke tim** (`members.add`): server membuat baris `users` untuk email itu kalau belum
-   ada, lalu baris `memberships` di tenant ini, **lalu mengirim email undangan** ke alamat itu
+   ada, lalu baris `memberships` di tenant ini (beserta `customRoleId`-nya kalau peran tambahan dipilih —
+   pagar fitur `rbac.custom`, peran aktif, dan larangan eskalasi diperiksa **sebelum** barisnya ditulis;
+   untuk peran tambahan peran dasarnya adalah `Kasir` tersembunyi yang **statusnya tidak ikut diperiksa**,
+   **lalu mengirim email undangan** ke alamat itu
    (`inviteEmail.send`, terjadwal lewat `ctx.scheduler` supaya kegagalan penyedia email tidak pernah
    membatalkan keanggotaan). Undangan ulang untuk email yang sudah anggota adalah **perubahan peran**,
    bukan anggota kedua — dan tidak mengirim email otomatis; pakai tombol **Kirim ulang** kalau perlu.
@@ -2232,7 +2830,9 @@ halaman **Tim & Peran** (`/app/team`, izin `team.manage`):
    server (`tenants.listMine`), bukan karena perangkat ini pernah memuat bisnis itu.
 
 Isi emailnya (`inviteEmailContent` di `src/convex/lib/team.ts`) hanya menyebut **siapa yang mengundang,
-workspace mana, peran apa, dan ke mana harus pergi** — tidak ada kata sandi dan tidak ada tautan
+workspace mana, peran apa — satu peran saja, jadi undangan berperan tambahan berbunyi `sebagai Kasir
+Shift Malam`, bukan “Kasir (peran kustom: Kasir Shift Malam)” — dan ke mana harus pergi** — tidak ada
+kata sandi dan tidak ada tautan
 bertoken, karena kode masuk hanya terbit kalau orangnya memintanya sendiri di halaman Masuk. Kalau
 emailnya salah kirim, tidak ada yang bisa dipakai orang lain dari situ. Tautan halaman Masuk dibangun
 dari `SITE_URL`; kalau variabelnya belum diset, emailnya menyebut halamannya tanpa mengarang alamat.
@@ -2276,9 +2876,15 @@ sehingga nomor yang salah tidak memberi siapa pun jalan masuk.
 #### Ubah, aktif/nonaktif, dan hapus anggota
 
 Semua akun tim di workspace — termasuk akun sendiri — muncul di tabel yang sama lengkap dengan aksi
-pengelolaannya: tombol **Ubah** membuka form yang sudah terisi (nama, email, nomor WhatsApp, peran
-bawaan, status aktif), **Nonaktifkan/Aktifkan** mengubah aksesnya dalam satu klik, dan **Hapus**
-meminta konfirmasi lebih dulu (`Yakin hapus?`). Perubahannya satu pintu di server — `members.update`
+pengelolaannya: kolom **Peran** berisi **satu** pemilih peran (kelompok *Peran bawaan* lalu
+*Peran tambahan*) yang langsung menggantikan peran orangnya — memilih peran tambahan cukup menugaskan
+peran itu, dan kembali ke peran bawaan melepas peran tambahannya lebih dulu; tombol **Ubah** membuka
+form identitas yang sudah terisi (nama, email, nomor WhatsApp, status aktif) dengan catatan peran yang
+sedang dipakai dan pengingat bahwa perannya diganti di kolom Peran (form itu **tidak** menanyakan
+peran lagi, supaya tidak ada dua pertanyaan untuk satu hal); **Nonaktifkan/Aktifkan** mengubah
+aksesnya dalam satu klik, dan **Hapus** meminta konfirmasi lebih dulu (`Yakin hapus?`). Mengangkat
+seseorang menjadi **Pemilik** dari kolom Peran **melepas** peran tambahan yang masih menempel
+(`members.update`), karena pemilik selalu memegang seluruh izin. Perubahannya satu pintu di server — `members.update`
 untuk nama/email/peran/nomor/status dan `members.remove` untuk keanggotaannya, keduanya butuh
 `team.manage` dan berjejak audit.
 
@@ -2321,10 +2927,13 @@ bun convex run members:remove '{"tenantId":"<tenantId>","actorId":"<userId pemil
 ```
 
 ```bash
-bun scripts/verify-team.mjs       # 47/47: aturan murni nomor WA, isi pesan wa.me, pagar ubah/nonaktif/hapus anggota, dan keputusan tombol undangan (`resolveTeamInviteForm`)
+bun scripts/verify-team.mjs       # 61/61: aturan murni nomor WA, isi pesan wa.me, pagar ubah/nonaktif/hapus anggota, keputusan tombol undangan (`resolveTeamInviteForm`), dan keputusan pembersihan baris lama (peran bawaan + peran tambahan sekaligus)
+bunx convex run members:legacyRoleReport                 # baca-saja: baris keanggotaan lama yang masih menyimpan dua peran (harus 0 setelah dibersihkan)
+bunx convex run members:cleanupLegacyRoles '{"dryRun":true}'   # uji kering: keputusan per baris tanpa menulis
+bunx convex run members:cleanupLegacyRoles               # rapikan baris lama (internalMutation, idempoten & bertahap)
 bun scripts/verify-store-gate.mjs # 17/17: setiap query berizin di src/convex digerbang `has(<izin>)` dari roles.myAccess di store, wajib "skip", izin sesi dilarang, keanggotaan nonaktif dikenali
-bun scripts/verify-backend.mjs    # 814/814: dua bisnis bernama sama → dua workspace, isolasi baca & tulis, onboarding ulang memakai workspace sendiri, undangan tim + jejak kirim emailnya, undangan WhatsApp (nomor ternormalisasi + jejak buka tautan) & kelola anggota di server, plus izin kasir (ditolak `products.listAll`, `roles.myAccess` tanpa product.manage) & penanda `active:false` untuk keanggotaan nonaktif
-bun scripts/verify-render.mjs     # 738/738: onboarding menahan formulir selama workspace dipulihkan, form anggota tim menambah anggota, kolom Undangan + Kirim ulang bekerja, tombol Kirim via WA membuka wa.me, Ubah/Nonaktifkan/Hapus anggota tersimpan, notis keanggotaan yang dinonaktifkan, serta tombol undangan yang mati selama workspace belum tersambung ke server
+bun scripts/verify-backend.mjs    # 837/837: dua bisnis bernama sama → dua workspace, isolasi baca & tulis, onboarding ulang memakai workspace sendiri, undangan tim + jejak kirim emailnya, undangan WhatsApp (nomor ternormalisasi + jejak buka tautan) & kelola anggota di server, plus izin kasir (ditolak `products.listAll`, `roles.myAccess` tanpa product.manage) & penanda `active:false` untuk keanggotaan nonaktif
+bun scripts/verify-render.mjs     # 832/832: onboarding menahan formulir selama workspace dipulihkan, form anggota tim menambah anggota, kolom Undangan + Kirim ulang bekerja, tombol Kirim via WA membuka wa.me, Ubah/Nonaktifkan/Hapus anggota tersimpan, notis keanggotaan yang dinonaktifkan, serta tombol undangan yang mati selama workspace belum tersambung ke server
 bun scripts/verify-menus.mjs      # 406/406: sumber izin gerbang rute — sesi tanpa tenant tanpa izin, kasir tanpa product.manage, peran kustom menggantikan peran bawaan
 ```
 
@@ -2424,7 +3033,7 @@ Kartu peringatan yang menyala terus-menerus lama-lama tidak dibaca lagi. Tiap ka
 
 ```bash
 bun scripts/verify-scan-beep.mjs   # 62/62: nada yang benar-benar dijadwalkan (frekuensi, amplop, sambungan simpul), konteks dibuat sekali & dipakai ulang, `resume` saat autoplay menahan, tanpa Web Audio = senyap, kegagalan audio tidak melempar, aturan setelan aktif/mati (bawaan aktif, hanya "off" yang mematikan, penyimpanan menolak, pendengar React), plus aturan volume (skala 10–100 % langkah 10 % bawaan 70 %, penjepitan nilai rusak, label & kalimatnya, dan bukti bahwa nada yang dijadwalkan memakai kekuatan sesuai volume), serta **nada notifikasi tagihan QR dapur** (satu oktaf di atas bip kasir & lebih panjang, kekuatannya di batas sopan yang sama, kerasnya ikut setelan volume yang sama, dan Matikan bunyi juga membisukannya)
-bun scripts/verify-render.mjs      # 738/738: bip kasir benar-benar dipanggil saat ketukan produk diterima (bukan saat menyimpan modifier), tombol “Bip kasir” di kasir & kartu di Pengaturan benar-benar membungkam pemutarnya, tombol − / + volume benar-benar diklik di dua tempat (tersimpan, angkanya bergerak, mentok di batas, dan nada berikutnya memakai kekuatan itu), + nada warna tiap kartu dashboard & kartu stok yang menyala hanya saat ada barang menipis
+bun scripts/verify-render.mjs      # 832/832: bip kasir benar-benar dipanggil saat ketukan produk diterima (bukan saat menyimpan modifier), tombol “Bip kasir” di kasir & kartu di Pengaturan benar-benar membungkam pemutarnya, tombol − / + volume benar-benar diklik di dua tempat (tersimpan, angkanya bergerak, mentok di batas, dan nada berikutnya memakai kekuatan itu), + nada warna tiap kartu dashboard & kartu stok yang menyala hanya saat ada barang menipis
 # uji browser sungguhan (Chromium/Playwright, PLAYWRIGHT_DIR di luar repo) atas preview yang berjalan:
 # PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-bip-warna-browser.mjs http://localhost:5173   # 23/23
 #   → termasuk volume: menaikkan/menurunkan dari kasir mengubah kekuatan puncak yang benar-benar
@@ -2443,7 +3052,15 @@ membandingkan hasilnya dengan `resolveTheme`, jadi keduanya tidak bisa menyimpan
 Pemasangannya sendiri adalah PWA biasa tanpa plugin tambahan, jadi `vite.config.ts` tidak disentuh:
 
 - `public/manifest.webmanifest` — `display: "fullscreen"` (dengan `display_override` ke `standalone`),
-  ikon 192/512 + **maskable** untuk Android, ikon vektor, dan tiga pintasan ke menu utama;
+  **ikon raster (PNG 192/512 + maskable) lebih dulu**, ikon vektor paling belakang, dan tiga pintasan ke
+  menu utama. Urutan itu bukan selera: Android **membuat aplikasinya (WebAPK) dari ikon raster**, dan
+  ikon SVG ber-`sizes: "any"` yang didahulukan pernah dilaporkan menggagalkan pembuatan WebAPK — jadi
+  PNG dulu, SVG sesudahnya (favicon tetap SVG). Manifestnya
+  juga **merujuk dirinya sendiri** (`related_applications` dengan `platform: "webapp"`, `url` ke
+  `/manifest.webmanifest`, `id: "/"`) — tanpa rujukan itu peramban menolak menjawab pertanyaan
+  “aplikasi ini sudah terpasang di perangkat ini?” lewat `navigator.getInstalledRelatedApps()`,
+  dan `prefer_related_applications` sengaja **tidak** dinyalakan supaya aplikasi ini sendiri tetap
+  bisa dipasang dari browser;
 - `public/sw.js` — service worker dengan kebijakan **sempit**: navigasi network-first dengan cadangan
   `/index.html` saat offline, aset build (`/assets/`, ikon, manifest) disimpan lalu diperbarui, dan
   **selain itu lewat begitu saja** — `/src/…`, `/@vite/…`, permintaan tulis, serta seluruh permintaan
@@ -2464,20 +3081,64 @@ Ajakan pemasangan mengikuti aturan di `src/lib/pwa.ts` dan tampil **sekali** saj
 3. kalau tidak dipasang — ditutup atau dibiarkan — yang tersisa hanya tombol **“Pasang aplikasi”** di
    header beranda, tepat di sebelah tombol **Masuk**; di iOS (tanpa `beforeinstallprompt`) tombol itu
    membuka langkah “Tambah ke Layar Utama”;
-4. begitu aplikasinya terpasang (atau dibuka dalam mode layar penuh), ajakan **dan** tombolnya hilang
-   selamanya.
+4. begitu aplikasinya terpasang, ajakan **dan** tombolnya hilang — termasuk saat alamatnya dibuka lagi
+   **di tab browser biasa**, bukan jendela aplikasi.
+
+Satu hal yang sengaja **tidak** didiamkan: memasang aplikasi dari alamat yang **sementara** (pratinjau
+sandbox `*.e2b.app`, `localhost`) menghasilkan ikon yang benar-benar ada di layar utama tetapi menunjuk
+ke tempat mati — membukanya berakhir “tidak bisa dibuka”. Karena itu ajakan dan petunjuk pasang
+memperingatkan apa adanya di alamat seperti itu, dengan menyebut alamat tetapnya
+(`STABLE_INSTALL_ORIGIN` = alamat produksi). Aturannya murni (`isEphemeralOrigin`) dan sengaja hanya
+mengenali alamat yang jelas sementara; domain lain — termasuk domain sendiri — tidak dituduh apa-apa,
+dan di alamat tetap peringatan itu tidak muncul.
+
+Yang terakhir itu yang paling mudah salah: `appinstalled` hanya berbunyi di tab yang sedang terbuka,
+dan mode tampilan hanya cocok kalau aplikasinya dibuka dari ikonnya. Jadi “perangkat ini sudah
+memasang” dikumpulkan dari empat sumber sekaligus, lalu **dicatat di perangkat** (`installedAt` di
+`mesinpos.install.v1`) supaya kunjungan berikutnya tidak menawarinya lagi:
+
+- `beforeinstallprompt` — peramban menawarkan pemasangan ⇒ perangkat ini **belum** terpasang, jadi
+  catatan yang keliru (mis. aplikasinya dicopot) dibuang tepat di situ; tanpa itu, tombolnya hilang
+  selamanya setelah pemasangan pertama;
+- `appinstalled` — pemasangan yang terjadi di tab ini, termasuk lewat menu browser sendiri;
+- mode tampilan jendela aplikasi (`fullscreen`, `standalone`, `minimal-ui`, `window-controls-overlay`)
+  atau penanda `navigator.standalone` di iOS;
+- `navigator.getInstalledRelatedApps()` (Chromium) — satu-satunya cara tahu dari **tab browser biasa**,
+  dan jawabannya asinkron: keputusannya dipakai untuk membatalkan ajakan 10 detik yang sudah
+  dijadwalkan. Peramban yang tidak punya API-nya (Safari, Firefox) menjawab “tidak tahu”, dan itu
+  memang jawabannya — karena itu memasang aplikasinya di Chrome lalu membuka alamatnya di Firefox/Safari
+  tetap menampilkan tombolnya: catatan itu memang **per peramban**, dan di sana buktinya hanya bisa
+  datang dari mode tampilan (dibuka dari ikonnya).
+
+Berkas `src/lib/pwa.ts` menyimpan aturannya sebagai fungsi murni (`markInstalled`, `markNotInstalled`,
+`installedFromRelatedApps`, `shouldOfferInvite`, `shouldShowInstallButton`, `isEphemeralOrigin`), jadi
+perilaku itu diuji sebagai aturan **dan** sebagai DOM (`verify-pwa.mjs` merender provider + tombolnya di
+happy-dom), serta di Chromium sungguhan (`verify-pwa-browser.mjs`, dijalankan baik terhadap alamat
+sementara maupun alamat tetap).
 
 ```bash
 bun scripts/verify-theme.mjs    # 50/50: aturan tema, paritas palet CSS, permukaan sidebar (gelap, beda nyata dari latar, teks terang), bootstrap index.html dieksekusi, tombol di DOM
-bun scripts/verify-pwa.mjs      # 1493/1493: manifest fullscreen, ikon (dibaca sampai piksel — mark brand hijau di bidang gelap), sw.js dieksekusi, ajakan 10 detik & tombol header
+bun scripts/verify-pwa.mjs      # 1527/1527: manifest fullscreen + rujukan diri + ikon raster didahulukan, ikon dibaca sampai piksel (mark brand hijau di bidang gelap), sw.js dieksekusi, ajakan 10 detik & tombol header, lima skenario “sudah terpasang” di DOM, dan peringatan alamat sementara
 bun scripts/verify-version.mjs  # 44/44: ajakan “Versi baru tersedia — muat ulang” (aturan murni, DOM, jalur diam, shell /app/pos)
 # uji browser sungguhan (Chromium/Playwright, PLAYWRIGHT_DIR di luar repo) atas preview yang berjalan:
 # PLAYWRIGHT_DIR=/tmp/pw node scripts/verify-version-browser.mjs http://localhost:5173   # 7/7
+# PLAYWRIGHT_DIR=/tmp/pw node scripts/verify-mobile-overflow.mjs http://localhost:5173  # 157/157 (header beranda & transaksi ditahan ikut diperiksa)
+# PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-pwa-browser.mjs http://localhost:5173     # 8/8
+#   → tombol “Pasang” di header beranda di Chromium 390×844: **ada** saat perangkatnya belum
+#     memasang, dan **hilang** setelah terbukti memasang — dari catatan perangkat, dari jawaban
+#     `getInstalledRelatedApps()`, atau dari dibukanya aplikasi lewat ikonnya; jalur “dijawab
+#     peramban” menunggu ajakan 10 detiknya sungguhan (11 detik) supaya pembatalannya ikut terbukti;
+#     dan peringatan “alamat sementara” ikut diperiksa mengikuti alamat yang sedang diuji
+#     (muncul di `localhost:5173`, tidak muncul di `https://mesinpos.freebuff.app`)
 ```
 
-**Batas yang masih terbuka:** pemasangan sungguhan hanya bisa dibuktikan di browser (Chrome/Edge/Android
-atau Safari iOS) atas build produksi — di sandbox, yang diuji adalah manifest, service worker, dan
-perilaku ajakannya di DOM tiruan.
+**Batas yang masih terbuka:** pemasangan sungguhan hanya bisa dibuktikan di browser atas build produksi,
+dan di sandbox yang diuji adalah manifest, service worker, perilaku ajakannya di DOM tiruan, serta
+perilaku tombolnya di Chromium 390×844 dengan keadaan “sudah terpasang” yang dibangun dari ketiga jalur
+bukti di atas. Yang **tetap** tidak bisa diuji mesin: Safari iOS — `getInstalledRelatedApps()` tidak
+diselenggarakan di sana, jadi di iOS jawabannya hanya bergantung pada `navigator.standalone` & mode
+tampilan (yaitu ketika aplikasinya dibuka dari ikonnya), dan perangkatnya sendiri tidak pernah dipakai
+di sini (Blocker #3 di `worklog.md`).
 
 ### Versi baru tersedia — muat ulang
 
@@ -2579,7 +3240,7 @@ menjanjikan sesuatu yang tidak ada di sana.
 
 ```bash
 bun scripts/verify-fullscreen.mjs   # 14/14: label & hint (termasuk halaman tanpa sidebar), sembunyikan sidebar, requestFullscreen yang tak ada/ditolak tidak melempar, exitFullscreen hanya saat ada elemen penuh (murni)
-bun scripts/verify-render.mjs   # 738/738: shell /app/pos terbuka sungguhan (shell → halaman kasir), header & sidebar di luar satu-satunya area gulir, permukaan gelapnya terpasang, lencana sumber data menyebut “server”, plus tombol Layar penuh yang benar-benar diklik di ketiga tempat — beranda, halaman masuk, dan header backstage (sidebar hilang → kembali)
+bun scripts/verify-render.mjs   # 832/832: shell /app/pos terbuka sungguhan (shell → halaman kasir), header & sidebar di luar satu-satunya area gulir, permukaan gelapnya terpasang, lencana sumber data menyebut “server”, plus tombol Layar penuh yang benar-benar diklik di ketiga tempat — beranda, halaman masuk, dan header backstage (sidebar hilang → kembali)
 bun scripts/verify-theme.mjs    # 50/50: permukaan sidebar gelap, beda nyata dari latar di kedua tema, teksnya terang
 PLAYWRIGHT_DIR=/tmp/pw node scripts/verify-browser-scroll.mjs   # 60/60: Chromium sungguhan — 6 halaman backstage × 2 ukuran layar (390×844 & 1280×800): dokumen tidak lebih tinggi dari layar, `window.scrollTo` tidak menggeser apa pun, header & sidebar tetap di `top 0` setelah halaman digulir sampai bawah, dan yang bergulir memang `main`
 ```
@@ -2615,8 +3276,48 @@ Aturannya murni dan dipakai bersama header, sidebar, dan harness di `src/lib/sid
 
 ```bash
 bun scripts/verify-sidebar-menu.mjs   # 19/19: tombol muncul di layar kecil & layar penuh, satu kelas display per keadaan, panel mulai di bawah header, latar z-30 di bawah panel z-40 (murni)
-bun scripts/verify-render.mjs         # 738/738: tombolnya benar-benar diklik di DOM tiruan — panel terbuka, ditutup lagi lewat tombol yang sama, latar, Esc, dan pilih menu; di mode layar penuh panelnya tidak kembali statik
+bun scripts/verify-render.mjs         # 832/832: tombolnya benar-benar diklik di DOM tiruan — panel terbuka, ditutup lagi lewat tombol yang sama, latar, Esc, dan pilih menu; di mode layar penuh panelnya tidak kembali statik
 PLAYWRIGHT_DIR=/tmp/pw node scripts/verify-browser-menu.mjs   # 12/12: Chromium sungguhan di 390×844 (HP) & 1280×800 — tombol tampil di kiri atas header, panel 256 px menempel kiri + latar, dan mode layar penuh berperilaku sama (media query benar-benar dihitung)
+```
+
+## Tata letak HP: tidak ada isi yang terpotong di tepi
+
+Di layar HP (320–414 px) **isi yang lebih lebar dari layar tidak boleh terpotong**. Ini bukan
+kerapian belaka: shell backstage memang memakai `overflow-x-hidden`, jadi isi yang terlalu lebar
+hilang **tanpa jejak** — dulu tombol **Coba Gratis** di header beranda terpotong 60 px di layar
+390 px, panel keranjang kasir terpotong 28 px di 360 px, dan kolom **Aksi** tabel katalog produk
+terpotong 581 px (tidak ada jalan membacanya sama sekali).
+
+Dua penyebabnya, dan keduanya sudah ditutup:
+
+1. **Kolom grid implisit ber-ukuran `auto`.** `grid` tanpa kolom eksplisit memakai satu kolom
+   implisit yang melebar sampai `max-content` isinya — satu panel yang lebih lebar dari layar
+   menarik seluruh halaman ikut melebar. Karena itu tata letak halaman yang bertumpuk di HP
+   menulis `grid-cols-1` **sebelum** varian breakpoint-nya (`grid-cols-1 gap-6 xl:grid-cols-[1fr_380px]`),
+   dan baris tombol yang tidak mungkin muat menulis `flex-wrap`.
+2. **Tabel lebar tanpa wadah geser.** Tabel katalog produk (9 kolom), laporan lintas cabang, dan
+   laporan produk teratas dulu berakhir di `overflow-hidden`; sekarang wadahnya `overflow-x-auto`,
+   jadi kolom terakhirnya **bisa dicapai dengan menggeser**, bukan dihilangkan.
+
+Pratinjau struk di halaman Pengaturan mengikuti aturan yang sama: lembarnya tetap selebar kertas
+sungguhan (58/80/241 mm) supaya pratinjaunya jujur, tetapi wadahnya `max-w-full overflow-x-auto`
+sehingga di HP pratinjaunya digeser, bukan dipotong.
+
+Dua perintah untuk menjaganya, keduanya butuh peramban sungguhan (happy-dom tidak menghitung tata
+letak, jadi tidak ada harness DOM yang bisa menemukan luapan ini):
+
+```bash
+PLAYWRIGHT_DIR=/tmp/pw node scripts/verify-mobile-overflow.mjs      # 181/181: 23 rute × 320/390 px (+ 360/414 px untuk beranda, kasir, katalog) — tidak ada yang terpotong, halamannya benar-benar terisi, header beranda utuh, kolom Aksi tabel katalog bisa dicapai dengan menggeser, dan di kasir 360 px transaksi yang ditahan (tombol Hold), peringatan tutup shift, gerbang “kas belum dibuka”, serta banner pemberitahuan ke pemilik toko (360 & 320 px) muncul tanpa terpotong maupun terjepit
+PLAYWRIGHT_DIR=/tmp/pw node scripts/diag-overflow.mjs http://localhost:5173 360 / /app/pos   # diagnosa: daftar elemen terpotong + rantai leluhurnya (siapa yang menentukan lebarnya)
+```
+
+Prasyarat peramban dipasang di luar repo, sama seperti harness peramban lain di berkas ini (supaya
+unduhan Chromium tidak ikut masuk ke instalasi build hosting), lalu preview-nya harus sedang berjalan:
+
+```bash
+mkdir -p /tmp/pw && cd /tmp/pw && bun init -y && bun add playwright
+bunx playwright install --with-deps chromium --only-shell
+freebuff-preview start   # preview di port 5173
 ```
 
 ## Kalau layarnya putih / halaman kosong
@@ -2628,6 +3329,7 @@ merender. Tiga perintah berikut memisahkan penyebabnya (urut dari murah ke mahal
 bun scripts/diag-module-graph.mjs             # setiap modul dari index.html bisa ditransformasi?
 bun scripts/diag-render.mjs / /app/pos        # render SSR per rute (butuh preview/dev server jalan)
 bun scripts/diag-scroll.mjs /app/settings     # apa yang membuat dokumen backstage lebih tinggi dari layar (butuh preview/dev server jalan)
+PLAYWRIGHT_DIR=/tmp/pw bun scripts/diag-halaman-laporan.mjs   # warna yang benar-benar dihitung tiap bagian halaman Laporan + kontras tema gelap + tangkapan layar
 bun scripts/verify-render.mjs                 # render klien sungguhan di DOM tiruan + jalankan efek
 ```
 
@@ -2643,6 +3345,13 @@ Yang perlu diketahui saat membaca hasilnya:
   fixed/absolute` disembunyikan satu per satu, lalu tinggi dokumen diukur ulang. Dipakai pada bug
   2026-10-13 (`.sr-only` di halaman Pengaturan) dan sekarang melaporkan
   `(tidak ada yang mengurangi tinggi dokumen)`.
+- **`diag-halaman-laporan.mjs`** membuka halaman Laporan di Chromium sungguhan lalu mencetak warna yang
+  **benar-benar dihitung** tiap bagian (garis tepi, permukaan, pita, kotak ikon, pita kepala kolom tabel),
+  rasio kontras judul/keterangan/pita kepala kolom di tema gelap, dan menyimpan tiga tangkapan layar
+  (`/tmp/laporan-desktop.png`, `/tmp/laporan-ponsel.png`, `/tmp/laporan-gelap.png`). Dipakai pada pekerjaan
+  2026-10-16 (tampilan berwarna per bagian): warna solid kepala kolom yang **terbuang** oleh `cn()`
+  (terbaca `rgba(0, 0, 0, 0)`) dan permukaan kartu yang jadi tembus pandang ketahuan dari alat ini,
+  bukan dari membaca kode.
 - **`verify-render.mjs`** memasang happy-dom + `react-dom/client`, merender aplikasi yang asli
   **beserta efeknya**, dan memeriksa bahwa beranda serta 19 halaman aplikasi menghasilkan teks, tidak
   ada error yang dilepas ke root, dan `ErrorBoundary` menampilkan pesan saat komponen melempar.

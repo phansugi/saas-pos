@@ -41,6 +41,9 @@ const session = {
     role: "owner",
     taxActive: true,
     taxRatePct: 11,
+    // Pengingat tutup shift dimatikan: yang diperiksa di sini hasil cetaknya,
+    // dan bannernya tidak boleh mengubahnya tergantung jam diagnosanya.
+    shift: { active: false, reminderHour: 21, longShiftHours: 14 },
     createdAt: new Date().toISOString(),
     trialEndsAt: new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString(),
   },
@@ -77,6 +80,36 @@ for (const ukuran of [
       // Penyimpanan diblokir: bukan bagian yang diperiksa.
     }
   }, ["mesinpos.session.v1", JSON.stringify(session)]);
+
+  // Gerbang kasir (`posShiftGate`): tanpa shift yang terbuka, halaman Kasir
+  // menolak menjual — sedangkan diagnosa ini memang membeli satu produk.
+  await context.addInitScript(
+    ([key, id]) => {
+      try {
+        window.localStorage.setItem(
+          key,
+          JSON.stringify({
+            current: {
+              id,
+              openedAt: new Date().toISOString(),
+              openingCash: 300000,
+              cashSales: 0,
+              totalSales: 0,
+              saleCount: 0,
+              closedAt: null,
+              countedCash: null,
+              expectedCash: null,
+              variance: null,
+            },
+            history: [],
+          }),
+        );
+      } catch {
+        // Penyimpanan diblokir: bukan bagian yang diperiksa.
+      }
+    },
+    ["mesinpos.shifts.v1", `shift-diag-cetak-${ukuran.width}`],
+  );
 
   const page = await context.newPage();
   await page.goto(`${BASE}/app/pos`, { waitUntil: "domcontentloaded" });

@@ -39,7 +39,13 @@ export const send = internalAction({
     membershipId: v.id("memberships"),
     email: v.string(),
     name: v.optional(v.string()),
-    role: roleValidator,
+    /**
+     * Peran bawaan; kosong kalau anggota itu hanya memakai peran tambahan —
+     * peran tambahan berdiri sendiri dan namanya ada di `customRoleName`.
+     */
+    role: v.optional(roleValidator),
+    /** Nama peran kustom anggota ini, kalau ia didaftarkan dengan salah satunya. */
+    customRoleName: v.optional(v.string()),
     workspace: v.string(),
     /** Nama pengundang; kosong berarti tidak disebutkan di email. */
     invitedBy: v.optional(v.string()),
@@ -74,7 +80,8 @@ export const send = internalAction({
       workspace: args.workspace,
       email: args.email,
       name: args.name,
-      role: args.role,
+      role: args.role ?? null,
+      customRoleName: args.customRoleName,
       invitedBy: args.invitedBy,
       loginUrl: inviteLoginUrl(process.env.SITE_URL),
     });

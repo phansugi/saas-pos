@@ -22,18 +22,67 @@
 
 import { ROLE_LABELS, ROLES, isRole, type Role } from "./authz";
 import { checkEmail, normalizeEmail } from "./otp";
+import {
+  roleAssignmentCheck,
+  roleStateCheck,
+  type RoleSettingLike,
+} from "./roleSettings";
+
+/** Awalan nilai pilihan peran tambahan di satu pemilih peran (`custom:<id>`). */
+export const ROLE_CHOICE_CUSTOM_PREFIX = "custom:";
+
+/**
+ * Satu nilai untuk satu pemilih peran: peran bawaan apa adanya (`kasir`, …) atau
+ * peran tambahan dengan awalan (`custom:<id>`).
+ *
+ * Dipakai formulir undangan **dan** kolom Peran di daftar anggota, supaya satu
+ * orang tidak pernah ditanya dua kali (peran bawaan + peran kustom).
+ */
+export function roleChoiceValue(
+  role: Role | null | undefined,
+  customRoleId?: string | null,
+): string {
+  if (customRoleId) return `${ROLE_CHOICE_CUSTOM_PREFIX}${customRoleId}`;
+  return role ?? "";
+}
+
+/**
+ * Kebalikan `roleChoiceValue`. `null` = nilai tidak dikenal (jangan dikirim ke
+ * server).
+ *
+ * Peran tambahan **berdiri sendiri**: pilihannya tidak membawa peran bawaan
+ * mana pun — `role` bernilai `null`, dan anggota itu tidak punya peran dasar yang
+ * tersimpan (bandingkan `parseRoleChoice` sebelum 2026-10-17 yang diam-diam
+ * menuliskan Kasir sebagai peran dasar).
+ */
+export function parseRoleChoice(
+  value: string,
+): { role: Role | null; customRoleId: string | null } | null {
+  const raw = (value ?? "").trim();
+  if (raw.startsWith(ROLE_CHOICE_CUSTOM_PREFIX)) {
+    const id = raw.slice(ROLE_CHOICE_CUSTOM_PREFIX.length).trim();
+    return id.length > 0 ? { role: null, customRoleId: id } : null;
+  }
+  return isRole(raw) ? { role: raw, customRoleId: null } : null;
+}
 
 export interface TeamInviteInput {
   email: string;
   /** Nama tampil; kosong berarti diambil dari bagian sebelum `@`. */
   name?: string;
-  role: string;
+  /**
+   * Peran **bawaan**. `null` hanya sah kalau undangan itu memakai peran tambahan
+   * (`standaloneCustomRole`): peran tambahan berdiri sendiri, jadi tidak ada
+   * peran dasar yang ikut dituliskan.
+   */
+  role: string | null;
 }
 
 export interface TeamInvite {
   email: string;
   name: string;
-  role: Role;
+  /** `null` = anggota itu hanya memakai peran tambahan (berdiri sendiri). */
+  role: Role | null;
 }
 
 export type TeamInviteValidation =
@@ -51,10 +100,25 @@ export function validateTeamInvite(
   input: TeamInviteInput,
   options: {
     /**
-     * Peran **bawaan** pengundang — bukan peran kustomnya. Pagar eskalasi harus
-     * memakai wewenang yang benar-benar dimiliki orangnya.
+     * Peran **bawaan** pengundang; `null` = pengundangnya sendiri memakai peran
+     * tambahan. Pagar “hanya pemilik menetapkan pemilik” tetap berlaku.
      */
-    actingRole: Role;
+    actingRole: Role | null;
+    /**
+     * Penyesuaian peran bawaan workspace ini (`roleSettings`). Peran yang
+     * dinonaktifkan/dihapus tidak ditawarkan — sama seperti yang dijawab server.
+     * Kosong = semua peran bawaan seperti bawaannya.
+     */
+    roleSettings?: readonly RoleSettingLike[];
+    /**
+     * Undangan memakai **peran tambahan**, bukan peran bawaan.
+     *
+     * Peran tambahan berdiri sendiri: tidak ada peran bawaan yang ikut dikirim,
+     * jadi tidak ada status peran bawaan yang perlu diperiksa. Pagar yang berlaku
+     * tetap pagar peran tambahannya sendiri (aktif, fitur `rbac.custom`, dan tidak
+     * melebihi wewenang pengundang).
+     */
+    standaloneCustomRole?: boolean;
   },
 ): TeamInviteValidation {
   const email = normalizeEmail(input.email);
@@ -63,15 +127,33 @@ export function validateTeamInvite(
     return { ok: false, reason: shape.reason ?? "Email tidak valid." };
   }
 
-  if (!isRole(input.role)) {
+  /*
+    Peran tambahan berdiri sendiri: tidak ada peran bawaan yang dituliskan, jadi
+    yang diperiksa di sini bukan status peran bawaan mana pun — pagar peran
+    tambahannya sendiri diperiksa pemanggil (`members.add`/store) sebelum barisnya
+    ditulis.
+  */
+  const diminta = (input.role ?? "").trim();
+  let role: Role | null = null;
+  if (diminta === "") {
+    if (!options.standaloneCustomRole) {
+      return {
+        ok: false,
+        reason: `Pilih peran untuk anggota ini — ${ROLES.map((value) => ROLE_LABELS[value]).join(", ")}, atau satu peran tambahan.`,
+      };
+    }
+  } else if (!isRole(diminta)) {
     return {
       ok: false,
-      reason: `Peran tidak dikenal. Pilih salah satu: ${ROLES.map((role) => ROLE_LABELS[role]).join(", ")}.`,
+      reason: `Peran tidak dikenal. Pilih salah satu: ${ROLES.map((value) => ROLE_LABELS[value]).join(", ")}.`,
     };
-  }
-
-  if (input.role === "owner" && options.actingRole !== "owner") {
-    return { ok: false, reason: "Hanya pemilik dapat menetapkan peran pemilik." };
+  } else {
+    const allowed = roleAssignmentCheck(diminta, {
+      actingRole: options.actingRole,
+      settings: options.standaloneCustomRole ? [] : options.roleSettings,
+    });
+    if (!allowed.ok) return { ok: false, reason: allowed.reason };
+    role = diminta;
   }
 
   const typed = (input.name ?? "").replace(/\s+/g, " ").trim();
@@ -84,7 +166,7 @@ export function validateTeamInvite(
     value: {
       email,
       name: typed.length > 0 ? typed : (email.split("@")[0] || "Anggota"),
-      role: input.role,
+      role,
     },
   };
 }
@@ -158,7 +240,7 @@ export function resolveTeamInviteForm(
  * Peran yang boleh ditawarkan pengundang. Pemilik boleh semuanya; peran lain tidak
  * boleh menawarkan `owner` (server tetap yang memutuskan).
  */
-export function assignableRoles(actingRole: Role): Role[] {
+export function assignableRoles(actingRole: Role | null | undefined): Role[] {
   return actingRole === "owner"
     ? [...ROLES]
     : ROLES.filter((role) => role !== "owner");
@@ -203,7 +285,15 @@ export function inviteEmailContent(input: {
   workspace: string;
   email: string;
   name?: string;
-  role: Role;
+  /** `null` = anggota itu hanya memakai peran tambahan (wajib sebut namanya). */
+  role: Role | null;
+  /**
+   * Nama peran tambahan (kustom) yang dipakai anggota ini, kalau ia didaftarkan
+   * dengan salah satunya. Tanpa ini, undangan yang memakai peran tambahan
+   * berbunyi seolah izinnya izin peran bawaan — dan orang yang masuk jadi bingung
+   * kenapa menunya berbeda dari yang tertulis di emailnya.
+   */
+  customRoleName?: string;
   /** Nama pengundang; kosong berarti tidak disebutkan. */
   invitedBy?: string;
   /** Alamat halaman Masuk; `null` = sebut halamannya tanpa alamat. */
@@ -211,7 +301,17 @@ export function inviteEmailContent(input: {
   appName?: string;
 }): { subject: string; text: string } {
   const appName = input.appName ?? APP_NAME;
-  const roleLabel = ROLE_LABELS[input.role];
+  const customRole = input.customRoleName?.trim();
+  /*
+    Peran tambahan **berdiri sendiri**: yang disebut hanya namanya, bukan
+    "Kasir (peran kustom: …)" — peran dasar Kasir itu keterangan tersembunyi,
+    dan penerima email tidak boleh mengira ia memegang dua peran sekaligus.
+  */
+  const roleLabel = customRole
+    ? customRole
+    : input.role
+      ? ROLE_LABELS[input.role]
+      : "anggota tim";
   const salam = input.name ? `Halo ${input.name},` : "Halo,";
   const pengundang = input.invitedBy
     ? `${input.invitedBy} mendaftarkan Anda`
@@ -338,13 +438,21 @@ export function whatsappInviteText(input: {
   workspace: string;
   email: string;
   name?: string;
-  role: Role;
+  /** `null` = anggota itu hanya memakai peran tambahan (wajib sebut namanya). */
+  role: Role | null;
+  /** Nama peran tambahan; kalau ada, **hanya** nama itu yang disebut. */
+  customRoleName?: string;
   invitedBy?: string;
   loginUrl?: string | null;
   appName?: string;
 }): string {
   const appName = input.appName ?? APP_NAME;
-  const roleLabel = ROLE_LABELS[input.role];
+  const customRole = input.customRoleName?.trim();
+  const roleLabel = customRole
+    ? customRole
+    : input.role
+      ? ROLE_LABELS[input.role]
+      : "anggota tim";
   const pengundang = input.invitedBy ? ` oleh ${input.invitedBy}` : "";
   const tujuan = input.loginUrl ?? `halaman Masuk ${appName}`;
   return [
@@ -408,7 +516,11 @@ export function waInviteSentence(state: TeamWaInvite): string {
 export interface TeamMemberDraft {
   name?: string;
   email?: string;
-  role?: string;
+  /**
+   * Peran bawaan yang baru. `null` melepas peran bawaan (anggota itu hanya
+   * memakai peran tambahannya); `undefined` tidak mengubah peran.
+   */
+  role?: string | null;
   /** Kosong/`null` berarti nomor WhatsApp dihapus. */
   phone?: string | null;
   active?: boolean;
@@ -418,7 +530,8 @@ export interface TeamMemberDraft {
 export interface TeamMemberEdit {
   name: string;
   email: string;
-  role: Role;
+  /** `null` = anggota itu memakai peran tambahan (berdiri sendiri). */
+  role: Role | null;
   phone: string | null;
   active: boolean;
 }
@@ -461,19 +574,25 @@ export function validateTeamMemberEdit(
     membershipId: string;
     name: string;
     email: string;
-    role: Role;
+    role: Role | null;
     phone: string | null;
     active: boolean;
   },
   draft: TeamMemberDraft,
   options: {
-    actingRole: Role;
+    /** Peran **bawaan** pengubah; peran tambahan tidak bisa menetapkan pemilik. */
+    actingRole: Role | null;
     /** Keanggotaan pemakai yang sedang mengubah (untuk pagar diri sendiri). */
     actorMembershipId?: string | null;
     /** Jumlah pemilik **aktif** di workspace ini, termasuk anggota ini. */
     activeOwners: number;
     /** Email anggota lain di workspace ini (huruf kecil) — mendeteksi bentrok. */
     otherEmails?: string[];
+    /**
+     * Penyesuaian peran bawaan workspace ini (`roleSettings`): peran yang
+     * dinonaktifkan/dihapus tidak boleh dipilih lagi untuk anggota ini.
+     */
+    roleSettings?: readonly RoleSettingLike[];
   },
 ): TeamMemberEditValidation {
   const name = draft.name === undefined ? current.name : tidyName(draft.name);
@@ -495,8 +614,24 @@ export function validateTeamMemberEdit(
   }
 
   const role = draft.role === undefined ? current.role : draft.role;
-  if (!isRole(role)) {
+  if (role !== null && !isRole(role)) {
     return { ok: false, reason: "Peran tidak dikenal." };
+  }
+  const peranBawaan: Role | null = role === null ? null : role;
+
+  /*
+    Peran yang dinonaktifkan/dihapus workspace tidak boleh **dipilih**; peran yang
+    sedang dipakai anggota ini tetap boleh dipertahankan (`currentRole`). Aturan
+    “hanya pemilik menyentuh peran pemilik” diperiksa di bawah, dengan kalimatnya
+    sendiri — halaman ini sudah lama membedakan keduanya.
+
+    `role` yang `null` berarti anggota itu memakai peran tambahan: tidak ada peran
+    bawaan yang perlu diperiksa statusnya di sini (pagar peran tambahannya ada di
+    `roles.assign`/`members.add`).
+  */
+  if (role !== null) {
+    const stateOk = roleStateCheck(role, options.roleSettings, current.role);
+    if (!stateOk.ok) return { ok: false, reason: stateOk.reason };
   }
 
   let phone = current.phone;
@@ -559,7 +694,7 @@ export function validateTeamMemberEdit(
     [
       ["name", name !== current.name],
       ["email", email !== current.email],
-      ["role", role !== current.role],
+      ["role", peranBawaan !== current.role],
       ["phone", phone !== current.phone],
       ["active", active !== current.active],
     ] as const
@@ -567,7 +702,109 @@ export function validateTeamMemberEdit(
     .filter(([, berubah]) => berubah)
     .map(([field]) => field);
 
-  return { ok: true, value: { name, email, role, phone, active }, changed };
+  return { ok: true, value: { name, email, role: peranBawaan, phone, active }, changed };
+}
+
+/* ------------------- perapian baris anggota lama (satu peran) ------------------- */
+
+/**
+ * Apa yang harus dilakukan pada satu baris keanggotaan lama.
+ *
+ *  - `none` — barisnya sudah benar (peran bawaan **atau** peran tambahan).
+ *  - `drop-base-role` — peran tambahan yang sah menjadi satu-satunya peran.
+ *  - `drop-custom-role` — peran bawaan yang tersimpan yang menjadi satu-satunya
+ *    peran (peran tambahannya hilang/nonaktif, atau anggotanya Pemilik).
+ */
+export type LegacyRoleCleanupAction =
+  | "none"
+  | "drop-base-role"
+  | "drop-custom-role";
+
+/**
+ * Sebab keputusan di atas, ditulis dalam bentuk yang bisa dibaca operator CLI.
+ *
+ *  - `sudah-satu-peran` — tidak ada dua peran tersimpan; tidak disentuh.
+ *  - `pemilik-tetap-pemilik` — Pemilik harus memegang seluruh izin, jadi peran
+ *    tambahannya yang dilepas (bukan peran Pemiliknya).
+ *  - `peran-tambahan-hilang` / `peran-tambahan-nonaktif` /
+ *    `peran-tambahan-tenant-lain` — peran tambahannya tidak berlaku, dan yang
+ *    berlaku sekarang adalah peran bawaan tersimpan; yang dilepas peran
+ *    tambahannya supaya aksesnya tidak berubah.
+ *  - `peran-tambahan-berdiri-sendiri` — peran tambahannya sah; peran bawaan yang
+ *    menumpang di belakangnya dilepas.
+ */
+export type LegacyRoleCleanupReason =
+  | "sudah-satu-peran"
+  | "pemilik-tetap-pemilik"
+  | "peran-tambahan-hilang"
+  | "peran-tambahan-nonaktif"
+  | "peran-tambahan-tenant-lain"
+  | "peran-tambahan-berdiri-sendiri";
+
+export interface LegacyRoleCleanupDecision {
+  action: LegacyRoleCleanupAction;
+  reason: LegacyRoleCleanupReason;
+}
+
+/**
+ * Memutuskan perapian satu baris keanggotaan yang masih menyimpan **peran bawaan
+ * bersama peran tambahannya** (baris yang ditulis sebelum 2026-10-17).
+ *
+ * Aturan yang dijaga: **akses orangnya tidak berubah** karena pembersihan ini.
+ * Karena itu yang dilepas adalah peran yang **tidak berlaku** sekarang:
+ *
+ *  - peran tambahan yang sah (aktif, milik tenant yang sama) → peran bawaan yang
+ *    dilepas, sebab `resolveMembershipPermissions` sudah memakai peran tambahan itu
+ *    persis;
+ *  - peran tambahan yang hilang/nonaktif/milik tenant lain → peran tambahannya yang
+ *    dilepas, sebab izin yang berlaku sekarang adalah peran bawaan tersimpan;
+ *  - anggotanya **Pemilik** → peran tambahannya yang dilepas. Pemilik harus selalu
+ *    memegang seluruh izin (termasuk `billing.manage`); membiarkan peran tambahan
+ *    menang membuat workspace bisa terkunci dari langganannya sendiri, sedangkan
+ *    melepas peran Pemiliknya bisa menghilangkan pemilik aktif terakhir.
+ *
+ * Baris yang sudah hanya punya satu peran tidak disentuh — termasuk baris “tanpa
+ * peran” (tidak punya keduanya), yang memang keadaan sah setelah peran tambahan
+ * dilepas dan bukan urusan pembersihan ini.
+ */
+export function legacyRoleCleanupDecision(input: {
+  role?: Role | null;
+  customRoleId?: string | null;
+  /** Tenant pemilik baris keanggotaan ini. */
+  tenantId?: string;
+  /**
+   * Peran tambahan yang ditunjuk `customRoleId`; `null` = tidak ditemukan
+   * (sudah dihapus). Kosong = tidak perlu diperiksa karena tidak ada peran
+   * tambahan.
+   */
+  customRole?: { tenantId?: string; active?: boolean } | null;
+}): LegacyRoleCleanupDecision {
+  const role = input.role ?? null;
+  const customRoleId = input.customRoleId ?? null;
+  if (!role || !customRoleId) {
+    return { action: "none", reason: "sudah-satu-peran" };
+  }
+
+  if (role === "owner") {
+    return { action: "drop-custom-role", reason: "pemilik-tetap-pemilik" };
+  }
+
+  const customRole = input.customRole;
+  if (!customRole) {
+    return { action: "drop-custom-role", reason: "peran-tambahan-hilang" };
+  }
+  if (customRole.active === false) {
+    return { action: "drop-custom-role", reason: "peran-tambahan-nonaktif" };
+  }
+  if (
+    input.tenantId !== undefined &&
+    customRole.tenantId !== undefined &&
+    customRole.tenantId !== input.tenantId
+  ) {
+    return { action: "drop-custom-role", reason: "peran-tambahan-tenant-lain" };
+  }
+
+  return { action: "drop-base-role", reason: "peran-tambahan-berdiri-sendiri" };
 }
 
 /* ------------------------ keanggotaan yang dinonaktifkan ------------------------ */
@@ -616,9 +853,10 @@ export function isActiveMembership(
  * pemilik aktifnya, dan jangan biarkan seseorang menghapus aksesnya sendiri.
  */
 export function validateTeamMemberRemoval(
-  target: { membershipId: string; role: Role; active: boolean },
+  target: { membershipId: string; role: Role | null; active: boolean },
   options: {
-    actingRole: Role;
+    /** Peran **bawaan** penghapus; `null` = ia memakai peran tambahan. */
+    actingRole: Role | null;
     actorMembershipId?: string | null;
     activeOwners: number;
   },

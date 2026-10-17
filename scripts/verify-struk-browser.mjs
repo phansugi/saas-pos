@@ -61,6 +61,9 @@ const session = {
     role: "owner",
     taxActive: true,
     taxRatePct: 11,
+    // Pengingat tutup shift dimatikan: skrip ini menguji struk, bukan
+    // pengingatnya — bannernya tidak boleh ikut mengubah tata letak kasir.
+    shift: { active: false, reminderHour: 21, longShiftHours: 14 },
     createdAt: new Date().toISOString(),
     trialEndsAt: new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString(),
   },
@@ -81,6 +84,37 @@ await context.addInitScript(([key, value]) => {
     // Penyimpanan diblokir: bukan bagian yang diuji di sini.
   }
 }, ["mesinpos.session.v1", JSON.stringify(session)]);
+
+/*
+  Gerbang kasir (`posShiftGate`): halaman Kasir tidak bisa menjual kalau tidak ada
+  shift yang terbuka di perangkat ini. Semua struk yang diuji di sini lahir dari
+  penjualan di kasir, jadi shiftnya dibuka lebih dulu — sama seperti kasir
+  sungguhan, yang membukanya di halaman Shift & Kas.
+*/
+await context.addInitScript(([key, id]) => {
+  try {
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({
+        current: {
+          id,
+          openedAt: new Date().toISOString(),
+          openingCash: 300000,
+          cashSales: 0,
+          totalSales: 0,
+          saleCount: 0,
+          closedAt: null,
+          countedCash: null,
+          expectedCash: null,
+          variance: null,
+        },
+        history: [],
+      }),
+    );
+  } catch {
+    // Penyimpanan diblokir: tombol kasirnya akan menyebut sebabnya sendiri.
+  }
+}, ["mesinpos.shifts.v1", "shift-uji-struk"]);
 
 const page = await context.newPage();
 page.on("console", (message) => {
@@ -334,8 +368,8 @@ try {
     JSON.stringify(logoPanduan),
   );
   check(
-    "halaman Panduan menyebut panduan PDF 18 bagian & 12 gambar",
-    await page.getByText("18 bagian · 12 gambar").first().isVisible(),
+    "halaman Panduan menyebut panduan PDF 19 bagian & 12 gambar",
+    await page.getByText("19 bagian · 12 gambar").first().isVisible(),
     "lencana jumlah bagian tidak ditemukan",
   );
   /*
@@ -744,6 +778,19 @@ try {
     nomorNota !== "" &&
       (await page.locator('[data-testid="struk-dialog"]').innerText()).includes(nomorNota),
     `${nomorStruk} · ${(await page.locator('[data-testid="struk-dialog"]').innerText()).slice(0, 120).replace(/\n/g, " / ")}`,
+  );
+
+  /*
+    Perintah ke dapur: bagian alur F&B yang diminta pemilik repo — begitu uangnya
+    diterima (tunai, QRIS, atau VA), pesanannya berangkat sendiri ke dapur, tanpa
+    kasir menekan tombol kedua. Yang dibaca di sini kalimatnya di dialog struk
+    yang baru terbuka, karena itulah tempat kasir sedang menatap.
+  */
+  const notisDapur = page.locator('[data-testid="struk-dapur"]');
+  check(
+    "dialog struk memberi tahu kasir bahwa pesanannya sudah dikirim ke dapur",
+    (await notisDapur.count()) === 1 && /dikirim ke dapur/.test(await notisDapur.innerText()),
+    (await notisDapur.count()) === 1 ? await notisDapur.innerText() : "notis dapur tidak ada",
   );
 
   // Unduhan sungguhan: berkasnya diambil peramban, lalu dibaca kembali di sini.
@@ -1227,6 +1274,43 @@ try {
     `cetakan=${await page.evaluate(() => window.__cetakanStruk)}`,
   );
 
+  // ------------- Pesanannya benar-benar tiba di antrean dapur (perintah ke dapur)
+  /*
+    Notis di dialog struk barulah janji di layar kasir; yang membuktikannya adalah
+    halaman **Dapur & Meja**: nota yang sama harus ada di antreannya, ditandai
+    sudah lunas beserta cara bayarnya, dan isinya sudah terbaca dapur.
+
+    Perpindahannya lewat menu sidebar, bukan `page.goto`, karena sesi demo
+    menyimpan penjualannya di memori halaman: muat ulang akan menghapus tiket
+    yang justru sedang diperiksa di sini.
+  */
+  await page.getByRole("link", { name: /Dapur & Meja/ }).first().click();
+  await page.waitForURL(/\/app\/kds/, { timeout: 20_000 });
+  await page.waitForTimeout(400);
+
+  const kartuDapur = page.locator("article", { hasText: nomorNota });
+  check(
+    "nota yang baru dibayar di kasir sudah menunggu di antrean dapur",
+    (await kartuDapur.count()) === 1 && /Cappuccino/.test(await kartuDapur.innerText()),
+    `${await kartuDapur.count()} kartu memuat ${nomorNota}`,
+  );
+  const barisLunasDapur = kartuDapur.locator('[data-testid^="kds-lunas-kasir-"]');
+  check(
+    "tiket dapurnya menandai sendiri penjualannya lunas beserta cara bayarnya",
+    (await barisLunasDapur.count()) === 1 &&
+      /^Lunas Tunai/.test((await barisLunasDapur.innerText()).trim()),
+    (await barisLunasDapur.count()) === 1
+      ? await barisLunasDapur.innerText()
+      : "baris lunas tidak ada",
+  );
+  await page.screenshot({ path: `${SHOTS}/dapur-tiket-lunas.png` });
+
+  // Kembali ke kasir lewat menu yang sama supaya tahap berikutnya berjalan di
+  // halaman yang sama seperti sebelumnya (sesi demo tetap hidup).
+  await page.getByRole("link", { name: /Kasir \(POS\)/ }).first().click();
+  await page.waitForURL(/\/app\/pos/, { timeout: 20_000 });
+  await page.waitForTimeout(300);
+
   // ------------- Kirim struk ke WhatsApp member yang sudah punya nomor
   /*
     Tahap berikutnya memakai member **Bu Sari Wulandari** (punya nomor WA): yang
@@ -1384,6 +1468,9 @@ try {
   const sesiTersimpan = await page.evaluate(() =>
     window.localStorage.getItem("mesinpos.session.v1"),
   );
+  const shiftTersimpan = await page.evaluate(() =>
+    window.localStorage.getItem("mesinpos.shifts.v1"),
+  );
   const konteksPonsel = await browser.newContext({
     viewport: { width: 390, height: 844 },
   });
@@ -1396,6 +1483,22 @@ try {
       }
     },
     ["mesinpos.session.v1", sesiTersimpan ?? ""],
+  );
+  /*
+    Shiftnya ikut disalin: halaman kasir di ponsel hanya bisa menjual kalau ada
+    shift yang terbuka (`posShiftGate`), dan perangkat yang sama memang memakai
+    shift yang sama — jadi berkas struknya pun dari shift yang sama, bukan dari
+    kas yang kebetulan masih kosong.
+  */
+  await konteksPonsel.addInitScript(
+    ([key, value]) => {
+      try {
+        if (value) window.localStorage.setItem(key, value);
+      } catch {
+        // Penyimpanan diblokir: bukan bagian yang diuji di sini.
+      }
+    },
+    ["mesinpos.shifts.v1", shiftTersimpan ?? ""],
   );
   const hp = await konteksPonsel.newPage();
   hp.on("console", (message) => {
@@ -1411,6 +1514,87 @@ try {
   await hp.locator('[data-testid="cash-cepat-100000"]').click();
   await hp.getByRole("button", { name: "Selesaikan pembayaran" }).click();
   await hp.waitForSelector('[data-testid="struk-unduh-pdf"]', { timeout: 20_000 });
+
+  /*
+    ------------------------------------------------- Dialog yang lebih tinggi
+
+    Laporan pemilik repo (tangkapan layar ponsel): dialog “Struk belanja”
+    tingginya melebihi layar dan **isinya tidak bisa digulir** — daftar PDF,
+    notis, dan tombol Tutup di bagian bawahnya tidak pernah terbaca kasir.
+    Sebelum diperbaiki, pada layar ponsel yang pendek isinya 963 px (239 px keluar
+    layar) dan kontrol terakhirnya **tidak terjangkau** walau semua yang bisa
+    digulir sudah digulir. Layar 1400×950 di bagian atas tidak pernah menyentuh
+    keadaan ini, justru karena dialognya muat di sana.
+
+    Ukuran ponsel pendek dipakai sengaja (bilah alamat peramban + papan tombol
+    memangkas tinggi layar yang terlihat), lalu dikembalikan sebelum bagian cetak.
+  */
+  await hp.setViewportSize({ width: 360, height: 720 });
+  await hp.waitForTimeout(200);
+  const dialogHp = await hp.evaluate(() => {
+    const dialog = document.querySelector('[data-testid="struk-dialog"]');
+    if (!dialog) return null;
+    const kotak = (el) => {
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return {
+        atas: Math.round(r.top),
+        bawah: Math.round(r.bottom),
+        tinggi: Math.round(r.height),
+      };
+    };
+    const paling = [...dialog.querySelectorAll("button")].at(-1);
+    const sebelum = kotak(paling);
+    dialog.scrollTop = dialog.scrollHeight;
+    return {
+      layar: window.innerHeight,
+      dialog: kotak(dialog),
+      bisaDigulir:
+        /auto|scroll/.test(window.getComputedStyle(dialog).overflowY) &&
+        dialog.scrollHeight > dialog.clientHeight,
+      sisaGulir: dialog.scrollHeight - dialog.clientHeight,
+      tergulir: dialog.scrollTop,
+      sebelum,
+      sesudah: kotak(paling),
+      judul: kotak(dialog.querySelector("h3")),
+      tombolTutup: kotak(dialog.querySelector('[aria-label="Tutup struk"]')),
+    };
+  });
+  check(
+    "dialog struk di layar ponsel pendek dibatasi setinggi layar — tidak ada isi yang keluar layar",
+    Boolean(dialogHp) &&
+      dialogHp.dialog.atas >= 0 &&
+      dialogHp.dialog.bawah <= dialogHp.layar + 1,
+    JSON.stringify({ dialog: dialogHp?.dialog, layar: dialogHp?.layar }),
+  );
+  check(
+    "isi dialog struk yang lebih tinggi dari layar benar-benar bisa digulir",
+    Boolean(dialogHp) && dialogHp.bisaDigulir && dialogHp.tergulir > 0,
+    JSON.stringify({
+      bisaDigulir: dialogHp?.bisaDigulir,
+      sisaGulir: dialogHp?.sisaGulir,
+      tergulir: dialogHp?.tergulir,
+    }),
+  );
+  check(
+    "kontrol terakhir dialog (“Tutup”) terjangkau setelah isinya digulir sampai bawah",
+    Boolean(dialogHp?.sesudah) &&
+      dialogHp.sesudah.atas >= 0 &&
+      dialogHp.sesudah.bawah <= dialogHp.layar + 1,
+    JSON.stringify({ sebelum: dialogHp?.sebelum, sesudah: dialogHp?.sesudah, layar: dialogHp?.layar }),
+  );
+  check(
+    "judul & tombol tutup struk tetap terlihat setelah digulir sampai bawah (menempel di atas)",
+    Boolean(dialogHp?.judul && dialogHp?.tombolTutup) &&
+      dialogHp.judul.atas >= 0 &&
+      dialogHp.judul.bawah <= dialogHp.layar &&
+      dialogHp.tombolTutup.atas >= 0 &&
+      dialogHp.tombolTutup.bawah <= dialogHp.layar,
+    JSON.stringify({ judul: dialogHp?.judul, tombolTutup: dialogHp?.tombolTutup, layar: dialogHp?.layar }),
+  );
+
+  await hp.setViewportSize({ width: 390, height: 844 });
+  await hp.waitForTimeout(150);
   await hp.locator('[aria-label="Tutup struk"]').click();
   await hp.waitForTimeout(300);
 

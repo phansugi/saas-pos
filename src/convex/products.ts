@@ -30,6 +30,8 @@ import {
   type ModifierGroup,
 } from "./lib/modifiers";
 import { DEFAULT_LOW_STOCK_THRESHOLD } from "./lib/inventory";
+import { enqueueWebhookEvent, scheduleWebhookDeliveryPass } from "./lib/webhookOutbox";
+import { productUpdatedEventData } from "./lib/webhookEvents";
 import {
   BASE_UNIT,
   normaliseUnitCode,
@@ -39,6 +41,47 @@ import {
   type PriceTier,
   type UnitConversion,
 } from "./lib/wholesale";
+
+/**
+ * Memberi tahu platform mitra bahwa katalog/harga berubah (`product.updated`).
+ *
+ * Dipanggil dari jalur tulis yang benar-benar mengubah produk — bukan dari
+ * halaman — supaya perubahan yang datang dari kasir, impor, atau penerimaan
+ * barang sama-sama terkirim. Kalau tidak ada endpoint yang melanggan, fungsi
+ * ini tidak menulis apa pun (lihat `enqueueWebhookEvent`).
+ */
+async function emitProductUpdated(
+  ctx: MutationCtx,
+  product: {
+    tenantId: Id<"tenants">;
+    sku: string;
+    name: string;
+    price: number;
+    unit?: string;
+    active: boolean;
+  },
+  changed: string[],
+  previous: { sku?: string; price?: number } = {},
+): Promise<number> {
+  if (changed.length === 0) return 0;
+  const enqueued = await enqueueWebhookEvent(ctx, {
+    tenantId: product.tenantId,
+    event: "product.updated",
+    subject: product.sku,
+    data: productUpdatedEventData({
+      sku: product.sku,
+      name: product.name,
+      price: product.price,
+      unit: product.unit ?? BASE_UNIT,
+      active: product.active,
+      changed,
+      previousSku: previous.sku,
+      previousPrice: previous.price,
+    }),
+  });
+  await scheduleWebhookDeliveryPass(ctx, enqueued);
+  return enqueued;
+}
 
 /** Bentuk argumen yang sama dipakai `create` dan `setPricing`. */
 const tierValidator = v.array(
@@ -380,6 +423,21 @@ export const create = mutation({
       });
     }
 
+    // Katalog baru langsung dikabarkan ke platform mitra; produk yang dibuat
+    // tanpa stok pun tetap perlu muncul di sana.
+    await emitProductUpdated(
+      ctx,
+      {
+        tenantId: args.tenantId,
+        sku,
+        name: args.name,
+        price: args.price,
+        unit: wholesale.unit,
+        active: true,
+      },
+      ["created"],
+    );
+
     await writeAuditLog(ctx, {
       tenantId: args.tenantId,
       actorId: args.actorId,
@@ -436,6 +494,31 @@ export const setPricing = mutation({
       tiers: wholesale.tiers,
       units: wholesale.units,
     });
+
+    const changed = [
+      price !== product.price ? "price" : null,
+      (wholesale.unit ?? BASE_UNIT) !== (product.unit ?? BASE_UNIT) ? "unit" : null,
+      JSON.stringify(wholesale.tiers) !== JSON.stringify(product.tiers ?? [])
+        ? "tiers"
+        : null,
+      JSON.stringify(wholesale.units) !== JSON.stringify(product.units ?? [])
+        ? "units"
+        : null,
+    ].filter((field): field is string => field !== null);
+
+    await emitProductUpdated(
+      ctx,
+      {
+        tenantId: args.tenantId,
+        sku: product.sku,
+        name: product.name,
+        price,
+        unit: wholesale.unit,
+        active: product.active,
+      },
+      changed,
+      changed.includes("price") ? { price: product.price } : {},
+    );
 
     await writeAuditLog(ctx, {
       tenantId: args.tenantId,
@@ -521,6 +604,28 @@ export const setCategory = mutation({
     }
 
     await ctx.db.patch(args.productId, { categoryId: args.categoryId, sku });
+
+    const categoryChanged = (product.categoryId ?? null) !== (args.categoryId ?? null);
+    if (categoryChanged || sku !== product.sku) {
+      await emitProductUpdated(
+        ctx,
+        {
+          tenantId: args.tenantId,
+          sku,
+          name: product.name,
+          price: product.price,
+          unit: product.unit,
+          active: product.active,
+        },
+        [
+          ...(categoryChanged ? ["category"] : []),
+          ...(sku !== product.sku ? ["sku"] : []),
+        ],
+        // SKU baru saja berganti: penerima harus tahu SKU lama yang harus
+        // diganti, bukan menebak dari nama produk.
+        sku !== product.sku ? { sku: product.sku } : {},
+      );
+    }
 
     await writeAuditLog(ctx, {
       tenantId: args.tenantId,
@@ -703,6 +808,19 @@ export const update = mutation({
       cost: decision.value.cost,
     });
 
+    await emitProductUpdated(
+      ctx,
+      {
+        tenantId: args.tenantId,
+        sku: decision.value.sku,
+        name: decision.value.name,
+        price: product.price,
+        unit: product.unit,
+        active: product.active,
+      },
+      decision.changed,
+    );
+
     await writeAuditLog(ctx, {
       tenantId: args.tenantId,
       actorId: args.actorId,
@@ -761,6 +879,19 @@ export const setActive = mutation({
     }
 
     await ctx.db.patch(args.productId, { active: args.active });
+
+    await emitProductUpdated(
+      ctx,
+      {
+        tenantId: args.tenantId,
+        sku: product.sku,
+        name: product.name,
+        price: product.price,
+        unit: product.unit,
+        active: args.active,
+      },
+      ["active"],
+    );
 
     await writeAuditLog(ctx, {
       tenantId: args.tenantId,
@@ -849,6 +980,22 @@ export const remove = mutation({
     }
 
     await ctx.db.delete(args.productId);
+
+    // Produk yang benar-benar boleh dihapus (belum dipakai apa pun) juga harus
+    // hilang dari salinan platform — `deleted` membedakannya dari sekadar
+    // dinonaktifkan.
+    await emitProductUpdated(
+      ctx,
+      {
+        tenantId: args.tenantId,
+        sku: product.sku,
+        name: product.name,
+        price: product.price,
+        unit: product.unit,
+        active: false,
+      },
+      ["deleted"],
+    );
 
     await writeAuditLog(ctx, {
       tenantId: args.tenantId,

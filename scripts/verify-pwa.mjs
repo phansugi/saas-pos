@@ -215,6 +215,119 @@ try {
     "isInstalled",
   );
   check(
+    "deteksi terpasang juga menangkap mode cadangan peramban (minimal-ui & overlay)",
+    pwa.isInstalled({
+      fullscreen: false,
+      standalone: false,
+      iosStandalone: false,
+      minimalUi: true,
+    }) &&
+      pwa.isInstalled({
+        fullscreen: false,
+        standalone: false,
+        iosStandalone: false,
+        windowControlsOverlay: true,
+      }),
+    "isInstalled (mode cadangan)",
+  );
+  check(
+    "mode tampilan yang diperiksa satu daftar dengan yang divalidasi manifest",
+    pwa.INSTALLED_DISPLAY_MODES.includes("fullscreen") &&
+      pwa.INSTALLED_DISPLAY_MODES.includes("standalone") &&
+      pwa.INSTALLED_DISPLAY_MODES.length === 4,
+    pwa.INSTALLED_DISPLAY_MODES.join(","),
+  );
+  const installPromptSource = read("src/components/InstallPrompt.tsx");
+  check(
+    "komponen benar-benar memeriksa setiap mode tampilan di daftar itu",
+    pwa.INSTALLED_DISPLAY_MODES.every((mode) =>
+      installPromptSource.includes(`media("${mode}")`),
+    ),
+    pwa.INSTALLED_DISPLAY_MODES.join(","),
+  );
+
+  // ── Catatan “perangkat ini sudah memasang” ───────────────────────────────
+  const terpasang = pwa.markInstalled(dismissed, new Date("2026-10-12T09:05:00.000Z"));
+  check(
+    "bukti pemasangan dicatat di catatan perangkat",
+    terpasang.installedAt === "2026-10-12T09:05:00.000Z",
+    JSON.stringify(terpasang),
+  );
+  check(
+    "waktu pemasangan tidak ditimpa panggilan berikutnya",
+    pwa.markInstalled(terpasang, new Date("2026-10-12T11:00:00.000Z")).installedAt ===
+      terpasang.installedAt,
+    "installedAt stabil",
+  );
+  check(
+    "perangkat yang sudah memasang tidak ditawari lagi (ajakan maupun tombol)",
+    !pwa.shouldOfferInvite(terpasang, false) &&
+      !pwa.shouldShowInstallButton(terpasang, { installed: false, inviteOpen: false }),
+    JSON.stringify(terpasang),
+  );
+  check(
+    "catatan lama (sebelum kolom pemasangan ada) tetap sah & tidak menyembunyikan tombol",
+    pwa.readInstallRecord(JSON.stringify(dismissed))?.installedAt === null &&
+      pwa.shouldShowInstallButton(dismissed, { installed: false, inviteOpen: false }),
+    JSON.stringify(pwa.readInstallRecord(JSON.stringify(dismissed))),
+  );
+  check(
+    "catatan pemasangan bertahan setelah ditulis & dibaca lagi",
+    pwa.readInstallRecord(pwa.serializeInstallRecord(terpasang))?.installedAt ===
+      "2026-10-12T09:05:00.000Z",
+    pwa.serializeInstallRecord(terpasang),
+  );
+  check(
+    "batal dipasang membuang bukti itu supaya tombolnya bisa kembali",
+    pwa.markNotInstalled(terpasang).installedAt === null &&
+      pwa.shouldShowInstallButton(pwa.markNotInstalled(terpasang), {
+        installed: false,
+        inviteOpen: false,
+      }),
+    JSON.stringify(pwa.markNotInstalled(terpasang)),
+  );
+  check(
+    "jawaban getInstalledRelatedApps dibaca: daftar berisi = terpasang",
+    pwa.installedFromRelatedApps([{ id: "/", platform: "webapp" }]) &&
+      !pwa.installedFromRelatedApps([]) &&
+      !pwa.installedFromRelatedApps(null) &&
+      !pwa.installedFromRelatedApps(undefined),
+    "installedFromRelatedApps",
+  );
+  check(
+    "alamat tetap untuk memasang aplikasinya disebut apa adanya",
+    pwa.STABLE_INSTALL_ORIGIN === "https://mesinpos.freebuff.app",
+    pwa.STABLE_INSTALL_ORIGIN,
+  );
+  check(
+    "alamat sementara dikenali: localhost, IP loopback, dan pratinjau *.e2b.app",
+    pwa.isEphemeralOrigin("http://localhost:5173") &&
+      pwa.isEphemeralOrigin("https://5173-abc123.e2b.app") &&
+      pwa.isEphemeralOrigin("http://127.0.0.1:4173"),
+    [
+      pwa.isEphemeralOrigin("http://localhost:5173"),
+      pwa.isEphemeralOrigin("https://5173-abc123.e2b.app"),
+      pwa.isEphemeralOrigin("http://127.0.0.1:4173"),
+    ].join(","),
+  );
+  check(
+    "alamat tetap, domain biasa, & alamat rusak tidak dituduh sementara",
+    !pwa.isEphemeralOrigin(pwa.STABLE_INSTALL_ORIGIN) &&
+      !pwa.isEphemeralOrigin("https://tokosaya.id") &&
+      !pwa.isEphemeralOrigin("bukan-alamat"),
+    [
+      pwa.isEphemeralOrigin(pwa.STABLE_INSTALL_ORIGIN),
+      pwa.isEphemeralOrigin("https://tokosaya.id"),
+      pwa.isEphemeralOrigin("bukan-alamat"),
+    ].join(","),
+  );
+  check(
+    "peringatan alamat sementara menyebut alamat tetap yang harus dipakai",
+    pwa.temporaryAddressNotice().includes(pwa.STABLE_INSTALL_ORIGIN) &&
+      pwa.temporaryAddressNotice("https://contoh.test").includes("https://contoh.test"),
+    pwa.temporaryAddressNotice(),
+  );
+  check(
     "service worker hanya didaftarkan kalau browsernya mendukung",
     pwa.supportsServiceWorker({ serviceWorker: {} }) &&
       !pwa.supportsServiceWorker({}) &&
@@ -241,6 +354,20 @@ try {
     "manifest terbuka penuh (fullscreen) dengan cadangan standalone",
     manifest.display === "fullscreen" && manifest.display_override?.includes("fullscreen"),
     `${manifest.display} / ${manifest.display_override}`,
+  );
+  check(
+    "manifest merujuk dirinya sendiri supaya peramban bisa ditanya “sudah terpasang?”",
+    Array.isArray(manifest.related_applications) &&
+      manifest.related_applications.length === 1 &&
+      manifest.related_applications[0].platform === "webapp" &&
+      manifest.related_applications[0].url === "/manifest.webmanifest" &&
+      manifest.related_applications[0].id === "/",
+    JSON.stringify(manifest.related_applications),
+  );
+  check(
+    "rujukan diri itu tidak mematikan pemasangan aplikasi ini sendiri",
+    manifest.prefer_related_applications !== true,
+    String(manifest.prefer_related_applications),
   );
   check(
     "manifest berlingkup satu aplikasi (start_url & scope)",
@@ -276,6 +403,12 @@ try {
       (icon) => icon.type === "image/svg+xml" && icon.sizes === "any",
     ),
     iconSizes.join(" · "),
+  );
+  check(
+    "ikon raster didahulukan & SVG di belakang — Android membuat aplikasinya dari PNG",
+    manifest.icons?.[0]?.type === "image/png" &&
+      manifest.icons?.at(-1)?.type === "image/svg+xml",
+    (manifest.icons ?? []).map((icon) => icon.type).join(" → "),
   );
   for (const icon of manifest.icons ?? []) {
     check(`berkas ikon manifest ada: ${icon.src}`, exists(`public${icon.src}`), icon.src);
@@ -814,6 +947,321 @@ try {
     await view.close();
     timers.restore();
     window.matchMedia = realMatchMedia;
+  }
+
+  // Skenario F — perangkat ini **sudah memasang** aplikasinya (bukti dari kunjungan
+  // sebelumnya), lalu alamatnya dibuka di tab browser biasa. Tidak boleh ada ajakan
+  // maupun tombol “Pasang” lagi — inilah keluhan yang membuat catatan ini ada.
+  {
+    window.localStorage.setItem(
+      pwa.INSTALL_STORAGE_KEY,
+      JSON.stringify({
+        firstSeenAt: "2026-10-12T09:00:00.000Z",
+        invitedAt: "2026-10-12T09:00:10.000Z",
+        dismissedAt: "2026-10-12T09:00:25.000Z",
+        installedAt: "2026-10-12T09:05:00.000Z",
+      }),
+    );
+    stubDisplayMode(null); // tab browser biasa, bukan jendela aplikasi
+    const timers = stubTimers();
+    const view = await renderTree(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(InstallPrompt, null),
+          React.createElement(InstallButton, null),
+        ),
+      ),
+    );
+    await flush();
+    check(
+      "perangkat yang sudah memasang tidak diundang memasang lagi",
+      !view.text().includes("Pasang MesinPOS di perangkat ini"),
+      view.text().slice(0, 160),
+    );
+    check(
+      "perangkat yang sudah memasang tidak lagi melihat tombol “Pasang” (walau di tab browser)",
+      view.button("Pasang aplikasi") === null,
+      view.text().slice(0, 200),
+    );
+    check(
+      "catatan pemasangannya tidak ditulis ulang",
+      JSON.parse(window.localStorage.getItem(pwa.INSTALL_STORAGE_KEY)).installedAt ===
+        "2026-10-12T09:05:00.000Z",
+      window.localStorage.getItem(pwa.INSTALL_STORAGE_KEY),
+    );
+    await view.close();
+    timers.restore();
+  }
+
+  // Skenario G — peramban yang bisa ditanya (Chromium) menjawab “sudah terpasang”
+  // dari tab biasa: ajakan dibatalkan dan buktinya dicatat di perangkat.
+  {
+    window.localStorage.clear();
+    stubDisplayMode(null);
+    const realRelatedApps = window.navigator.getInstalledRelatedApps;
+    window.navigator.getInstalledRelatedApps = async () => [
+      { id: "/", platform: "webapp", url: "https://mesinpos.test/manifest.webmanifest" },
+    ];
+    const timers = stubTimers();
+    const view = await renderTree(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(InstallPrompt, null),
+          React.createElement(InstallButton, null),
+        ),
+      ),
+    );
+    await flush(20);
+    check(
+      "jawaban “sudah terpasang” dari peramban membatalkan ajakannya",
+      !view.text().includes("Pasang MesinPOS di perangkat ini"),
+      view.text().slice(0, 160),
+    );
+    check(
+      "jawaban “sudah terpasang” menyembunyikan tombol “Pasang”",
+      view.button("Pasang aplikasi") === null,
+      view.text().slice(0, 160),
+    );
+    check(
+      "bukti pemasangan dari peramban dicatat di perangkat",
+      Boolean(
+        pwa.readInstallRecord(window.localStorage.getItem(pwa.INSTALL_STORAGE_KEY))
+          ?.installedAt,
+      ),
+      window.localStorage.getItem(pwa.INSTALL_STORAGE_KEY),
+    );
+    await view.close();
+    timers.restore();
+    if (realRelatedApps === undefined) {
+      delete window.navigator.getInstalledRelatedApps;
+    } else {
+      window.navigator.getInstalledRelatedApps = realRelatedApps;
+    }
+  }
+
+  // Skenario H — `appinstalled` lalu halaman dimuat ulang: tombol tetap tidak muncul
+  // (peramban memanggil event itu juga saat pemasangan lewat menunya sendiri).
+  {
+    window.localStorage.clear();
+    stubDisplayMode(null);
+    const timers = stubTimers();
+    const view = await renderTree(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(InstallPrompt, null),
+          React.createElement(InstallButton, null),
+        ),
+      ),
+    );
+    await flush();
+    await React.act(async () => {
+      window.dispatchEvent(new window.Event("appinstalled"));
+    });
+    check(
+      "`appinstalled` dicatat sebagai bukti pemasangan di perangkat",
+      Boolean(
+        pwa.readInstallRecord(window.localStorage.getItem(pwa.INSTALL_STORAGE_KEY))
+          ?.installedAt,
+      ),
+      window.localStorage.getItem(pwa.INSTALL_STORAGE_KEY),
+    );
+    await view.close();
+
+    const reload = await renderTree(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(InstallPrompt, null),
+          React.createElement(InstallButton, null),
+        ),
+      ),
+    );
+    await flush();
+    check(
+      "setelah dimuat ulang di tab browser, ajakan & tombol tetap tidak ada",
+      !reload.text().includes("Pasang MesinPOS di perangkat ini") &&
+        reload.button("Pasang aplikasi") === null,
+      reload.text().slice(0, 200),
+    );
+    await reload.close();
+    timers.restore();
+  }
+
+  // Skenario I — aplikasinya dicopot: browser menawarkan pemasangan lagi, dan
+  // catatan “sudah terpasang” harus dibuang supaya tombolnya tidak hilang selamanya.
+  {
+    window.localStorage.setItem(
+      pwa.INSTALL_STORAGE_KEY,
+      JSON.stringify({
+        firstSeenAt: "2026-10-12T09:00:00.000Z",
+        invitedAt: "2026-10-12T09:00:10.000Z",
+        dismissedAt: "2026-10-12T09:00:25.000Z",
+        installedAt: "2026-10-12T09:05:00.000Z",
+      }),
+    );
+    stubDisplayMode(null);
+    const view = await renderTree(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(InstallPrompt, null),
+          React.createElement(InstallButton, null),
+        ),
+      ),
+    );
+    await flush();
+    check(
+      "sebelum sinyal browser: tombol masih disembunyikan",
+      view.button("Pasang aplikasi") === null,
+      view.text().slice(0, 160),
+    );
+    const event = new window.Event("beforeinstallprompt");
+    event.preventDefault = () => {};
+    event.prompt = async () => {};
+    event.userChoice = Promise.resolve({ outcome: "dismissed" });
+    await React.act(async () => {
+      window.dispatchEvent(event);
+    });
+    check(
+      "sinyal “masih bisa dipasang” membuang catatan terpasang",
+      pwa.readInstallRecord(window.localStorage.getItem(pwa.INSTALL_STORAGE_KEY))
+        ?.installedAt === null,
+      window.localStorage.getItem(pwa.INSTALL_STORAGE_KEY),
+    );
+    check(
+      "tombol “Pasang” kembali muncul setelah aplikasinya dicopot",
+      view.button("Pasang aplikasi") !== null,
+      view.text().slice(0, 200),
+    );
+    await view.close();
+  }
+
+  // Skenario J — dibuka dari ikon aplikasi (mode jendela aplikasi): bukti pemasangan
+  // dicatat, sehingga kunjungan berikutnya di tab browser juga tanpa tombol.
+  {
+    window.localStorage.clear();
+    stubDisplayMode("standalone");
+    const view = await renderTree(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(InstallPrompt, null),
+          React.createElement(InstallButton, null),
+        ),
+      ),
+    );
+    await flush();
+    check(
+      "dibuka dari ikon aplikasi: tanpa ajakan & tanpa tombol",
+      !view.text().includes("Pasang MesinPOS di perangkat ini") &&
+        view.button("Pasang aplikasi") === null,
+      view.text().slice(0, 160),
+    );
+    check(
+      "dibukanya dari ikon dicatat sebagai bukti pemasangan di perangkat",
+      Boolean(
+        pwa.readInstallRecord(window.localStorage.getItem(pwa.INSTALL_STORAGE_KEY))
+          ?.installedAt,
+      ),
+      window.localStorage.getItem(pwa.INSTALL_STORAGE_KEY),
+    );
+    await view.close();
+
+    stubDisplayMode(null);
+    const tab = await renderTree(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(InstallPrompt, null),
+          React.createElement(InstallButton, null),
+        ),
+      ),
+    );
+    await flush();
+    check(
+      "kunjungan berikutnya di tab browser: tetap tanpa tombol “Pasang”",
+      tab.button("Pasang aplikasi") === null,
+      tab.text().slice(0, 160),
+    );
+    await tab.close();
+    window.matchMedia = realMatchMedia;
+  }
+
+  // Skenario K — dibuka dari alamat **sementara** (pratinjau sandbox / lokal):
+  // ajakannya harus jujur bahwa ikon yang dipasang dari sini nanti tidak bisa
+  // dibuka, lalu di alamat tetap peringatan itu tidak boleh muncul.
+  {
+    window.localStorage.clear();
+    stubDisplayMode(null);
+    const timers = stubTimers();
+    window.happyDOM.setURL("http://localhost:5173/");
+    const view = await renderTree(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(InstallPrompt, null),
+          React.createElement(InstallButton, null),
+        ),
+      ),
+    );
+    await flush();
+    check(
+      "alamat sementara: ajakan memperingatkan bahwa ikonnya nanti tidak bisa dibuka",
+      view.container.querySelector('[data-notis="alamat-sementara"]') !== null &&
+        view.text().includes(pwa.STABLE_INSTALL_ORIGIN),
+      view.text().slice(0, 240),
+    );
+    await view.click("Nanti saja");
+    await view.click("Pasang aplikasi");
+    check(
+      "alamat sementara: petunjuk pasang juga menyebut alamat tetapnya",
+      view.container.querySelector('[data-notis="alamat-sementara"]') !== null &&
+        view.text().includes("Pasang lewat menu browser"),
+      view.text().slice(0, 260),
+    );
+    await view.close();
+
+    window.happyDOM.setURL(`${pwa.STABLE_INSTALL_ORIGIN}/`);
+    window.localStorage.setItem(
+      pwa.INSTALL_STORAGE_KEY,
+      JSON.stringify({
+        firstSeenAt: "2026-10-12T09:00:00.000Z",
+        invitedAt: "2026-10-12T09:00:10.000Z",
+        dismissedAt: "2026-10-12T09:00:25.000Z",
+      }),
+    );
+    const tetap = await renderTree(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(InstallPrompt, null),
+          React.createElement(InstallButton, null),
+        ),
+      ),
+    );
+    await flush();
+    await tetap.click("Pasang aplikasi");
+    check(
+      "di alamat tetap, peringatan alamat sementara tidak muncul",
+      tetap.container.querySelector('[data-notis="alamat-sementara"]') === null &&
+        tetap.text().includes("Pasang lewat menu browser"),
+      tetap.text().slice(0, 240),
+    );
+    await tetap.close();
+    timers.restore();
+    window.happyDOM.setURL("https://mesinpos.test/");
   }
 
   // ── 6. Penempatan tombol: di header beranda, tepat sebelum "Masuk" ───────

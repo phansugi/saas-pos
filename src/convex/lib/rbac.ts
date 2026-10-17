@@ -13,10 +13,10 @@
  *    peran bawaan. Kalau hanya menambah, "kasir yang tidak boleh membatalkan
  *    transaksi" tidak bisa dibuat: peran bawaannya sudah punya izin itu.
  * 2. **Tidak ada eskalasi lewat nama baru.** Pembuat peran tidak bisa memberi
- *    izin yang dia sendiri tidak punya; peran bawaan yang dipakai untuk
- *    memeriksa itu adalah peran dasar anggota yang membuat, bukan peran
- *    kustomnya. Tanpa pagar ini, manajer bisa membuat peran berisi
- *    `billing.manage` lalu menugaskannya ke dirinya sendiri.
+ *    izin yang dia sendiri tidak punya — diukur dari izin **efektif** pembuatnya
+ *    (peran bawaan yang sudah disesuaikan, atau peran tambahannya sendiri).
+ *    Tanpa pagar ini, manajer bisa membuat peran berisi `billing.manage` lalu
+ *    menugaskannya ke dirinya sendiri.
  * 3. **Peran kustom tidak boleh menyamar jadi peran bawaan.** Nama seperti
  *    "Kasir" atau "cashier" ditolak supaya daftar anggota tidak pernah punya dua
  *    peran berbeda dengan nama yang sama — orang akan salah membaca izinnya.
@@ -110,6 +110,17 @@ export function sanitizePermissions(
   return KNOWN_PERMISSIONS.filter((permission) => wanted.has(permission));
 }
 
+/** Izin yang diminta tetapi **tidak** ada di daftar izin yang dimiliki. */
+export function lackingFromPermissions(
+  actingPermissions: readonly Permission[],
+  permissions: readonly Permission[],
+): Permission[] {
+  const have = new Set(sanitizePermissions(actingPermissions));
+  return sanitizePermissions(permissions).filter(
+    (permission) => !have.has(permission),
+  );
+}
+
 /** Izin yang diminta tetapi **tidak** dimiliki peran pembuatnya. */
 export function lackingPermissions(
   actingRole: Role,
@@ -129,17 +140,21 @@ export function lackingPermissions(
  * satu baris data yang salah bentuk.
  */
 export function effectivePermissions(
-  role: Role,
+  role: Role | null | undefined,
   customPermissions?: readonly Permission[] | null,
 ): Permission[] {
   const custom = sanitizePermissions(customPermissions);
   if (custom.length > 0) return custom;
+  // Anggota berperan tambahan tidak punya peran bawaan sama sekali: kalau peran
+  // tambahannya tidak sah, ia **tidak** jatuh ke izin peran tertentu — ia tidak
+  // punya izin sampai pemilik menugaskan peran lagi.
+  if (!role) return [];
   return sanitizePermissions(permissionsFor(role));
 }
 
 /** Apakah anggota dengan peran ini boleh melakukan `permission`? */
 export function memberCan(
-  role: Role,
+  role: Role | null | undefined,
   customPermissions: readonly Permission[] | null | undefined,
   permission: Permission,
 ): boolean {
@@ -167,7 +182,7 @@ export function permissionDelta(
  * Kenapa sebuah keanggotaan tidak boleh ditugaskan ke peran kustom.
  * `null` berarti boleh.
  */
-export function assignmentError(targetRole: Role): string | null {
+export function assignmentError(targetRole: Role | null | undefined): string | null {
   if (targetRole === "owner") {
     return "Pemilik tenant selalu memegang seluruh izin; peran kustom tidak bisa ditugaskan kepadanya.";
   }
@@ -186,8 +201,19 @@ export function describeCustomRole(role: CustomRoleLike): string {
 export function validateCustomRole(
   input: CustomRoleInput,
   options: {
-    /** Peran dasar pembuat, untuk pagar eskalasi. */
-    actingRole: Role;
+    /**
+     * Peran **bawaan** pembuat — hanya cadangan saat `actingPermissions` tidak
+     * diberikan. `null` berarti pembuatnya sendiri memakai peran tambahan
+     * (berdiri sendiri): tidak ada izin peran bawaan mana pun yang bisa dipakai,
+     * jadi pemanggil **wajib** mengirim `actingPermissions`.
+     */
+    actingRole: Role | null;
+    /**
+     * Izin efektif pembuat. Ini yang dipakai pagar eskalasi kalau ada — sama
+     * dengan `roles.assign`, supaya peran bawaan yang sudah disesuaikan (atau
+     * peran tambahan pembuatnya) ikut berlaku.
+     */
+    actingPermissions?: readonly Permission[];
     /** Nama peran kustom lain di tenant ini. */
     existingNames?: readonly string[];
     /** Jumlah peran kustom yang sudah ada (untuk batas paket). */
@@ -238,7 +264,17 @@ export function validateCustomRole(
     };
   }
 
-  const lacking = lackingPermissions(options.actingRole, permissions);
+  /*
+    Pagar eskalasi memakai izin yang **benar-benar** dipegang pembuatnya
+    (`actingPermissions`); `actingRole` hanya cadangan untuk pemanggil lama yang
+    belum menghitung izin efektif.
+  */
+  const lacking = options.actingPermissions
+    ? lackingFromPermissions(options.actingPermissions, permissions)
+    : options.actingRole
+      ? lackingPermissions(options.actingRole, permissions)
+      : // Tanpa peran bawaan & tanpa izin efektif: tidak ada wewenang sama sekali.
+        lackingFromPermissions([], permissions);
   if (lacking.length > 0) {
     return {
       ok: false,
@@ -273,8 +309,18 @@ export interface PermissionGroup {
 
 export const PERMISSION_GROUPS: PermissionGroup[] = [
   {
-    label: "Kasir & meja",
-    permissions: ["pos.sell", "pos.void", "table.manage"],
+    // Dapur & kas ikut di sini karena ketiganya satu meja kerja: jualan,
+    // antrean dapur, kas, dan denah. Sejak izinnya dipisah, merchant bisa
+    // membuat peran “dapur saja” (`kds.manage`) atau “kas saja” (`shift.manage`)
+    // tanpa memberi `pos.sell`.
+    label: "Kasir, dapur & kas",
+    permissions: [
+      "pos.sell",
+      "pos.void",
+      "kds.manage",
+      "shift.manage",
+      "table.manage",
+    ],
   },
   {
     label: "Produk & stok",

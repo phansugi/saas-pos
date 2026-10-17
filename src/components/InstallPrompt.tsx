@@ -8,22 +8,28 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Download, Share2, Smartphone, X } from "lucide-react";
+import { Download, Share2, Smartphone, TriangleAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
   INSTALL_PROMPT_DELAY_MS,
   INSTALL_STORAGE_KEY,
+  STABLE_INSTALL_ORIGIN,
+  installedFromRelatedApps,
+  isEphemeralOrigin,
   isInstalled,
   looksLikeIos,
   markDismissed,
+  markInstalled,
   markInvited,
+  markNotInstalled,
   manualInstallSteps,
   readInstallRecord,
   serializeInstallRecord,
   shouldOfferInvite,
   shouldShowInstallButton,
   startInstallRecord,
+  temporaryAddressNotice,
   type InstallRecord,
 } from "@/lib/pwa";
 
@@ -45,6 +51,13 @@ export interface InstallOffer {
   buttonVisible: boolean;
   /** Petunjuk pemasangan manual sedang terbuka (mis. Safari iOS). */
   instructionsOpen: boolean;
+  /**
+   * Halaman ini dibuka dari alamat yang tidak lama hidup (pratinjau/lokal), jadi
+   * memasang aplikasinya dari sini menghasilkan ikon yang nanti tidak bisa dibuka.
+   */
+  temporaryOrigin: boolean;
+  /** Alamat tetap yang disarankan untuk memasang aplikasinya. */
+  stableOrigin: string;
   accept(): Promise<void>;
   dismiss(): void;
   openInstructions(): void;
@@ -61,6 +74,8 @@ const INERT: InstallOffer = {
   inviteOpen: false,
   buttonVisible: false,
   instructionsOpen: false,
+  temporaryOrigin: false,
+  stableOrigin: STABLE_INSTALL_ORIGIN,
   accept: async () => {},
   dismiss: () => {},
   openInstructions: () => {},
@@ -69,17 +84,44 @@ const INERT: InstallOffer = {
 
 const InstallContext = createContext<InstallOffer | null>(null);
 
-function detectInstalled(): boolean {
+/** Halaman ini sedang dibuka dari aplikasi yang terpasang? (mode tampilan + iOS) */
+function detectInstalledWindow(): boolean {
   if (typeof window === "undefined") return false;
-  const media = (query: string) =>
-    typeof window.matchMedia === "function" && window.matchMedia(query).matches;
+  const media = (mode: string) =>
+    typeof window.matchMedia === "function" &&
+    window.matchMedia(`(display-mode: ${mode})`).matches;
   const iosStandalone =
     (window.navigator as Navigator & { standalone?: boolean }).standalone === true;
   return isInstalled({
-    fullscreen: media("(display-mode: fullscreen)"),
-    standalone: media("(display-mode: standalone)"),
+    fullscreen: media("fullscreen"),
+    standalone: media("standalone"),
+    minimalUi: media("minimal-ui"),
+    windowControlsOverlay: media("window-controls-overlay"),
     iosStandalone,
   });
+}
+
+/**
+ * Tanya peramban apakah aplikasi ini sudah terpasang di perangkat, dari **tab
+ * biasa** sekalipun: `navigator.getInstalledRelatedApps()` (Chromium; butuh
+ * rujukan diri di `related_applications` manifest). Peramban yang tidak punya
+ * API-nya (Safari, Firefox) menjawab “tidak tahu” — dan itu memang jawabannya,
+ * bukan alasan menampilkan tombol yang sudah tidak berguna.
+ */
+async function detectInstalledOnDevice(): Promise<boolean> {
+  if (typeof window === "undefined") return false;
+  const navigatorWithRelatedApps = window.navigator as Navigator & {
+    getInstalledRelatedApps?: () => Promise<unknown>;
+  };
+  if (typeof navigatorWithRelatedApps.getInstalledRelatedApps !== "function") return false;
+  try {
+    return installedFromRelatedApps(await navigatorWithRelatedApps.getInstalledRelatedApps());
+  } catch {
+    // API-nya menolak kalau manifestnya tidak merujuk dirinya sendiri, atau di
+    // konteks yang tidak diizinkan. Itu bukan kegagalan aplikasi: yang hilang
+    // hanya satu cara tahu — bukan halaman yang harus gagal dimuat.
+    return false;
+  }
 }
 
 /**
@@ -91,23 +133,39 @@ function detectInstalled(): boolean {
  * membaca keadaan yang sama dari sini.
  */
 export function InstallProvider({ children }: { children: ReactNode }) {
-  const [installed, setInstalled] = useState(detectInstalled);
+  const [installed, setInstalled] = useState(detectInstalledWindow);
   const [record, setRecord] = useState<InstallRecord | null>(null);
+  // Alamat halaman tidak berubah selama sesi, jadi dibaca sekali saja.
+  const [origin] = useState(() =>
+    typeof window === "undefined" ? "" : window.location.origin,
+  );
   const [canInstall, setCanInstall] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [instructionsOpen, setInstructionsOpen] = useState(false);
   const promptRef = useRef<BeforeInstallPromptEvent | null>(null);
   const recordRef = useRef<InstallRecord | null>(null);
+  /**
+   * Peramban sudah menjawab “aplikasi ini terpasang di perangkat”. Dipakai
+   * sebagai pagar bagi timer ajakan: jawabannya asinkron, sedangkan timer-nya
+   * sudah dijadwalkan lebih dulu — tanpa pagar ini, ajakan tetap muncul 10 detik
+   * kemudian di perangkat yang justru sudah memasang aplikasinya.
+   */
+  const installedOnDeviceRef = useRef(false);
 
-  const persist = useCallback((next: InstallRecord) => {
+  /** Catatan dibaca tanpa ditulis ulang: halaman dibuka, bukan mengubah apa pun. */
+  const hydrate = useCallback((next: InstallRecord) => {
     recordRef.current = next;
     setRecord(next);
+  }, []);
+
+  const persist = useCallback((next: InstallRecord) => {
+    hydrate(next);
     try {
       window.localStorage.setItem(INSTALL_STORAGE_KEY, serializeInstallRecord(next));
     } catch {
       // Mode privat/menolak simpanan: ajakan tetap jalan untuk sesi ini.
     }
-  }, []);
+  }, [hydrate]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -116,7 +174,15 @@ export function InstallProvider({ children }: { children: ReactNode }) {
     // ia masih berhak tampil.
     const stored = readInstallRecord(window.localStorage.getItem(INSTALL_STORAGE_KEY));
     const first = stored ?? startInstallRecord(new Date());
-    persist(first);
+    const windowInstalled = detectInstalledWindow();
+    // Dibuka dari ikon aplikasi terpasang ⇒ perangkat ini memang sudah memasang
+    // aplikasinya. Dicatat permanen, supaya kunjungan berikutnya **di tab browser
+    // biasa** juga tidak ditawari tombol “Pasang” lagi.
+    const initial = windowInstalled ? markInstalled(first, new Date()) : first;
+    // Ditulis hanya kalau memang ada yang berubah: pengunjung lama yang catatannya
+    // sudah lengkap tidak perlu ditulis ulang setiap halaman dibuka.
+    if (initial === stored) hydrate(stored);
+    else persist(initial);
 
     const onBeforeInstallPrompt = (event: Event) => {
       // Ditahan: yang memutuskan kapan menawarkan adalah aplikasi (10 detik),
@@ -124,32 +190,59 @@ export function InstallProvider({ children }: { children: ReactNode }) {
       event.preventDefault();
       promptRef.current = event as BeforeInstallPromptEvent;
       setCanInstall(true);
+      // Browser menawarkan pemasangan ⇒ aplikasinya **belum** terpasang di sini.
+      // Kalau catatannya masih bilang “sudah”, catatan lama itu yang benar dibuang
+      // (mis. setelah aplikasinya dicopot): tanpa ini, tombolnya hilang selamanya.
+      if (!detectInstalledWindow()) {
+        setInstalled(false);
+        const current = recordRef.current;
+        if (current) persist(markNotInstalled(current));
+      }
     };
     const onInstalled = () => {
       setInstalled(true);
       setInviteOpen(false);
       setInstructionsOpen(false);
+      const current = recordRef.current;
+      if (current) persist(markInstalled(current, new Date()));
     };
 
     window.addEventListener("beforeinstallprompt", onBeforeInstallPrompt);
     window.addEventListener("appinstalled", onInstalled);
 
     let timer: number | undefined;
-    if (shouldOfferInvite(first, detectInstalled())) {
+    if (shouldOfferInvite(first, windowInstalled)) {
       timer = window.setTimeout(() => {
-        if (detectInstalled()) return;
+        if (installedOnDeviceRef.current || detectInstalledWindow()) return;
         setInviteOpen(true);
         persist(markInvited(recordRef.current ?? first, new Date()));
       }, INSTALL_PROMPT_DELAY_MS);
     }
 
+    // Jalur “dari tab browser biasa”: hanya peramban yang punya API-nya yang bisa
+    // menjawab, dan jawabannya asinkron — jadi ajakannya baru diputuskan setelah
+    // ini, bukan sebelumnya.
+    let alive = true;
+    void detectInstalledOnDevice().then((deviceInstalled) => {
+      if (!alive || !deviceInstalled) return;
+      installedOnDeviceRef.current = true;
+      // Ajakannya tidak perlu dijadwalkan lagi: perangkatnya sudah memasang.
+      if (timer !== undefined) window.clearTimeout(timer);
+      setInstalled(true);
+      setInviteOpen(false);
+      const current = recordRef.current;
+      if (current) persist(markInstalled(current, new Date()));
+    });
+
     return () => {
+      alive = false;
       window.removeEventListener("beforeinstallprompt", onBeforeInstallPrompt);
       window.removeEventListener("appinstalled", onInstalled);
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [persist]);
+  }, [hydrate, persist]);
 
+  /** Ajakan ditutup (atau pemasangan ditolak): dicatat supaya tidak ditawarkan lagi. */
   const settle = useCallback(() => {
     setInviteOpen(false);
     const current = recordRef.current;
@@ -187,6 +280,8 @@ export function InstallProvider({ children }: { children: ReactNode }) {
       inviteOpen,
       buttonVisible: shouldShowInstallButton(record, { installed, inviteOpen }),
       instructionsOpen,
+      temporaryOrigin: isEphemeralOrigin(origin),
+      stableOrigin: STABLE_INSTALL_ORIGIN,
       accept,
       dismiss,
       openInstructions,
@@ -201,6 +296,7 @@ export function InstallProvider({ children }: { children: ReactNode }) {
       installed,
       inviteOpen,
       openInstructions,
+      origin,
       record,
     ],
   );
@@ -236,6 +332,14 @@ export function InstallPrompt() {
             Terbuka layar penuh tanpa bilah browser, ikonnya sendiri di layar
             utama, dan kasir tetap jalan saat internet mati.
           </p>
+          {offer.temporaryOrigin && (
+            <p className="mt-2 flex items-start gap-1.5 text-xs text-amber-500">
+              <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+              <span data-notis="alamat-sementara">
+                {temporaryAddressNotice(offer.stableOrigin)}
+              </span>
+            </p>
+          )}
           <div className="mt-3 flex flex-wrap gap-2">
             <Button size="sm" onClick={() => void offer.accept()}>
               <Download className="size-4" />
@@ -310,6 +414,14 @@ export function InstallButton({ className }: { className?: string }) {
               <X className="size-4" />
             </button>
           </div>
+          {offer.temporaryOrigin && (
+            <p className="mt-2 flex items-start gap-1.5 text-xs text-amber-500">
+              <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+              <span data-notis="alamat-sementara">
+                {temporaryAddressNotice(offer.stableOrigin)}
+              </span>
+            </p>
+          )}
           <ol className="mt-2 space-y-1.5 text-xs text-muted-foreground">
             {manualInstallSteps(ios).map((step, index) => (
               <li key={step} className="flex gap-2">

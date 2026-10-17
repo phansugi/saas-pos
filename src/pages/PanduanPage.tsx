@@ -83,7 +83,7 @@ export function PanduanPage() {
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="secondary" className="gap-1.5">
             <FileText className="size-3" />
-            18 bagian · 12 gambar
+            19 bagian · 12 gambar
           </Badge>
           <Button asChild>
             <a href={PDF_URL} download="panduan-mesinpos.pdf">
@@ -258,7 +258,7 @@ export function PanduanPage() {
         <CardHeader className="pb-3">
           <CardTitle className="text-base">Pratinjau panduan</CardTitle>
           <CardDescription>
-            Berkas PDF 18 bagian: masuk &amp; menyiapkan workspace, tiga cara mengisi
+            Berkas PDF 19 bagian: masuk &amp; menyiapkan workspace, tiga cara mengisi
             stok, <strong>pembelian lengkap</strong> (supplier, PR, PO, penerimaan
             bertahap, tagihan supplier, pencocokan 3 arah &amp; pembayaran hutang),
             memindahkan stok, <strong>opname lengkap</strong> (hitung fisik, selisih,
@@ -267,10 +267,14 @@ export function PanduanPage() {
             <strong>setelan PPN</strong> (ubah tarif &amp; mematikannya),
             <strong>logo toko</strong> (dipakai sidebar &amp; setiap struk),{" "}
             <strong>printer &amp; kertas struk</strong> (jenis mesin, lebar kertas &
-            ukuran cetak yang mengatur dirinya sendiri), dan{" "}
+            ukuran cetak yang mengatur dirinya sendiri),{" "}
             <strong>kirim struk ke WhatsApp pembeli</strong> (gambar berlogo yang
             tampil sebagai foto, syarat kanalnya, dan jalan lain saat kanalnya belum
-            tersambung), sampai pemecahan masalah stok. Kalau
+            tersambung), dan{" "}
+            <strong>jam operasional &amp; pemberitahuan ke pemilik toko</strong> (kapan
+            pemilik dikabari kalau kasnya belum dibuka atau shiftnya belum ditutup,
+            beserta apa yang tercatat di halaman Shift &amp; Kas), sampai pemecahan
+            masalah stok. Kalau
             perangkat Anda tidak menampilkan pratinjau, pakai tombol{" "}
             <strong>Unduh PDF</strong> di atas.
           </CardDescription>

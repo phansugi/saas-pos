@@ -1,5 +1,10 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import {
+  CANCEL_NOT_FOUND_REASON,
+  cancelRegistrationRefusal,
+  cancelledRegistrationSentence,
+} from "./lib/account";
 import { verifyActor } from "./lib/auth";
 import {
   applyUserProfileDraft,
@@ -78,6 +83,83 @@ export const updateProfile = mutation({
 
     await ctx.db.patch(args.userId, { name: after.name, phone: after.phone ?? undefined });
     return { changed: true, ...after, sentence: userProfileSentence(after) };
+  },
+});
+
+/**
+ * Membatalkan pendaftaran: **menghapus akun (email) yang baru dipakai mendaftar**.
+ *
+ * Dipanggil dari tautan “Batalkan” di halaman onboarding, yaitu saat akun baru
+ * belum punya workspace. Yang dihapus bukan hanya sesi perangkat, melainkan baris
+ * `users` beserta jejak masuknya (`authSessions`, `authRefreshTokens`,
+ * `authAccounts`, `authVerificationCodes`) — tanpa itu emailnya tetap “sudah
+ * terdaftar” dan tidak bisa dipakai mendaftar dari awal.
+ *
+ * Pagarnya ada di `lib/account.ts` dan dijalankan **sebelum** apa pun dihapus:
+ * akun yang sudah punya keanggotaan (bisa saja barisnya pemilik workspace) dan
+ * akun platform ditolak dengan kalimat yang menjelaskan jalan keluarnya. Pemanggil
+ * juga harus memegang identitas baris yang sama (`verifyActor`), jadi id orang
+ * lain tidak bisa dipakai menghapus akunnya.
+ *
+ * Baris `emailOtps` sengaja **tidak** ikut dihapus: isinya hash kode masuk yang
+ * sudah kedaluwarsa dan dipakai sebagai bukti/batas kirim ulang. Yang diminta
+ * pengguna adalah emailnya keluar dari daftar akun, bukan riwayat kode itu.
+ */
+export const cancelRegistration = mutation({
+  args: { userId: v.id("users") },
+  handler: async (ctx, args) => {
+    await verifyActor(ctx, args.userId);
+
+    const user = await ctx.db.get(args.userId);
+    if (!user) throw new Error(CANCEL_NOT_FOUND_REASON);
+
+    // Keanggotaan apa pun — aktif maupun nonaktif — berarti akun ini sudah
+    // menjadi bagian sebuah bisnis, jadi pendaftarannya bukan lagi “baru”.
+    const membership = await ctx.db
+      .query("memberships")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .first();
+
+    const refusal = cancelRegistrationRefusal({
+      hasMemberships: membership !== null,
+      platformRole: user.platformRole,
+    });
+    if (refusal) throw new Error(refusal);
+
+    // Sesi & token masuk yang menunjuk baris ini. Dihapus lebih dulu supaya
+    // token yang masih hidup tidak menunjuk pengguna yang sudah tidak ada.
+    const sessions = await ctx.db
+      .query("authSessions")
+      .withIndex("userId", (q) => q.eq("userId", args.userId))
+      .collect();
+    for (const session of sessions) {
+      const tokens = await ctx.db
+        .query("authRefreshTokens")
+        .withIndex("sessionId", (q) => q.eq("sessionId", session._id))
+        .collect();
+      for (const token of tokens) await ctx.db.delete(token._id);
+      await ctx.db.delete(session._id);
+    }
+
+    const accounts = await ctx.db
+      .query("authAccounts")
+      .withIndex("userIdAndProvider", (q) => q.eq("userId", args.userId))
+      .collect();
+    for (const account of accounts) {
+      const codes = await ctx.db
+        .query("authVerificationCodes")
+        .withIndex("accountId", (q) => q.eq("accountId", account._id))
+        .collect();
+      for (const code of codes) await ctx.db.delete(code._id);
+      await ctx.db.delete(account._id);
+    }
+
+    await ctx.db.delete(args.userId);
+    return {
+      deleted: true as const,
+      email: user.email,
+      sentence: cancelledRegistrationSentence(user.email),
+    };
   },
 });
 

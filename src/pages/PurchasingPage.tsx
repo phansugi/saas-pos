@@ -744,7 +744,7 @@ export function PurchasingPage() {
                 <Plus className="size-4" />
                 Ajukan permintaan
               </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-4">
+              <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-4">
                 <label className="text-xs text-muted-foreground md:col-span-2">
                   Produk
                   <select
@@ -780,7 +780,10 @@ export function PurchasingPage() {
                     onChange={(e) => setPrForm((c) => ({ ...c, note: e.target.value }))}
                   />
                 </label>
-                <div className="flex items-start gap-2 md:col-span-4">
+                {/* `flex-wrap`: di layar 320 px tombol “Kirim permintaan (…)” tidak muat
+                    sebaris dengan “Tambah baris”, dan labelnya `whitespace-nowrap` — tanpa
+                    membungkus, tombolnya terpotong di tepi kanan. */}
+                <div className="flex flex-wrap items-start gap-2 md:col-span-4">
                   <Button variant="outline" disabled={busy} onClick={addRequisitionLine}>
                     Tambah baris
                   </Button>
@@ -924,7 +927,7 @@ export function PurchasingPage() {
                 </p>
               ) : (
                 <div className="mt-3 space-y-3">
-                  <div className="grid gap-3 md:grid-cols-4">
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
                     <label className="text-xs text-muted-foreground">
                       PR
                       <select
@@ -1147,7 +1150,7 @@ export function PurchasingPage() {
               </div>
 
               <div className="mt-4 text-sm font-semibold">Tambah supplier</div>
-              <div className="mt-3 grid gap-3 md:grid-cols-4">
+              <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-4">
                 <label className="text-xs text-muted-foreground md:col-span-2">
                   Nama supplier
                   <Input
@@ -1240,7 +1243,7 @@ export function PurchasingPage() {
             </p>
           ) : (
             <div className="space-y-3">
-              <div className="grid gap-3 md:grid-cols-4">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
                 <label className="text-xs text-muted-foreground">
                   PO
                   <select
@@ -1654,7 +1657,7 @@ export function PurchasingPage() {
                 Untuk saldo awal atau tagihan jasa. Jatuh temponya boleh sudah lewat,
                 supaya umur hutang lamanya ikut benar.
               </p>
-              <div className="mt-3 grid gap-3 md:grid-cols-5">
+              <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-5">
                 <label className="text-xs text-muted-foreground md:col-span-2">
                   Supplier
                   <select

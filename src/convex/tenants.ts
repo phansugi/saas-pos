@@ -16,7 +16,13 @@ import {
   taxSettingSentence,
   validateTaxRatePct,
 } from "./lib/tax";
-import { planKeyValidator, verticalValidator, fnbTaxProfileValidator, receiptSettingValidator } from "./schema";
+import {
+  planKeyValidator,
+  verticalValidator,
+  fnbTaxProfileValidator,
+  receiptSettingValidator,
+  shiftSettingValidator,
+} from "./schema";
 import {
   fnbTaxProfileOf,
   fnbTaxProfileSentence,
@@ -29,6 +35,12 @@ import {
   sameReceiptSetting,
   validateReceiptSetting,
 } from "./lib/struk";
+import {
+  sameShiftSetting,
+  shiftSettingOf,
+  shiftSettingSentence,
+  validateShiftSetting,
+} from "./lib/shift";
 import { validateTenantLogo } from "./lib/tenantLogo";
 import {
   applyTenantProfileDraft,
@@ -506,6 +518,55 @@ export const updateReceipt = mutation({
     });
 
     return { changed: true, setting: after, sentence: receiptSettingSentence(after) };
+  },
+});
+
+/**
+ * Mengatur pengingat tutup shift: jam pengingat, ambang “shift sudah terlalu
+ * lama”, dan saklar hidup/matinya.
+ *
+ * Izinnya `billing.manage`, sama dengan setelan PPN, pajak F&B, dan struk —
+ * semuanya setelan **workspace** yang hidup di halaman Pengaturan, dan halaman
+ * itu memang dijaga izin tersebut: tidak ada tombol yang ditawarkan kepada orang
+ * yang akan ditolak server.
+ *
+ * Nilainya diperiksa aturan murni `lib/shift.ts` sebelum disimpan: jam harus
+ * 0–23 dan ambangnya 1–24 jam, supaya kasir tidak pernah menerima pengingat pada
+ * jam yang tidak ada. Setelan yang tidak mengubah apa pun juga tidak menulis
+ * jejak audit.
+ */
+export const updateShift = mutation({
+  args: {
+    tenantId: v.id("tenants"),
+    actorId: v.id("users"),
+    setting: shiftSettingValidator,
+  },
+  handler: async (ctx, args) => {
+    await requirePermission(ctx, args.tenantId, args.actorId, "billing.manage");
+
+    const tenant = await getTenantOrThrow(ctx, args.tenantId);
+    const decision = validateShiftSetting(args.setting);
+    if (!decision.ok) throw new Error(decision.reason);
+
+    const before = shiftSettingOf(tenant.shift);
+    const after = decision.value;
+
+    if (sameShiftSetting(before, after)) {
+      return { changed: false, setting: after, sentence: shiftSettingSentence(after) };
+    }
+
+    await ctx.db.patch(args.tenantId, { shift: after });
+
+    await writeAuditLog(ctx, {
+      tenantId: args.tenantId,
+      actorId: args.actorId,
+      action: "tenant.shift",
+      entity: "tenants",
+      entityId: args.tenantId,
+      meta: { before, after },
+    });
+
+    return { changed: true, setting: after, sentence: shiftSettingSentence(after) };
   },
 });
 

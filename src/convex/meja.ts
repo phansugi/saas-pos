@@ -326,7 +326,15 @@ export const order = mutation({
     const pay = guestPaymentMethod({ method: args.method, bank: args.bank });
     if (!pay.ok) return { ok: false as const, reason: pay.reason };
 
-    // Satu meja satu pesanan terbuka — aturan yang sama dengan `pos.createSale`.
+    /*
+      Satu meja satu pesanan terbuka. Di sini yang dihitung **hanya pesanan
+      tertahan**, bukan seluruh tiket dapur seperti `pos.createSale`: yang sedang
+      diperiksa adalah tamu yang duduk di meja itu dan memesan lewat kartu QR —
+      mereka boleh memesan giliran berikutnya selama tidak ada tagihan yang masih
+      terbuka di meja yang sama. Kunci meja "sampai dapur menekan Selesai"
+      berlaku untuk **pemilihan meja oleh kasir**, tempat dua transaksi berbeda
+      bisa tercampur di satu meja.
+    */
     const onTable = await ctx.db
       .query("sales")
       .withIndex("by_table", (q) => q.eq("tableId", table._id))

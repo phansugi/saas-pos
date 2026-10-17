@@ -127,7 +127,13 @@ export function SubscriptionPage() {
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-6 lg:grid-cols-[1.3fr_1fr]">
+      {/*
+        `grid-cols-1` wajib: tanpa kolom eksplisit, kolom implisitnya berukuran
+        `auto` — ia melebar sampai `max-content` isinya, jadi satu panel yang lebih
+        lebar dari layar HP menarik seluruh halaman ikut melebar dan isinya
+        terpotong di tepi kanan (kelas bug yang sama dengan halaman kasir).
+      */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1.3fr_1fr]">
         <Card>
           <CardHeader>
             <div className="flex items-center justify-between">

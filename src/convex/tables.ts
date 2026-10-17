@@ -12,7 +12,8 @@
  * dijawab dengan menonaktifkan. Yang benar-benar dihapus adalah meja yang belum
  * pernah dipakai (mis. salah tambah), supaya riwayat tidak kehilangan mejanya.
  * Status "terisi" juga tidak disimpan di sini; aturannya ada di `lib/fnb.ts`
- * (meja terisi = ada pesanan `held` yang menunjuknya).
+ * (meja terisi = ada **tiket dapur** yang menunjuknya — pesanan tertahan maupun
+ * penjualan lunas yang belum ditandai selesai oleh dapur).
  */
 
 import { v } from "convex/values";
@@ -32,7 +33,10 @@ import {
   resolveTableInput,
   sortTablesByOrder,
   tableDeletionCheck,
+  tableHolders,
   tableNameTaken,
+  tableOccupiedReason,
+  type OpenOrderRef,
   type TableRef,
   type TableUsage,
 } from "./lib/fnb";
@@ -82,16 +86,31 @@ async function tablesForStore(
   );
 }
 
-/** Pesanan terbuka (tertahan) yang menempati sebuah meja, kalau ada. */
+/**
+ * Tiket dapur yang sedang menempati sebuah meja, kalau ada — pesanan tertahan
+ * atau penjualan yang sudah dibayar tetapi belum ditandai selesai oleh dapur.
+ * Aturannya `tableHolders`, sama dengan yang dipakai kasir saat memilih meja.
+ */
 async function openOrderOnTable(
   ctx: Ctx,
   tableId: Id<"tables">,
-): Promise<Doc<"sales"> | null> {
+): Promise<OpenOrderRef | null> {
   const rows = await ctx.db
     .query("sales")
     .withIndex("by_table", (q) => q.eq("tableId", tableId))
     .collect();
-  return rows.find((sale) => sale.status === "held") ?? null;
+  const [holder] = tableHolders(
+    rows.map((sale) => ({
+      id: sale._id,
+      number: sale.number,
+      createdAt: sale.createdAt,
+      tableId: sale.tableId,
+      status: sale.status,
+      kitchenFiredAt: sale.kitchenFiredAt,
+      kitchenDoneAt: sale.kitchenDoneAt,
+    })),
+  );
+  return holder ?? null;
 }
 
 /** Denah meja sebuah toko. Dibaca kasir dan layar dapur; anggota saja. */
@@ -350,11 +369,7 @@ export const setActive = mutation({
 
     if (!args.active) {
       const open = await openOrderOnTable(ctx, args.tableId);
-      if (open) {
-        throw new Error(
-          `Meja ${table.name} masih terisi pesanan ${open.number}. Selesaikan atau batalkan dulu.`,
-        );
-      }
+      if (open) throw new Error(tableOccupiedReason(table.name, open));
     }
 
     await ctx.db.patch(args.tableId, { active: args.active });

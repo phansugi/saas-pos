@@ -267,6 +267,10 @@ export const advanced = query({
       previousSales: inputs,
       range,
       timezoneOffsetMinutes: offset,
+      // “Hari ini” menurut jam server hanya dipakai untuk memisahkan hari penuh
+      // dari hari yang sedang berjalan; batas harinya sendiri tetap mengikuti
+      // offset klien lewat `range`.
+      now: Date.now(),
     });
   },
 });
