@@ -413,6 +413,7 @@ check(
     customized: false,
     memberCount: 1,
     canManage: true,
+    editGateReason: null,
   });
   check(
     "pemilik tidak punya tombol apa pun",
@@ -433,6 +434,7 @@ check(
     customized: false,
     memberCount: 0,
     canManage: false,
+    editGateReason: null,
   });
   check(
     "tanpa izin team.manage, semua tombol mati dengan alasannya",
@@ -451,6 +453,7 @@ check(
     customized: true,
     memberCount: 3,
     canManage: true,
+    editGateReason: null,
   });
   check(
     "peran yang masih dipakai: Hapus mati, alasannya menyebut jumlah anggota",
@@ -470,6 +473,7 @@ check(
     customized: false,
     memberCount: 0,
     canManage: true,
+    editGateReason: null,
   });
   check(
     "peran yang dihapus: hanya Pulihkan (dan Ubah izin) yang hidup",
@@ -483,11 +487,59 @@ check(
     customized: false,
     memberCount: 0,
     canManage: true,
+    editGateReason: null,
   });
   check(
     "peran bawaan yang belum disesuaikan: Kembalikan izin bawaan mati",
     kosong.remove && !kosong.reset && !kosong.restore,
     JSON.stringify(kosong),
+  );
+}
+
+/*
+  Gerbang fitur `rbac.custom` harus sampai ke tombolnya. Tanpa itu tombol “Ubah
+  izin” hidup di paket Starter, pengguna menyunting izin, lalu server menolak:
+  “Fitur Custom role (RBAC) tidak termasuk paket Starter.”
+*/
+{
+  const alasan = "Fitur Custom role (RBAC) tidak termasuk paket Starter.";
+  const paketStarter = roleActions({
+    role: "cashier",
+    active: true,
+    removed: false,
+    customized: true,
+    memberCount: 0,
+    canManage: true,
+    editGateReason: alasan,
+  });
+  check(
+    "tanpa fitur rbac.custom tombol Ubah izin mati, tetapi sebabnya terbaca",
+    !paketStarter.edit && paketStarter.editReason === alasan,
+    JSON.stringify(paketStarter),
+  );
+  check(
+    "tanpa fitur rbac.custom Kembalikan izin bawaan juga mati (izin bawaan bisa menambah akses)",
+    !paketStarter.reset,
+    JSON.stringify(paketStarter),
+  );
+  check(
+    "yang tetap boleh tanpa fitur itu: menonaktifkan, menghapus, dan memulihkan peran",
+    paketStarter.toggle && paketStarter.remove,
+    JSON.stringify(paketStarter),
+  );
+  const paketEnterprise = roleActions({
+    role: "cashier",
+    active: true,
+    removed: false,
+    customized: true,
+    memberCount: 0,
+    canManage: true,
+    editGateReason: null,
+  });
+  check(
+    "dengan fitur rbac.custom tombolnya hidup kembali tanpa alasan tersisa",
+    paketEnterprise.edit && paketEnterprise.reset && paketEnterprise.editReason === null,
+    JSON.stringify(paketEnterprise),
   );
 }
 

@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { ModuleRoute } from "@/components/ModuleReadOnly";
 import { LandingPage } from "@/pages/LandingPage";
 import { AuthPage } from "@/pages/AuthPage";
 import { OnboardingPage } from "@/pages/OnboardingPage";
@@ -132,10 +133,12 @@ export function App() {
                 path="kds"
                 element={
                   /* Layar dapur: izinnya sendiri (`kds.manage`), jadi peran
-                     “dapur saja” tidak perlu bisa menjual; server tetap menolak
-                     tenant yang modul F&B-nya mati. */
+                     “dapur saja” tidak perlu bisa menjual. Tanpa modul F&B
+                     halaman ini hanya bisa dibaca (`ModuleRoute`). */
                   <RequirePermission permission="kds.manage">
-                    <KdsPage />
+                    <ModuleRoute feature="pos.kds">
+                      <KdsPage />
+                    </ModuleRoute>
                   </RequirePermission>
                 }
               />
@@ -155,9 +158,12 @@ export function App() {
                 path="receivables"
                 element={
                   /* Piutang B2B (modul Grosir): kasir boleh melihat sisa limit,
-                     tetapi server tetap memeriksa izin `ar.view` per peran. */
+                     tetapi server tetap memeriksa izin `ar.view` per peran.
+                     Tanpa `ar.creditlimit` halaman ini hanya bisa dibaca. */
                   <RequirePermission permission="ar.view">
-                    <ReceivablesPage />
+                    <ModuleRoute feature="ar.creditlimit">
+                      <ReceivablesPage />
+                    </ModuleRoute>
                   </RequirePermission>
                 }
               />
@@ -165,9 +171,12 @@ export function App() {
                 path="members"
                 element={
                   /* Member & diskon (modul UMKM): kasir boleh melihat daftarnya,
-                     tetapi server tetap memeriksa izin `member.view` per peran. */
+                     tetapi server tetap memeriksa izin `member.view` per peran.
+                     Tanpa `member.discount` halaman ini hanya bisa dibaca. */
                   <RequirePermission permission="member.view">
-                    <MembersPage />
+                    <ModuleRoute feature="member.discount">
+                      <MembersPage />
+                    </ModuleRoute>
                   </RequirePermission>
                 }
               />
@@ -194,11 +203,13 @@ export function App() {
                 path="opname"
                 element={
                   /* Stock opname (Phase 3): izin `inventory.view` untuk melihat,
-                     `inventory.manage` untuk menghitung & memposting, dan
-                     server tetap menolak sesi baru di luar fitur
-                     `inventory.opname`. */
+                     `inventory.manage` untuk menghitung & memposting. Tanpa
+                     `inventory.opname` halaman ini hanya bisa dibaca — termasuk
+                     sesi yang sudah berjalan. */
                   <RequirePermission permission="inventory.view">
-                    <OpnamePage />
+                    <ModuleRoute feature="inventory.opname">
+                      <OpnamePage />
+                    </ModuleRoute>
                   </RequirePermission>
                 }
               />
@@ -207,9 +218,12 @@ export function App() {
                 element={
                   /* Pembelian (Phase 3): izin `purchase.view`. Setiap tombol di
                      halaman memakai izin yang lebih sempit lagi (request /
-                     approve / receive), dan server memeriksa ulang. */
+                     approve / receive), dan server memeriksa ulang. Tanpa
+                     `purchasing.basic` halaman ini hanya bisa dibaca. */
                   <RequirePermission permission="purchase.view">
-                    <PurchasingPage />
+                    <ModuleRoute feature="purchasing.basic">
+                      <PurchasingPage />
+                    </ModuleRoute>
                   </RequirePermission>
                 }
               />
@@ -236,11 +250,13 @@ export function App() {
                 path="api"
                 element={
                   /* API & Webhook (`api.access`, Phase 4): izin `api.manage`.
-                     Halaman tetap boleh dibuka tanpa fiturnya supaya kunci &
-                     endpoint lama bisa dicabut — yang ditolak server adalah
-                     membuat yang baru. */
+                     Tanpa fiturnya halaman ini hanya bisa dibaca — kunci &
+                     endpoint lama tetap terlihat, tidak bisa diubah maupun
+                     dicabut dari sini. */
                   <RequirePermission permission="api.manage">
-                    <ApiPage />
+                    <ModuleRoute feature="api.access">
+                      <ApiPage />
+                    </ModuleRoute>
                   </RequirePermission>
                 }
               />
@@ -249,11 +265,13 @@ export function App() {
                 element={
                   /* Dukungan khusus (`support.dedicated`, Phase 5): izin
                      `support.view` untuk melihat tiket & SLA, `support.manage`
-                     untuk mengubahnya. Halaman tetap boleh dibuka tanpa fiturnya
-                     supaya tiket lama bisa ditutup — yang ditolak server adalah
-                     prioritas jalur cepat & eskalasi. */
+                     untuk mengubahnya. Tanpa fiturnya halaman ini hanya bisa
+                     dibaca — tiket lama tetap terlihat, tidak bisa dibalas,
+                     ditutup, atau dieskalasi dari sini. */
                   <RequirePermission permission="support.view">
-                    <SupportPage />
+                    <ModuleRoute feature="support.dedicated">
+                      <SupportPage />
+                    </ModuleRoute>
                   </RequirePermission>
                 }
               />
@@ -262,11 +280,13 @@ export function App() {
                 element={
                   /* Pembayaran digital (`payment.digital`, Phase 6): izin
                      `payment.view` untuk melihat, `payment.manage` untuk
-                     menagih & melunasi. Halaman tetap boleh dibuka tanpa
-                     fiturnya supaya tagihan lama bisa dilunasi & dibatalkan —
-                     yang ditolak server adalah membuat tagihan baru. */
+                     menagih & melunasi. Tanpa fiturnya halaman ini hanya bisa
+                     dibaca — tagihan lama tetap terlihat, tidak bisa ditagih,
+                     dilunasi, atau dibatalkan dari sini. */
                   <RequirePermission permission="payment.view">
-                    <PaymentsPage />
+                    <ModuleRoute feature="payment.digital">
+                      <PaymentsPage />
+                    </ModuleRoute>
                   </RequirePermission>
                 }
               />
@@ -274,11 +294,13 @@ export function App() {
                 path="sync"
                 element={
                   /* Sinkronisasi real-time (`sync.realtime`, Phase 6): izin
-                     `device.manage`. Hub tetap bisa dibuka tanpa fiturnya
-                     supaya detak, menarik, dan membereskan konflik lama tetap
-                     jalan. */
+                     `device.manage`. Tanpa fiturnya halaman ini hanya bisa
+                     dibaca — perangkat, detak, dan konflik tetap terlihat,
+                     tidak bisa ditarik atau dibereskan dari sini. */
                   <RequirePermission permission="device.manage">
-                    <SyncPage />
+                    <ModuleRoute feature="sync.realtime">
+                      <SyncPage />
+                    </ModuleRoute>
                   </RequirePermission>
                 }
               />

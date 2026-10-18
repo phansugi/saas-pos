@@ -1,11 +1,13 @@
 /**
  * Pekerjaan terjadwal MesinPOS.
  *
- * Satu tempat untuk melihat **apa yang jalan otomatis** di backend. Lima jadwal:
+ * Satu tempat untuk melihat **apa yang jalan otomatis** di backend. Tujuh jadwal:
  * percobaan ulang webhook keluar (`api.access`), pengingat janji tanggap tiket
  * dukungan (`support.dedicated`), pengingat **hutang jatuh tempo** dan **piutang
  * lewat tempo** yang keadaannya berubah karena waktu, bukan karena transaksi,
- * serta **perapian sesi pendampingan platform** yang sudah kedaluwarsa.
+ * **perapian sesi pendampingan platform** yang sudah kedaluwarsa, serta
+ * **pembersihan akun uji** (akun bisnis lalu baris pengguna yatim) supaya
+ * deployment dev tidak menumpuk data dari harness yang dijalankan berulang.
  *
  * Kiriman yang gagal sudah disimpan oleh `apiAccess.finishDelivery` sebagai
  * `pending` dengan `nextAttemptAt` (aturan murni `lib/webhooks.ts`:
@@ -29,6 +31,7 @@ import {
   IMPERSONATION_SWEEP_BATCH,
   IMPERSONATION_SWEEP_INTERVAL_MINUTES,
 } from "./lib/impersonation";
+import { USER_PURGE_BATCH } from "./lib/platformTenants";
 import { MAX_RETRY_BATCH, RETRY_WORKER_INTERVAL_MINUTES } from "./lib/webhooks";
 
 const crons = cronJobs();
@@ -81,6 +84,39 @@ crons.interval(
   { minutes: IMPERSONATION_SWEEP_INTERVAL_MINUTES },
   internal.platform.sweepExpiredImpersonations,
   { limit: IMPERSONATION_SWEEP_BATCH },
+);
+
+/*
+  **Pembersihan akun uji** — kebersihan data, bukan fitur aplikasi.
+
+  Harness (`verify-backend.mjs` dan kawan-kawan) mendirikan workspace sungguhan
+  di deployment dev setiap kali dijalankan. Itu perlu untuk menguji gerbang izin
+  dan isolasi tenant, tetapi hasilnya menumpuk: dulu 1096 akun uji harus
+  dibersihkan manual sekali jalan. Dua jadwal ini yang membuatnya tidak terulang:
+
+  1. pukul 19:00 UTC — akun bisnis milik email domain uji ditandai hapus (pekerja
+     `deleteTenantChunk` menyapunya bertahap; `purgeFixtureTenants` menjadwalkan
+     dirinya lagi selama masih ada kandidat), lalu
+  2. pukul 19:30 UTC — baris `users` yang sudah yatim (tanpa tenant, tanpa
+     keanggotaan) ikut dihapus bersama sesi dan kode OTP-nya.
+
+  Jarak 30 menit itu sengaja: penghapusan tenant berjalan bertahap, jadi baris
+  pengguna baru terlihat yatim setelah tenant-nya benar-benar hilang. Akun
+  pengembang platform dan siapa pun yang masih tercatat di sebuah workspace tidak
+  pernah ikut disapu.
+*/
+crons.daily(
+  "membersihkan akun bisnis uji",
+  { hourUTC: 19, minuteUTC: 0 },
+  internal.platform.purgeFixtureTenantsAuto,
+  {},
+);
+
+crons.daily(
+  "membersihkan akun pengguna uji yang yatim",
+  { hourUTC: 19, minuteUTC: 30 },
+  internal.platform.purgeFixtureUsers,
+  { batch: USER_PURGE_BATCH },
 );
 
 export default crons;

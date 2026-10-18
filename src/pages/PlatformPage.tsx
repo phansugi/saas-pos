@@ -46,7 +46,10 @@ import {
   validateImpersonationReason,
 } from "@/lib/impersonation";
 import { AUTH_EMAIL_PROVIDER_ID } from "@/lib/otp";
+import { readableErrorMessage } from "@/lib/errors";
 import { useSession } from "@/lib/session";
+import { PlatformBusinessCategoriesCard } from "@/components/PlatformBusinessCategoriesCard";
+import { PlatformTenantAccountsCard } from "@/components/PlatformTenantAccountsCard";
 import { dataSource } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
@@ -55,14 +58,6 @@ type Directory = FunctionReturnType<typeof api.platform.tenantDirectory>;
 type MySessions = FunctionReturnType<typeof api.platform.myImpersonations>;
 type Help = FunctionReturnType<typeof api.platform.helpTenant>;
 type SessionRow = MySessions["sessions"][number];
-
-function errorText(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  // Pesan Convex tiba sebagai "...\nUncaught ConvexError: <pesan>"; ambil bagian
-  // yang benar-benar ditulis server supaya yang dibaca operator pesannya.
-  const marker = raw.lastIndexOf("ConvexError: ");
-  return (marker >= 0 ? raw.slice(marker + "ConvexError: ".length) : raw).trim();
-}
 
 function formatMoment(ms: number): string {
   return new Date(ms).toLocaleString("id-ID", {
@@ -200,8 +195,15 @@ function PlatformBackstage() {
   const [authBusy, setAuthBusy] = useState(false);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
 
+  /**
+   * Email **sesi aplikasi** perangkat ini. Gerbang platform mencocokkan identitas
+   * login dengan akun yang sedang dipakai, jadi selama sesinya ada, email inilah
+   * yang diverifikasi — bukan alamat lain yang diketik ulang di kolom.
+   */
+  const sessionEmail = session?.user.email ?? null;
+
   /** Email yang dipakai: yang diketik pengembang, kalau tidak ada berarti email sesi. */
-  const emailValue = authEmail || session?.user.email || "";
+  const emailValue = authEmail || sessionEmail || "";
 
   const reasonError = validateImpersonationReason(reason);
 
@@ -218,14 +220,37 @@ function PlatformBackstage() {
     [convex],
   );
 
-  /** Membuka backstage: resolusi aktor, lalu pemeriksaan akun platform oleh server. */
+  /**
+   * Membuka backstage.
+   *
+   * **Jalur utama: identitas lebih dulu.** `platform.meByIdentity` menanyakan ke
+   * server “siapa pemilik token yang sedang masuk ini”, jadi aktornya adalah akun
+   * yang benar-benar memegang kotak masuknya — bukan email sesi aplikasi yang
+   * tersimpan di perangkat ini. Dulu urutannya terbalik (id dari email sesi) dan
+   * perangkat yang masih memegang sesi akun lain membuat backstage menolak dengan
+   * kalimat “identitas login tidak cocok”, sehingga daftar akun bisnis tidak pernah
+   * muncul walau akunnya sah.
+   *
+   * Jalur lama (resolusi lewat email sesi) tetap dipertahankan sebagai cadangan
+   * untuk deployment yang belum punya provider identitas; di sana `meByIdentity`
+   * mengembalikan `null` dan penolakan aslinya tetap terbaca pengguna.
+   */
   const open = useCallback(async () => {
     const email = session?.user.email;
-    if (!email) return;
     setBusy(true);
     setDenied(null);
     setNotice(null);
     try {
+      const byIdentity = await convex.query(api.platform.meByIdentity, {});
+      if (byIdentity) {
+        const id = byIdentity.actorId as Id<"users">;
+        setActorId(id);
+        setMe(byIdentity);
+        await refresh(id);
+        return;
+      }
+
+      if (!email) return;
       const { userId } = await convex.mutation(api.users.createOrGet, {
         email,
         name: session?.user.name ?? email.split("@")[0] ?? "Pengembang",
@@ -236,7 +261,7 @@ function PlatformBackstage() {
       setMe(profile);
       await refresh(id);
     } catch (error) {
-      setDenied(errorText(error));
+      setDenied(readableErrorMessage(error));
       setMe(null);
       setDirectory(null);
       setSessions(null);
@@ -256,7 +281,7 @@ function PlatformBackstage() {
       setAuthSent(true);
       setAuthNotice(`Kode dikirim ke ${email}. Kode ini juga yang membuat identitas Anda terverifikasi di server.`);
     } catch (error) {
-      setAuthNotice(`Gagal mengirim kode: ${errorText(error)}`);
+      setAuthNotice(`Gagal mengirim kode: ${readableErrorMessage(error)}`);
     } finally {
       setAuthBusy(false);
     }
@@ -274,7 +299,7 @@ function PlatformBackstage() {
       setAuthSent(false);
       setAuthNotice("Identitas terverifikasi. Backstage dibuka atas nama akun ini.");
     } catch (error) {
-      setAuthNotice(`Kode tidak diterima: ${errorText(error)}`);
+      setAuthNotice(`Kode tidak diterima: ${readableErrorMessage(error)}`);
     } finally {
       setAuthBusy(false);
     }
@@ -312,7 +337,7 @@ function PlatformBackstage() {
       setNotice(result.summary);
       await refresh(actorId);
     } catch (error) {
-      setNotice(`Gagal membuka sesi: ${errorText(error)}`);
+      setNotice(`Gagal membuka sesi: ${readableErrorMessage(error)}`);
     } finally {
       setBusy(false);
     }
@@ -331,7 +356,7 @@ function PlatformBackstage() {
         setNotice(`Ringkasan dibaca — tercatat sebagai baca ke-${snapshot.helpCount}.`);
         await refresh(actorId);
       } catch (error) {
-        setNotice(`Gagal membaca ringkasan: ${errorText(error)}`);
+        setNotice(`Gagal membaca ringkasan: ${readableErrorMessage(error)}`);
       } finally {
         setBusy(false);
       }
@@ -352,7 +377,7 @@ function PlatformBackstage() {
         setNotice(result.summary);
         await refresh(actorId);
       } catch (error) {
-        setNotice(`Gagal menutup sesi: ${errorText(error)}`);
+        setNotice(`Gagal menutup sesi: ${readableErrorMessage(error)}`);
       } finally {
         setBusy(false);
       }
@@ -367,8 +392,47 @@ function PlatformBackstage() {
   const activeSession =
     (sessions?.sessions ?? []).find((row) => row.status === "active") ?? null;
 
+  /*
+    Baris status paling atas: jawaban singkat atas “kenapa daftar akunnya belum
+    muncul?”. Halaman ini punya beberapa kartu teknis, dan penjelasannya mudah
+    terlewat — padahal sebabnya selalu salah satu dari tiga keadaan di bawah.
+  */
+  const status = me
+    ? {
+        tone: "ok" as const,
+        title: "Daftar akun bisnis terbuka",
+        body: `Server mengenali Anda sebagai ${me.label}. Kartu “2. Akun bisnis” ada di bawah daftar ini.`,
+      }
+    : denied
+      ? {
+          tone: "warn" as const,
+          title: "Backstage ditolak server",
+          body: denied,
+        }
+      : {
+          tone: "todo" as const,
+          title: "Satu langkah lagi untuk melihat daftar akun bisnis",
+          body: `Daftar akun bisnis sengaja tidak ditampilkan sebelum identitas diperiksa: masuk ke aplikasi saja belum cukup, karena yang menentukan di sini adalah kode email ke alamat pengembang${sessionEmail ? ` (${sessionEmail})` : ""}. Kirim kode di kartu di bawah, masukkan kode dari inbox, lalu kartunya muncul sendiri.`,
+        };
+
   return (
     <PlatformShell>
+      <div
+        data-testid="platform-status"
+        data-status={status.tone}
+        className={cn(
+          "rounded-lg border px-4 py-3 text-sm",
+          status.tone === "ok"
+            ? "border-primary/30 bg-primary/5"
+            : status.tone === "warn"
+              ? "border-accent/40 bg-accent/10"
+              : "border-border bg-secondary/30",
+        )}
+      >
+        <div className="font-medium">{status.title}</div>
+        <div className="mt-1 text-muted-foreground">{status.body}</div>
+      </div>
+
       <Card data-testid="platform-identity">
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
@@ -402,14 +466,37 @@ function PlatformBackstage() {
             <div className="space-y-3">
               <div className="space-y-2">
                 <Label htmlFor="plat-auth-email">Email akun platform</Label>
+                {/*
+                  Emailnya **tidak bisa diketik ulang** selama perangkat ini punya
+                  sesi aplikasi: gerbang server mencocokkan identitas login dengan
+                  akun yang sedang dipakai (`verifyActor`), jadi mengetik email lain
+                  di sini selalu berakhir “ditolak” — dan itulah yang membuat daftar
+                  akun bisnis tidak pernah muncul. Kalau akun platformnya berbeda,
+                  yang harus diganti adalah sesi aplikasinya, bukan kolom ini.
+                */}
                 <Input
                   id="plat-auth-email"
                   type="email"
                   value={emailValue}
+                  readOnly={sessionEmail !== null}
+                  aria-readonly={sessionEmail !== null}
+                  className={sessionEmail !== null ? "bg-secondary/40" : undefined}
                   placeholder="nama@domain.id"
                   onChange={(event) => setAuthEmail(event.target.value)}
                 />
               </div>
+              <p className="text-xs text-muted-foreground">
+                {sessionEmail !== null ? (
+                  <>
+                    Identitas yang diverifikasi harus <strong>akun yang sama</strong> dengan sesi
+                    aplikasi di perangkat ini ({sessionEmail}). Kalau akun platform Anda berbeda,
+                    keluar dulu dari aplikasi lalu masuk dengan akun itu — mengganti email di kolom
+                    ini tidak akan diterima server.
+                  </>
+                ) : (
+                  "Belum ada sesi aplikasi di perangkat ini, jadi emailnya diketik di sini."
+                )}
+              </p>
               {authSent && (
                 <div className="space-y-2">
                   <Label htmlFor="plat-auth-code">Kode dari email</Label>
@@ -486,16 +573,38 @@ function PlatformBackstage() {
             >
               <div className="font-medium">Backstage ditolak server</div>
               <div className="mt-1 text-muted-foreground">{denied}</div>
+              {/*
+                Penolakan yang paling sering bukan “akunnya tidak ada”, melainkan
+                akunnya **tidak cocok**: yang diverifikasi bukan akun platform, atau
+                identitasnya milik alamat lain daripada sesi aplikasi di perangkat ini.
+                Dua langkah di bawah ini yang benar-benar mengembalikan aksesnya.
+              */}
+              <div className="mt-2 text-xs text-muted-foreground">
+                Yang perlu diperiksa: (1) email yang diverifikasi di kartu atas harus akun
+                <strong> yang sama</strong> dengan sesi aplikasi di perangkat ini
+                {sessionEmail ? ` (${sessionEmail})` : ""} — kalau akun platformnya berbeda,
+                keluar dari aplikasi lalu masuk dengan akun itu; dan (2) email itu harus
+                memang terdaftar sebagai akun platform (pengembang).
+              </div>
             </div>
           )}
         </CardContent>
       </Card>
 
-      {me && (
+      {me && actorId && (
         <>
+          {/* Akun bisnis dikelola dari sini: lihat, nonaktifkan/aktifkan, dan
+              hapus. Gerbangnya server; kartunya hanya dirender akun platform
+              yang sudah lolos `platform.me`. */}
+          <PlatformTenantAccountsCard actorId={actorId} />
+
+          {/* Taksonomi bisnis dikelola di sini; hanya akun platform yang sudah
+              lolos gerbang server yang sampai ke kartu ini. */}
+          <PlatformBusinessCategoriesCard actorId={actorId} />
+
           <Card data-testid="platform-start">
             <CardHeader>
-              <CardTitle className="text-base">2. Buka sesi pendampingan</CardTitle>
+              <CardTitle className="text-base">4. Buka sesi pendampingan</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <p className="text-sm text-muted-foreground">
@@ -599,7 +708,7 @@ function PlatformBackstage() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base">
                 <LifeBuoy className="size-4" />
-                3. Sesi dan ringkasan bantuan
+                5. Sesi dan ringkasan bantuan
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -695,7 +804,7 @@ function PlatformBackstage() {
 
           <Card data-testid="platform-history">
             <CardHeader>
-              <CardTitle className="text-base">4. Riwayat sesi milik Anda</CardTitle>
+              <CardTitle className="text-base">6. Riwayat sesi milik Anda</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
               <p className="text-xs text-muted-foreground">
@@ -739,14 +848,22 @@ function PlatformBackstage() {
       )}
 
       {!me && (
-        <Card>
+        <Card data-testid="platform-belum-dibuka">
           <CardHeader>
-            <CardTitle className="text-base">Belum ada tenant yang dibuka</CardTitle>
+            <CardTitle className="text-base">Belum ada akun yang dibuka</CardTitle>
           </CardHeader>
-          <CardContent className="text-sm text-muted-foreground">
-            Setelah identitas platform diperiksa, daftar tenant dan tombol pendampingan muncul
-            di sini. Yang tercatat di jejak tenant adalah kunjungan sesi, bukan sekadar akun
-            ini ada.
+          <CardContent className="space-y-2 text-sm text-muted-foreground">
+            <p>
+              Empat kartu pengelolaan muncul di sini begitu identitas platform diperiksa:
+              <strong> Akun bisnis</strong> (daftar workspace beserta pemiliknya, tombol
+              nonaktifkan/aktifkan/hapus), <strong>Kategori &amp; subkategori bisnis</strong>,
+              <strong> Buka sesi pendampingan</strong>, dan <strong>riwayat</strong> sesi Anda.
+            </p>
+            <p>
+              Yang tercatat di jejak tenant adalah kunjungan sesi, bukan sekadar akun ini ada.
+              Penyebab paling sering kartu-kartunya tidak muncul: perangkat ini belum melewati
+              langkah <strong>Identitas login terverifikasi</strong> di atas.
+            </p>
           </CardContent>
         </Card>
       )}

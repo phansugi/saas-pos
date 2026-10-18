@@ -36,6 +36,7 @@ import { useScanBeep } from "@/lib/useScanBeep";
 import { entitlementFor, isFeatureEnabled } from "@/lib/billing";
 import { featureUnavailableReason } from "@/lib/store/modules";
 import { modifierSummary } from "@/lib/modifiers";
+import { businessUsesTableService } from "@/lib/businessCategory";
 import {
   KDS_ALERT_FLASH_MS,
   KDS_ATTENTION_MINUTES,
@@ -138,7 +139,21 @@ export function KdsPage() {
 
   const planKey = session?.tenant?.planKey ?? "starter";
   const entitlements = useMemo(() => entitlementFor(planKey), [planKey]);
-  const kdsOn = isFeatureEnabled(entitlements, modules.activeVerticals, "pos.kds");
+  /*
+    Denah meja & antrean dapur juga mengikuti **kategori utama** yang dikunci
+    pemilik, bukan hanya modul F&B. Modul boleh dinyalakan siapa saja (dan paket
+    Enterprise memuat semuanya), jadi tanpa pilihan ini toko bangunan yang modul
+    F&B-nya menyala tetap mendapat pengaturan meja. Aturannya satu sumber dengan
+    halaman Kasir & sidebar (`businessUsesTableService`).
+  */
+  const businessCategory = session?.tenant?.businessCategory ?? null;
+  const tableServiceFitsBusiness = businessUsesTableService({
+    category: businessCategory?.category,
+    subcategory: businessCategory?.subcategory,
+  });
+  const kdsOn =
+    tableServiceFitsBusiness &&
+    isFeatureEnabled(entitlements, modules.activeVerticals, "pos.kds");
   // Alasan yang tepat: modul F&B belum dinyalakan, atau paketnya tidak memuat
   // KDS (Starter) — pengguna butuh tahu mana yang harus dibereskan.
   const kdsUnavailable = featureUnavailableReason(
@@ -146,7 +161,9 @@ export function KdsPage() {
     modules.activeVerticals,
     "pos.kds",
   );
-  const tableOn = isFeatureEnabled(entitlements, modules.activeVerticals, "pos.table");
+  const tableOn =
+    tableServiceFitsBusiness &&
+    isFeatureEnabled(entitlements, modules.activeVerticals, "pos.table");
 
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -482,7 +499,11 @@ export function KdsPage() {
               ? `${kdsTickets.length} pesanan menunggu · ${waitingItems} item · ${occupied} meja terisi${
                   settledCount > 0 ? ` · ${settledCount} sudah lunas` : ""
                 }`
-              : (kdsUnavailable ?? "Layar dapur tidak aktif di workspace ini.")}
+              : !tableServiceFitsBusiness
+                ? `Alur meja & dapur tidak dipakai kategori ${
+                    businessCategory?.categoryLabel ?? "bisnis ini"
+                  } — penjualan tetap lewat halaman Kasir.`
+                : (kdsUnavailable ?? "Layar dapur tidak aktif di workspace ini.")}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -493,30 +514,55 @@ export function KdsPage() {
                 kdsOn ? "bg-primary" : "bg-muted-foreground",
               )}
             />
-            {kdsOn ? "Layar dapur aktif" : "Butuh modul F&B"}
+            {kdsOn
+              ? "Layar dapur aktif"
+              : tableServiceFitsBusiness
+                ? "Butuh modul F&B"
+                : "Bukan layanan meja"}
           </Badge>
-          <Link
-            to="/app/modules"
-            className="text-xs text-primary hover:underline"
-          >
-            Kelola modul →
-          </Link>
+          {/*
+            Saat kategorinya yang tidak cocok, mengarahkan ke halaman Modul
+            menyesatkan: modulnya justru sudah menyala, dan mematikannya tidak
+            akan membuat alur ini dipakai. Tautannya hanya muncul ketika modul
+            memang jalan yang perlu dibereskan.
+          */}
+          {tableServiceFitsBusiness && (
+            <Link
+              to="/app/modules"
+              className="text-xs text-primary hover:underline"
+            >
+              Kelola modul →
+            </Link>
+          )}
         </div>
       </div>
 
-      {!kdsOn && (
-        <div className="flex items-start gap-3 rounded-lg border border-accent/30 bg-accent/10 px-4 py-3 text-sm">
-          <Lock className="mt-0.5 size-4 shrink-0 text-accent" />
+      {!tableServiceFitsBusiness && (
+        <div className="flex items-start gap-3 rounded-lg border border-border bg-secondary/30 px-4 py-3 text-sm">
+          <Lock className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
           <div className="text-muted-foreground">
             <strong className="text-foreground">Denah meja &amp; antrean dapur</strong>{" "}
-            hidup di modul Food &amp; Beverage. Aktifkan modulnya di halaman{" "}
-            <Link to="/app/modules" className="text-primary hover:underline">
-              Modul
-            </Link>{" "}
-            untuk memakai alur ini — server juga menolak pesanannya selama modul mati.
+            tidak dipakai workspace dengan kategori{" "}
+            <strong className="text-foreground">
+              {businessCategory?.categoryLabel ?? "—"}
+              {businessCategory?.subcategoryLabel
+                ? ` · ${businessCategory.subcategoryLabel}`
+                : ""}
+            </strong>{" "}
+            — alur ini untuk kafe, restoran, dan usaha lain yang melayani tamu di
+            tempat. Penjualan tetap berjalan normal di halaman Kasir.
           </div>
         </div>
       )}
+
+      {/*
+        Tanpa modul F&B, seluruh isi halaman ini sudah dikunci sebagai
+        read-only oleh gerbang rutenya (`ModuleRoute` di `App.tsx`) — termasuk
+        pengaturan meja dan antreannya — jadi tidak ada notis kedua yang
+        mengulang alasan yang sama di sini. Yang tersisa di halaman ini hanya
+        penjelasan **kategori** di atas, dan itu soal lain (modulnya boleh hidup,
+        tetapi bisnisnya bukan layanan meja).
+      */}
 
       {error && (
         <p

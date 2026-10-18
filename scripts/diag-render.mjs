@@ -12,6 +12,10 @@
  *
  * Usage: bun scripts/diag-render.mjs [/] [/app/modules]
  */
+// Diagnostik ini memeriksa render **data demo**, apa pun isi `.env.local` mesin ini
+// (harness DOM tiruan memakai aturan yang sama, lihat `./happy-dom-setup.mjs`).
+process.env.VITE_DATA_SOURCE = "demo";
+
 import { createServer } from "vite";
 // React dimuat sebagai impor biasa (bukan lewat ssrLoadModule): di SSR Vite
 // mengeksternal node_modules, jadi instansinya sama dengan yang dipakai

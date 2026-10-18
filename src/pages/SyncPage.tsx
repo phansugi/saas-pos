@@ -33,7 +33,9 @@ import {
   type SyncEntity,
   type SyncPlatform,
 } from "@/lib/sync";
+import { useSession } from "@/lib/session";
 import { useStore, type PullSyncResult } from "@/lib/store";
+import { featureUnavailableReason } from "@/lib/store/modules";
 import { useCan } from "@/lib/usePermission";
 import { cn } from "@/lib/utils";
 
@@ -101,8 +103,20 @@ export function SyncPage() {
     pushSync,
     pullSync,
     resolveSyncChange,
+    modules,
   } = useStore();
+  const { session } = useSession();
   const can = useCan();
+  /*
+    Hub real-time (`sync.realtime`) milik paket Professional ke atas. Tanpa
+    fiturnya halaman ini hanya bisa dibaca (gerbang rutenya `ModuleRoute`), jadi
+    kalimat alasannya dipakai di sini juga.
+  */
+  const gateReason = featureUnavailableReason(
+    session?.tenant?.planKey ?? "starter",
+    modules.activeVerticals,
+    "sync.realtime",
+  );
   const canManage = can("device.manage");
 
   const [error, setError] = useState<string | null>(null);
@@ -208,10 +222,10 @@ export function SyncPage() {
           {!syncPlan.realtime && (
             <p className="flex items-start gap-2 rounded-lg border border-border/60 bg-secondary/20 px-3 py-2 text-sm text-muted-foreground">
               <Lock className="mt-0.5 size-3.5 shrink-0" />
-              Paket ini belum memuat hub real-time: perangkat lama tetap terlihat
-              dan bisa mendetak, tetapi mendaftarkan perangkat baru dan mendorong
-              perubahan menunggu paket yang memuat Sinkronisasi real-time
-              multi-perangkat.
+              {gateReason} Halaman ini hanya bisa dibaca: perangkat dan konflik
+              lama tetap terlihat, tetapi mendaftarkan perangkat, mendorong
+              perubahan, menarik, dan membereskan konflik tidak bisa dari sini
+              sampai langganannya memuat modul itu.
             </p>
           )}
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

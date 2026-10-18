@@ -192,8 +192,9 @@ export function OpnamePage() {
 
       {gateReason && (
         <p className="rounded-lg border border-accent/40 bg-accent/10 px-4 py-3 text-sm text-accent">
-          {gateReason} Sesi yang sudah berjalan tetap bisa dihitung dan diposting —
-          hanya memulai sesi baru yang memerlukannya.{" "}
+          {gateReason} Halaman ini hanya bisa dibaca: sesi yang sudah berjalan pun
+          tidak bisa dihitung, diposting, atau dibatalkan dari sini sampai
+          langganannya memuat modul itu.{" "}
           {can("billing.manage") && (
             <Link to="/app/subscription" className="underline">
               Kelola langganan

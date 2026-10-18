@@ -123,9 +123,9 @@ export function MembersPage() {
 
       {discountUnavailable && (
         <p className="rounded-lg border border-accent/40 bg-accent/10 px-4 py-3 text-sm text-accent">
-          {discountUnavailable} Selama itu diskon member tidak dipakai di kasir dan
-          diskon baru di atas 0% ditolak; data member tetap bisa dilihat dan
-          dirapikan.{" "}
+          {discountUnavailable} Halaman ini hanya bisa dibaca: daftar member tetap
+          terlihat, tetapi menambah, mengubah, atau merapikannya tidak bisa dari
+          sini sampai langganannya memuat modul itu.{" "}
           {can("billing.manage") && (
             <Link to="/app/modules" className="underline">
               Kelola modul &amp; paket

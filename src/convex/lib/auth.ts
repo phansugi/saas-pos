@@ -23,7 +23,7 @@
  * scripts/verify-authz.mjs without a deployment.
  */
 
-import type { Id } from "../_generated/dataModel";
+import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 
 type Ctx = QueryCtx | MutationCtx;
@@ -162,6 +162,32 @@ async function identityUser(
   }
 
   return null;
+}
+
+/**
+ * Akun `users` milik **identitas login yang sedang dipakai**, tanpa perlu klien
+ * menyebutkan id-nya.
+ *
+ * Kenapa ini ada: beberapa permukaan backstage dulu menebak aktornya dari email
+ * sesi aplikasi (yang hidup di `localStorage` per perangkat), lalu mencocokkannya
+ * dengan identitas login. Kalau keduanya berbeda — mis. perangkat ini masih
+ * memegang sesi akun bisnis sementara yang diverifikasi adalah akun pengembang —
+ * gerbangnya menolak, dan yang terlihat pengguna hanyalah “backstage tidak mau
+ * terbuka”. Dengan resolusi dari identitas, aktornya adalah orang yang benar-benar
+ * memegang kotak masuknya; tidak ada lagi email yang perlu dicocokkan.
+ *
+ * `null` berarti tidak ada identitas (mode tanpa provider, atau belum masuk) atau
+ * identitasnya tidak memetakan ke baris `users` mana pun — pemanggil yang
+ * memutuskan apa artinya, bukan fungsi ini.
+ */
+export async function resolveIdentityActor(
+  ctx: Ctx,
+): Promise<Doc<"users"> | null> {
+  const identity = await readIdentity(ctx);
+  if (!identity) return null;
+  const userId = await identityUser(ctx, identity);
+  if (!userId) return null;
+  return ctx.db.get(userId);
 }
 
 /** Resolves and enforces the claimed actor. Throws when the claim is not theirs. */

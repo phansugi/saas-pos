@@ -45,6 +45,8 @@ function check(name, condition, detail) {
 const HERE = new URL("..", import.meta.url);
 const read = (path) => readFileSync(new URL(path, HERE), "utf8");
 const products = read("src/convex/products.ts");
+const subcategoriesSource = read("src/convex/subcategories.ts");
+const categoriesSource = read("src/convex/categories.ts");
 const access = read("src/convex/lib/access.ts");
 const purchasing = read("src/convex/purchasing.ts");
 const apiAccess = read("src/convex/apiAccess.ts");
@@ -75,6 +77,8 @@ const productEvent = productUpdatedEventData({
   price: 68000,
   unit: "SAK",
   active: true,
+  category: "Semen & Mortar",
+  subcategory: "Semen Portland",
   changed: ["price"],
 });
 check(
@@ -86,6 +90,29 @@ check(
     JSON.stringify(productEvent.changed) === JSON.stringify(["price"]),
   JSON.stringify(productEvent),
 );
+check(
+  "product.updated membawa kategori & subkategori katalog",
+  productEvent.category === "Semen & Mortar" &&
+    productEvent.subcategory === "Semen Portland",
+  JSON.stringify(productEvent),
+);
+const productTanpaKategori = productUpdatedEventData({
+  sku: "PBB-UMU-000002",
+  name: "Jasa Bongkar",
+  price: 100000,
+  unit: "PCS",
+  active: true,
+  category: null,
+  subcategory: null,
+  changed: ["created"],
+});
+check(
+  "katalog tanpa kategori dikirim sebagai null, bukan dihilangkan",
+  "category" in productTanpaKategori &&
+    productTanpaKategori.category === null &&
+    productTanpaKategori.subcategory === null,
+  JSON.stringify(productTanpaKategori),
+);
 
 const renamedEvent = productUpdatedEventData({
   sku: "PBB-MAK-000007",
@@ -93,6 +120,8 @@ const renamedEvent = productUpdatedEventData({
   price: 69000,
   unit: "SAK",
   active: true,
+  category: "Semen & Mortar",
+  subcategory: "Semen Portland",
   changed: ["price", "sku"],
   previousSku: "PBB-SAN-000007",
   previousPrice: 68000,
@@ -115,6 +144,8 @@ const productEvent2 = productUpdatedEventData({
   price: 1,
   unit: "PCS",
   active: true,
+  category: null,
+  subcategory: null,
   changed: changedInput,
 });
 changedInput.push("name");
@@ -236,6 +267,42 @@ check(
   "katalog dibaca berhalaman dengan nextCursor",
   apiAccess.includes("nextCursor") && apiAccess.includes('withIndex("by_tenant_sku"'),
   "katalog masih satu halaman",
+);
+check(
+  "katalog API membawa kategori & subkategori sebagai nama",
+  apiAccess.includes("subcategory: product.subcategoryId") &&
+    apiAccess.includes('query("categories")') &&
+    apiAccess.includes('query("subcategories")') &&
+    apiAccess.includes("categoryName.get(product.categoryId") &&
+    apiAccess.includes("subcategoryName.get(product.subcategoryId"),
+  "kategori katalog tidak ikut dikirim",
+);
+check(
+  "product.updated membaca kategori dari jalur tulisnya, bukan halaman",
+  products.includes("categoryId: product.categoryId") &&
+    products.includes("subcategoryId: product.subcategoryId") &&
+    products.includes('["subcategory"]') &&
+    products.includes("subcategoryIsActive"),
+  "kategori tidak ikut di product.updated",
+);
+check(
+  "subkategori selalu dibuat di bawah sebuah kategori",
+  subcategoriesSource.includes('categoryId: v.id("categories")') &&
+    subcategoriesSource.includes('"category.manage"'),
+  "subkategori bisa berdiri sendiri",
+);
+check(
+  "produk menolak subkategori milik kategori lain",
+  products.includes("bukan bagian dari kategori") &&
+    products.includes("Subkategori hanya bisa dipakai bersama kategori"),
+  "subkategori lintas kategori lolos",
+);
+check(
+  "hapus kategori ikut menghapus subkategorinya",
+  categoriesSource.includes('query("subcategories")') &&
+    categoriesSource.includes("removedSubcategories") &&
+    !categoriesSource.includes("parentId"),
+  "subkategori tertinggal saat kategorinya dihapus",
 );
 check(
   "sales memakai since yang dijepit",

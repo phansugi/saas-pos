@@ -18,7 +18,7 @@ import {
   requirePermission,
   writeAuditLog,
 } from "./lib/access";
-import { categoryIsActive } from "./lib/categories";
+import { categoryIsActive, subcategoryIsActive } from "./lib/categories";
 import {
   productDeletionCheck,
   validateProductIdentity,
@@ -59,11 +59,21 @@ async function emitProductUpdated(
     price: number;
     unit?: string;
     active: boolean;
+    /** Kategori & subkategori ikut dikirim supaya platform bisa menyusun katalog. */
+    categoryId?: Id<"categories">;
+    subcategoryId?: Id<"subcategories">;
   },
   changed: string[],
   previous: { sku?: string; price?: number } = {},
 ): Promise<number> {
   if (changed.length === 0) return 0;
+  // Nama kategori & subkategori dibaca di sini, bukan diketik pemanggil: satu jalur
+  // untuk semua pemicu, sehingga kiriman tidak pernah membawa nama yang sudah
+  // berganti (produk menunjuk id, bukan nama).
+  const category = product.categoryId ? await ctx.db.get(product.categoryId) : null;
+  const subcategory = product.subcategoryId
+    ? await ctx.db.get(product.subcategoryId)
+    : null;
   const enqueued = await enqueueWebhookEvent(ctx, {
     tenantId: product.tenantId,
     event: "product.updated",
@@ -74,6 +84,8 @@ async function emitProductUpdated(
       price: product.price,
       unit: product.unit ?? BASE_UNIT,
       active: product.active,
+      category: category?.name ?? null,
+      subcategory: subcategory?.name ?? null,
       changed,
       previousSku: previous.sku,
       previousPrice: previous.price,
@@ -90,6 +102,49 @@ const tierValidator = v.array(
 const unitValidator = v.array(
   v.object({ code: v.string(), factor: v.number() }),
 );
+
+/**
+ * Memeriksa subkategori untuk sebuah penempatan katalog.
+ *
+ * Subkategori dibuat **di bawah** sebuah kategori (lihat `src/convex/subcategories.ts`),
+ * jadi tiga hal yang dijaga di sini: subkategorinya milik tenant ini, ia memang
+ * bagian dari kategori yang dipilih, dan ia masih aktif — semuanya alasan yang bisa
+ * diperbaiki pengguna, bukan galat diam-diam.
+ */
+async function resolveSubcategory(
+  ctx: MutationCtx,
+  args: {
+    tenantId: Id<"tenants">;
+    categoryId?: Id<"categories">;
+    categoryName?: string | null;
+    subcategoryId?: Id<"subcategories">;
+  },
+): Promise<{ subcategoryId?: Id<"subcategories">; name?: string }> {
+  if (!args.subcategoryId) return {};
+
+  if (!args.categoryId) {
+    throw new Error(
+      "Subkategori hanya bisa dipakai bersama kategori — pilih kategorinya lebih dulu.",
+    );
+  }
+
+  const subcategory = await ctx.db.get(args.subcategoryId);
+  if (!subcategory || subcategory.tenantId !== args.tenantId) {
+    throw new Error("Subkategori tidak ditemukan untuk tenant ini.");
+  }
+  if (subcategory.categoryId !== args.categoryId) {
+    throw new Error(
+      `Subkategori ${subcategory.name} bukan bagian dari kategori ${args.categoryName ?? "yang dipilih"} — pilih subkategori yang ada di kategori itu.`,
+    );
+  }
+  if (!subcategoryIsActive(subcategory)) {
+    throw new Error(
+      `Subkategori ${subcategory.name} sedang nonaktif — aktifkan dulu di halaman Produk & Stok, atau pilih subkategori lain.`,
+    );
+  }
+
+  return { subcategoryId: args.subcategoryId, name: subcategory.name };
+}
 
 /** Modifier item (`pos.modifier`) — modul F&B. */
 const modifierValidator = v.array(
@@ -349,6 +404,8 @@ export const create = mutation({
     price: v.number(),
     cost: v.optional(v.number()),
     categoryId: v.optional(v.id("categories")),
+    /** Subkategori yang dibuat di bawah `categoryId`; hanya boleh bersama `categoryId`. */
+    subcategoryId: v.optional(v.id("subcategories")),
     trackStock: v.optional(v.boolean()),
     openingStock: v.optional(v.number()),
     /** Satuan dasar; modul Grosir memakai ini bersama `tiers`/`units`. */
@@ -366,6 +423,7 @@ export const create = mutation({
     // (lihat lib/categories.ts). Produk lama yang masih di sana tetap dijual —
     // memindahkannya atau mengaktifkan kembali kategorinya adalah dua jalan yang
     // jelas, bukan penghapusan diam-diam.
+    let categoryName: string | undefined;
     if (args.categoryId) {
       const category = await ctx.db.get(args.categoryId);
       if (!category || category.tenantId !== args.tenantId) {
@@ -376,7 +434,14 @@ export const create = mutation({
           `Kategori ${category.name} sedang nonaktif — aktifkan dulu di halaman Produk & Stok, atau pilih kategori lain.`,
         );
       }
+      categoryName = category.name;
     }
+    const subcategory = await resolveSubcategory(ctx, {
+      tenantId: args.tenantId,
+      categoryId: args.categoryId,
+      categoryName,
+      subcategoryId: args.subcategoryId,
+    });
     const wholesale = await resolveWholesale(ctx, args);
     const modifiers = await resolveModifiers(ctx, args);
 
@@ -400,6 +465,7 @@ export const create = mutation({
       sku,
       name: args.name,
       categoryId: args.categoryId,
+      subcategoryId: subcategory.subcategoryId,
       price: args.price,
       cost: args.cost ?? 0,
       trackStock: args.trackStock ?? true,
@@ -434,6 +500,8 @@ export const create = mutation({
         price: args.price,
         unit: wholesale.unit,
         active: true,
+        categoryId: args.categoryId,
+        subcategoryId: subcategory.subcategoryId,
       },
       ["created"],
     );
@@ -515,6 +583,8 @@ export const setPricing = mutation({
         price,
         unit: wholesale.unit,
         active: product.active,
+        categoryId: product.categoryId,
+        subcategoryId: product.subcategoryId,
       },
       changed,
       changed.includes("price") ? { price: product.price } : {},
@@ -544,16 +614,22 @@ export const setPricing = mutation({
 });
 
 /**
- * Memindahkan produk ke kategori lain (atau mengosongkan kategorinya).
+ * Mengatur penempatan katalog produk: kategori dan subkategorinya.
  *
  * Kategori menentukan **kode di tengah SKU**, jadi menggantinya harus ikut
  * mengganti SKU — kalau tidak, `PBB-SAN-000042` tetap tertulis “Sanitasi” di
  * sistem padahal produknya sudah Makanan. Aturannya ada di `recodeProductSku`:
  * nomornya dipertahankan selama masih bebas, dan SKU yang **diketik pemilik toko**
- * (di luar format `PBB-…`) tidak disentuh sama sekali.
+ * (di luar format `PBB-…`) tidak disentuh sama sekali. Subkategori **tidak**
+ * menyentuh SKU maupun tab POS: ia hanya label katalog yang ikut disinkronkan.
  *
- * Balikannya menyebut SKU sebelum & sesudah supaya halaman bisa memberi tahu apa
- * yang benar-benar berubah — bukan menebak sendiri.
+ * Pemanggilan ini menetapkan penempatan utuh (bukan menambal sebagian):
+ * `subcategoryId` yang tidak dikirim berarti produknya tidak punya subkategori,
+ * sama seperti `categoryId` yang tidak dikirim berarti tanpa kategori.
+ *
+ * Balikannya menyebut SKU sebelum & sesudah (beserta nama kategori & subkategori
+ * terbaru) supaya halaman bisa memberi tahu apa yang benar-benar berubah — bukan
+ * menebak sendiri.
  */
 export const setCategory = mutation({
   args: {
@@ -562,6 +638,8 @@ export const setCategory = mutation({
     productId: v.id("products"),
     /** Kosong = produk tanpa kategori (kode SKU-nya kembali ke `UMU`). */
     categoryId: v.optional(v.id("categories")),
+    /** Subkategori yang dibuat di bawah `categoryId`; kosong = tanpa subkategori. */
+    subcategoryId: v.optional(v.id("subcategories")),
   },
   handler: async (ctx, args) => {
     await requirePermission(ctx, args.tenantId, args.actorId, "product.manage");
@@ -584,6 +662,12 @@ export const setCategory = mutation({
       }
       categoryName = category.name;
     }
+    const subcategory = await resolveSubcategory(ctx, {
+      tenantId: args.tenantId,
+      categoryId: args.categoryId,
+      categoryName,
+      subcategoryId: args.subcategoryId,
+    });
 
     // SKU produk lain dipakai sebagai daftar “sudah terpakai”; SKU produk ini
     // sendiri disingkirkan supaya nomornya tidak dianggap bentrok.
@@ -603,10 +687,16 @@ export const setCategory = mutation({
       throw new Error(`SKU ${sku} sudah dipakai.`);
     }
 
-    await ctx.db.patch(args.productId, { categoryId: args.categoryId, sku });
+    await ctx.db.patch(args.productId, {
+      categoryId: args.categoryId,
+      subcategoryId: subcategory.subcategoryId,
+      sku,
+    });
 
     const categoryChanged = (product.categoryId ?? null) !== (args.categoryId ?? null);
-    if (categoryChanged || sku !== product.sku) {
+    const subcategoryChanged =
+      (product.subcategoryId ?? null) !== (subcategory.subcategoryId ?? null);
+    if (categoryChanged || subcategoryChanged || sku !== product.sku) {
       await emitProductUpdated(
         ctx,
         {
@@ -616,9 +706,12 @@ export const setCategory = mutation({
           price: product.price,
           unit: product.unit,
           active: product.active,
+          categoryId: args.categoryId,
+          subcategoryId: subcategory.subcategoryId,
         },
         [
           ...(categoryChanged ? ["category"] : []),
+          ...(subcategoryChanged ? ["subcategory"] : []),
           ...(sku !== product.sku ? ["sku"] : []),
         ],
         // SKU baru saja berganti: penerima harus tahu SKU lama yang harus
@@ -635,6 +728,8 @@ export const setCategory = mutation({
       entityId: args.productId,
       meta: {
         category: categoryName ?? null,
+        subcategory: subcategory.name ?? null,
+        previousSubcategoryId: product.subcategoryId ?? null,
         previousSku: product.sku,
         sku,
         skuChanged: sku !== product.sku,
@@ -645,6 +740,7 @@ export const setCategory = mutation({
       sku,
       previousSku: product.sku,
       category: categoryName ?? null,
+      subcategory: subcategory.name ?? null,
     };
   },
 });
@@ -817,6 +913,8 @@ export const update = mutation({
         price: product.price,
         unit: product.unit,
         active: product.active,
+        categoryId: product.categoryId,
+        subcategoryId: product.subcategoryId,
       },
       decision.changed,
     );
@@ -889,6 +987,8 @@ export const setActive = mutation({
         price: product.price,
         unit: product.unit,
         active: args.active,
+        categoryId: product.categoryId,
+        subcategoryId: product.subcategoryId,
       },
       ["active"],
     );
@@ -993,6 +1093,8 @@ export const remove = mutation({
         price: product.price,
         unit: product.unit,
         active: false,
+        categoryId: product.categoryId,
+        subcategoryId: product.subcategoryId,
       },
       ["deleted"],
     );

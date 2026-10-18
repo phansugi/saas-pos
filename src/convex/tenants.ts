@@ -48,6 +48,19 @@ import {
   tenantProfileOf,
   tenantProfileSentence,
 } from "./lib/profile";
+import {
+  activeBusinessCategoryOptions,
+  businessCategoryOf,
+  businessCategorySentence,
+  lockBusinessCategory,
+  validateBusinessCategory,
+} from "./lib/businessCategory";
+import { readBusinessCategoryRows } from "./lib/businessCategoryStore";
+import {
+  businessCategoryLabel,
+  seedProductCatalogFromBusinessCategory,
+} from "./lib/productCatalogSeed";
+import { productCatalogSeedSentence } from "./lib/productCatalogPresets";
 
 const MS_PER_DAY = 86_400_000;
 const TRIAL_DAYS = 14;
@@ -101,6 +114,13 @@ export const create = mutation({
     storeName: v.optional(v.string()),
     taxRatePct: v.optional(v.number()),
     verticals: v.optional(v.array(verticalValidator)),
+    /**
+     * Kategori utama bisnis dari onboarding. Opsional supaya pemanggil lama tetap
+     * sah; kalau diisi, pasangannya langsung dikunci saat workspace lahir.
+     */
+    businessCategory: v.optional(
+      v.object({ category: v.string(), subcategory: v.string() }),
+    ),
   },
   handler: async (ctx, args) => {
     // Onboarding creates an owner membership, so the claim must be the caller's.
@@ -155,6 +175,23 @@ export const create = mutation({
     const planKey = args.planKey ?? "starter";
     const now = Date.now();
 
+    // Kategori utama divalidasi **sebelum** apa pun ditulis: pilihan yang tidak
+    // dikenal (atau sudah dinonaktifkan backstage) tidak boleh meninggalkan tenant
+    // setengah jadi. Katalognya yang berlaku sekarang, bukan daftar bawaan.
+    const catalog = await readBusinessCategoryRows(ctx);
+    const lockedCategory = args.businessCategory
+      ? lockBusinessCategory({
+          current: null,
+          choice: args.businessCategory,
+          actorId: args.ownerId,
+          now,
+          catalog,
+        })
+      : null;
+    if (lockedCategory && !lockedCategory.ok) {
+      throw new Error(lockedCategory.reason);
+    }
+
     const tenantId = await ctx.db.insert("tenants", {
       name: args.name,
       slug,
@@ -167,6 +204,10 @@ export const create = mutation({
       currency: "IDR",
       taxRatePct: args.taxRatePct ?? 11,
       verticals: args.verticals ?? ["umkm"],
+      businessCategory:
+        lockedCategory?.ok
+          ? { ...lockedCategory.value, lockedBy: args.ownerId }
+          : undefined,
       createdAt: now,
     });
 
@@ -187,16 +228,36 @@ export const create = mutation({
       createdAt: now,
     });
 
-    for (let i = 0; i < DEFAULT_CATEGORIES.length; i += 1) {
-      await ctx.db.insert("categories", {
+    /*
+      Master **kategori & subkategori produk** lahir mengikuti kategori bisnis
+      yang dipilih pemilik (mis. Kafe → Kopi, Non-Kopi, Makanan Ringan, Bahan
+      Baku beserta subkategorinya), bukan daftar generik yang sama untuk semua
+      bisnis. Penyemaiannya hanya menambah — tidak ada yang diganti atau dihapus.
+
+      Pemanggil tanpa kategori bisnis (API internal, data lama) tetap memakai
+      daftar bawaan lama supaya perilakunya tidak berubah diam-diam.
+    */
+    if (lockedCategory?.ok) {
+      await seedProductCatalogFromBusinessCategory(ctx, {
         tenantId,
-        name: DEFAULT_CATEGORIES[i],
-        sortOrder: i,
-        // Bawaan selalu mulai aktif; mengaturnya (tambah/ubah/nonaktifkan/hapus)
-        // ada di halaman Produk & Stok dengan izin `category.manage`.
-        active: true,
-        createdAt: now,
+        category: lockedCategory.value.category,
+        subcategory: lockedCategory.value.subcategory,
+        categoryLabel: lockedCategory.value.categoryLabel,
+        subcategoryLabel: lockedCategory.value.subcategoryLabel,
+        now,
       });
+    } else {
+      for (let i = 0; i < DEFAULT_CATEGORIES.length; i += 1) {
+        await ctx.db.insert("categories", {
+          tenantId,
+          name: DEFAULT_CATEGORIES[i],
+          sortOrder: i,
+          // Bawaan selalu mulai aktif; mengaturnya (tambah/ubah/nonaktifkan/hapus)
+          // ada di halaman Produk & Stok dengan izin `category.manage`.
+          active: true,
+          createdAt: now,
+        });
+      }
     }
 
     // Counters are created lazily by nextSequence, so the first receipt is
@@ -367,6 +428,144 @@ export const updateProfile = mutation({
     });
 
     return { changed: true, ...after, sentence: tenantProfileSentence(after) };
+  },
+});
+
+/**
+ * Mengunci **kategori utama bisnis** beserta subkategorinya untuk selamanya.
+ *
+ * Hanya **pemilik** yang boleh memilih — bukan manajer atau keuangan — karena
+ * pilihan ini menjadi identitas bisnis di seluruh sistem dan tidak bisa ditarik
+ * kembali. Pilihan pertama menulis kolom `tenants.businessCategory` beserta waktu
+ * dan pemiliknya; panggilan berikutnya dengan pasangan yang sama tidak mengubah
+ * apa pun (`changed: false`), sedangkan pasangan berbeda atau pengosongan ditolak
+ * dengan alasan yang menyebut nilai yang sudah terkunci.
+ *
+ * Kategori & subkategori wajib berasal dari taksonomi MesinPOS
+ * (`lib/businessCategory.ts`) — bukan teks bebas — supaya pilihan yang terkunci
+ * selamanya tetap bisa dibandingkan dan dilaporkan. Validasi dijalankan sebelum
+ * menulis, dan jejak audit mencatat nilai sebelum/sesudah.
+ */
+/**
+ * Katalog kategori utama yang **boleh dipilih** (hanya yang aktif) — untuk
+ * pemilih di onboarding & halaman Profil.
+ *
+ * **Tanpa `tenantId` dengan sengaja.** Yang dibaca adalah katalog publik
+ * lintas-workspace, bukan data tenant, sedangkan pemilihnya dipakai justru
+ * sebelum workspace ada: akun yang baru mendaftar belum punya keanggotaan apa pun.
+ * Syaratnya cukup `verifyActor` (pemanggil benar-benar akun itu). Versi lama yang
+ * menuntut keanggotaan membuat onboarding jatuh ke katalog **bawaan kode**, jadi
+ * kategori/subkategori baru dari backstage tidak pernah muncul di sana — persis
+ * keluhan “kategori baru tidak langsung muncul”. Yang nonaktif tetap tidak ikut
+ * dikirim supaya klien tidak pernah menawarkan pilihan yang akan ditolak server.
+ *
+ * Query ini reaktif: begitu backstage menyimpan perubahan, semua pemilih yang
+ * sedang terbuka menerima daftar barunya tanpa muat ulang.
+ */
+export const listBusinessCategories = query({
+  args: { actorId: v.id("users") },
+  handler: async (ctx, args) => {
+    await verifyActor(ctx, args.actorId);
+    return activeBusinessCategoryOptions(await readBusinessCategoryRows(ctx));
+  },
+});
+
+export const setBusinessCategory = mutation({
+  args: {
+    tenantId: v.id("tenants"),
+    actorId: v.id("users"),
+    category: v.string(),
+    subcategory: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const membership = await requireMembership(ctx, args.tenantId, args.actorId);
+    if (membership.role !== "owner") {
+      throw new Error(
+        "Akses ditolak: hanya pemilik bisnis yang boleh memilih kategori utama, karena pilihan ini dikunci permanen.",
+      );
+    }
+
+    const tenant = await getTenantOrThrow(ctx, args.tenantId);
+    // Katalog yang berlaku sekarang (termasuk perubahan backstage); validasi yang
+    // sama dipakai onCreate dan di sini, jadi kategori yang dinonaktifkan/
+    // dihapus tidak bisa dipilih lewat jalur mana pun.
+    const catalog = await readBusinessCategoryRows(ctx);
+    const decision = validateBusinessCategory(
+      { category: args.category, subcategory: args.subcategory },
+      catalog,
+    );
+    if (!decision.ok) throw new Error(decision.reason);
+
+    /*
+      Kolom yang sudah terisi tetapi bentuknya tidak dikenali **tetap** dianggap
+      terkunci: data rusak tidak boleh menjadi celah untuk mengganti pilihan yang
+      seharusnya permanen. Pemilik yang menemui keadaan itu diarahkan menghubungi
+      dukungan, bukan menulis ulang diam-diam.
+    */
+    if (tenant.businessCategory && !businessCategoryOf(tenant)) {
+      throw new Error(
+        "Kategori utama bisnis workspace ini sudah terkunci tetapi datanya tidak dikenali. Hubungi dukungan MesinPOS untuk memperbaikinya.",
+      );
+    }
+
+    const locked = lockBusinessCategory({
+      current: businessCategoryOf(tenant),
+      choice: decision.value,
+      actorId: args.actorId,
+      now: Date.now(),
+      catalog,
+    });
+    if (!locked.ok) throw new Error(locked.reason);
+
+    if (!locked.changed) {
+      return {
+        changed: false,
+        businessCategory: locked.value,
+        sentence: businessCategorySentence(locked.value),
+      };
+    }
+
+    await ctx.db.patch(args.tenantId, {
+      businessCategory: { ...locked.value, lockedBy: args.actorId },
+    });
+
+    await writeAuditLog(ctx, {
+      tenantId: args.tenantId,
+      actorId: args.actorId,
+      action: "tenant.business_category",
+      entity: "tenants",
+      entityId: args.tenantId,
+      meta: { before: null, after: locked.value },
+    });
+
+    /*
+      Katalog produk ikut menyesuaikan begitu pilihan bisnisnya dikunci: workspace
+      lama yang belum pernah memilih mendapat master kategori & subkategori produk
+      yang relevan tanpa menyentuh kategori yang sudah ia rapikan sendiri. Untuk
+      workspace yang lahir lewat onboarding, langkah ini tidak menambah apa pun
+      (katalognya sudah disemai di `create`) — penyemaiannya idempoten.
+    */
+    const seeded = await seedProductCatalogFromBusinessCategory(ctx, {
+      tenantId: args.tenantId,
+      category: locked.value.category,
+      subcategory: locked.value.subcategory,
+      categoryLabel: locked.value.categoryLabel,
+      subcategoryLabel: locked.value.subcategoryLabel,
+    });
+
+    return {
+      changed: true,
+      businessCategory: locked.value,
+      sentence: businessCategorySentence(locked.value),
+      productCatalogSentence: productCatalogSeedSentence({
+        businessLabel: businessCategoryLabel(locked.value),
+        createdCategoryNames: seeded.createdCategoryNames,
+        createdSubcategoryCount: seeded.createdSubcategoryCount,
+        skippedCategoryNames: seeded.skippedCategoryNames,
+      }),
+      createdProductCategories: seeded.createdCategoryNames,
+      createdProductSubcategories: seeded.createdSubcategoryCount,
+    };
   },
 });
 
@@ -696,6 +895,27 @@ export const listCategories = query({
 
     const rows = await ctx.db
       .query("categories")
+      .withIndex("by_tenant", (q) => q.eq("tenantId", args.tenantId))
+      .collect();
+    return rows.sort((a, b) => a.sortOrder - b.sortOrder);
+  },
+});
+
+/**
+ * Subkategori katalog tenant (cukup keanggotaan) — dipakai pemilih subkategori di
+ * form Produk & pengelolaan “di bawah kategori” di halaman Produk & Stok.
+ *
+ * Terpisah dari `listCategories` supaya pemanggil yang hanya butuh kategori (tab
+ * POS, KDS) tidak ikut mengangkut daftar ini; `categoryId` di tiap baris yang
+ * menentukan subkategori itu milik kategori mana.
+ */
+export const listSubcategories = query({
+  args: { tenantId: v.id("tenants"), actorId: v.id("users") },
+  handler: async (ctx, args) => {
+    await requireMembership(ctx, args.tenantId, args.actorId);
+
+    const rows = await ctx.db
+      .query("subcategories")
       .withIndex("by_tenant", (q) => q.eq("tenantId", args.tenantId))
       .collect();
     return rows.sort((a, b) => a.sortOrder - b.sortOrder);

@@ -1,7 +1,9 @@
 /**
  * Uji **peramban sungguhan** (Chromium): halaman Tim & Peran benar-benar diklik
  * untuk **peran bawaan** — lima kartu tampil, Pemilik terkunci, dan alur
- * ubah izin → kembalikan izin bawaan → nonaktifkan → hapus → pulihkan.
+ * ubah izin → kembalikan izin bawaan → nonaktifkan → hapus → pulihkan — lalu
+ * diulang untuk paket **Starter**, di mana bagian Peran harus benar-benar
+ * baca-saja: tombolnya ditolak peramban (`inert`), bukan cuma berwarna abu-abu.
  *
  * Kenapa harness ini ada: `verify-render.mjs` menguji hal yang sama di DOM tiruan
  * (happy-dom), tetapi happy-dom tidak menghitung tata letak dan tidak menjalankan
@@ -170,6 +172,91 @@ try {
     consoleErrors.length === 0,
     consoleErrors.slice(0, 3).join(" | "),
   );
+
+  /*
+   * 7. Paket **Starter**: halaman yang sama, tetapi bagian Peran milik
+   *    `rbac.custom` hanya bisa dibaca. Ini yang tidak bisa dibuktikan
+   *    happy-dom: `inert` adalah perilaku peramban, jadi di sini tombolnya
+   *    benar-benar tidak bisa ditekan — bukan sekadar berwarna abu-abu.
+   */
+  const starterContext = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await starterContext.addInitScript(
+    ([key, session]) => {
+      window.localStorage.setItem(key, JSON.stringify(session));
+    },
+    [
+      SESSION_KEY,
+      { ...SESSION, tenant: { ...SESSION.tenant, planKey: "starter" } },
+    ],
+  );
+  const starter = await starterContext.newPage();
+  const starterErrors = [];
+  starter.on("console", (message) => {
+    if (message.type() === "error") starterErrors.push(message.text());
+  });
+  starter.on("pageerror", (error) => starterErrors.push(String(error)));
+
+  try {
+    await starter.goto(`${BASE}/app/team`, { waitUntil: "domcontentloaded" });
+    const wadah = starter.locator('[data-testid="modul-baca-saja"]');
+    await wadah.waitFor({ state: "visible", timeout: 20000 });
+    check(
+      "Starter: bagian Peran dibungkus wadah baca-saja",
+      (await wadah.getAttribute("data-readonly")) === "true",
+      await wadah.getAttribute("data-readonly"),
+    );
+
+    const alasan = await starter
+      .locator('[data-testid="modul-baca-saja-alasan"]')
+      .innerText();
+    check(
+      "Starter: alasannya menyebut fitur yang tidak termasuk paket",
+      alasan.includes("Custom role (RBAC)") && alasan.toLowerCase().includes("starter"),
+      alasan.replace(/\s+/g, " ").slice(0, 160),
+    );
+
+    const isi = starter.locator('[data-testid="modul-baca-saja-isi"]');
+    check("Starter: isinya bertanda `inert`", await isi.evaluate((el) => el.hasAttribute("inert")));
+
+    // Klik sungguhan ke tombol di dalam wadah inert: peramban menolaknya, jadi
+    // Playwright gagal menemukan sasaran yang bisa ditekan.
+    const klikUbah = await starter
+      .locator('[aria-label="Ubah izin peran Kasir"]')
+      .click({ timeout: 2000 })
+      .then(
+        () => "berhasil",
+        () => "ditolak",
+      );
+    check(
+      "Starter: klik tombol Ubah izin ditolak peramban (inert)",
+      klikUbah === "ditolak",
+      klikUbah,
+    );
+    check(
+      "Starter: editor izin tidak terbuka",
+      (await starter.locator('[data-testid="editor-peran-bawaan"]').count()) === 0,
+    );
+
+    // Bagian yang dibayar semua paket tetap hidup: formulir undangan anggota.
+    const undang = starter.getByPlaceholder("sari@bisnis.id");
+    await undang.fill("kasir@contoh.id");
+    check(
+      "Starter: formulir undangan anggota tetap bisa diisi",
+      (await undang.inputValue()) === "kasir@contoh.id",
+      await undang.inputValue(),
+    );
+    check(
+      "Starter: kolom undangan tidak ikut terkunci",
+      await undang.evaluate((el) => el.closest("[inert]") === null),
+    );
+    check(
+      "Starter: halaman tidak melaporkan galat runtime di konsol",
+      starterErrors.length === 0,
+      starterErrors.slice(0, 3).join(" | "),
+    );
+  } finally {
+    await starterContext.close();
+  }
 } finally {
   await browser.close();
 }

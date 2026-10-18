@@ -148,6 +148,14 @@ import {
   userProfileSentence,
 } from "@/lib/profile";
 import {
+  activeBusinessCategoryOptions,
+  businessCategorySentence,
+  defaultBusinessCategoryRows,
+  lockBusinessCategory,
+  type BusinessCategoryChoice,
+  type LockedBusinessCategory,
+} from "@/lib/businessCategory";
+import {
   computeTax,
   DEFAULT_TAX_RATE_PCT,
   entitlementFor,
@@ -285,7 +293,10 @@ import {
   categoryNameKey,
   categorySkuCode,
   normalizeCategoryName,
+  normalizeSubcategoryName,
+  subcategoryNameKey,
   validateCategoryName,
+  validateSubcategoryName,
 } from "@/lib/categories";
 import {
   canAddProductImage,
@@ -500,10 +511,15 @@ import {
   type CreateCategoryInput,
   type CreateMemberInput,
   type CreateProductInput,
+  type CreateSubcategoryInput,
   type RemovedCategory,
+  type RemovedSubcategory,
   type RenamedCategory,
+  type RenamedSubcategory,
   type RenameCategoryInput,
+  type RenameSubcategoryInput,
   type StoreCategory,
+  type StoreSubcategory,
   type CreateCustomRoleInput,
   type CreateApiKeyInput,
   type CreateWebhookEndpointInput,
@@ -575,9 +591,18 @@ import {
   type StoreUserProfile,
   type UpdateTenantProfileInput,
   type UpdateUserProfileInput,
+  type SyncedProductCategories,
+  type UpdatedBusinessCategory,
   type UpdatedTenantProfile,
   type UpdatedUserProfile,
 } from "./types";
+import {
+  businessCategoryLabel,
+  planProductCatalogSeeding,
+  productCatalogPlanIsEmpty,
+  productCatalogPresetFor,
+  productCatalogSeedSentence,
+} from "@/convex/lib/productCatalogPresets";
 import type { MejaOrderStatus } from "@/lib/meja";
 
 const LOW_STOCK_THRESHOLD = 5;
@@ -947,6 +972,22 @@ function nextReceivableNumber(receivables: StoredReceivable[]): string {
 /** Kategori di mode demo: sama bentuknya dengan baris `categories` di server. */
 interface DemoCategoryRow {
   id: string;
+  name: string;
+  active: boolean;
+  sortOrder: number;
+}
+
+/**
+ * Subkategori demo: sama bentuknya dengan baris `subcategories` di server — selalu
+ * `categoryId` milik sebuah kategori, tidak pernah berdiri sendiri.
+ *
+ * Katalog contoh sengaja dimulai tanpa subkategori: halaman harus bisa membuatnya
+ * di bawah kategori lebih dulu (itu alur yang diuji), dan produk yang semula tidak
+ * punya subkategori tetap sah.
+ */
+interface DemoSubcategoryRow {
+  id: string;
+  categoryId: string;
   name: string;
   active: boolean;
   sortOrder: number;
@@ -1401,6 +1442,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
     setLogoUrl,
     setUserProfile,
     setTenantProfile,
+    setBusinessCategory: setSessionBusinessCategory,
     setRolePermissions,
   } = useSession();
   const [products, setProducts] = useState<StoreProduct[]>(seedProducts);
@@ -1437,6 +1479,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
   /** Pesanan QR meja (modul F&B): tagihan dulu, penjualan menyusul. */
   const [mejaOrderRecords, setMejaOrderRecords] = useState<DemoMejaOrderRecord[]>([]);
   const [categoryRows, setCategoryRows] = useState<DemoCategoryRow[]>(seedCategories);
+  const [subcategoryRows, setSubcategoryRows] = useState<DemoSubcategoryRow[]>([]);
   const [customers, setCustomers] = useState<DemoCustomer[]>(seedCustomers);
   const [members, setMembers] = useState<DemoMember[]>(seedMembers);
   /** Peran kustom + anggota tim (`rbac.custom`, Phase 4). */
@@ -1812,6 +1855,70 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       })),
     [categoryRows, products],
   );
+
+  /**
+   * Subkategori demo (`category.manage`): nama + kategori induk + status + jumlah
+   * produk. Produk demo menyimpan **nama** subkategorinya (sama seperti kategori di
+   * mode demo), jadi hitungannya mencocokkan pasangan kategori + nama.
+   */
+  const subcategories: StoreSubcategory[] = useMemo(
+    () =>
+      subcategoryRows.map((row) => {
+        const parent = categoryRows.find((category) => category.id === row.categoryId);
+        return {
+          id: row.id,
+          categoryId: row.categoryId,
+          name: row.name,
+          active: row.active,
+          productCount: parent
+            ? products.filter(
+                (product) =>
+                  categoryNameKey(product.category) === categoryNameKey(parent.name) &&
+                  (product.subcategory ?? "").length > 0 &&
+                  subcategoryNameKey(product.subcategory ?? "") ===
+                    subcategoryNameKey(row.name),
+              ).length
+            : 0,
+        };
+      }),
+    [subcategoryRows, categoryRows, products],
+  );
+
+  /**
+   * Nama subkategori → barisnya, **di bawah kategori yang dipilih** — sama seperti
+   * server: subkategori hanya berlaku di kategori induknya, dan nama yang tidak ada
+   * di sana adalah kesalahan pemanggil, bukan dibuat diam-diam.
+   */
+  function resolveDemoSubcategory(
+    categoryName: string | undefined,
+    name: string | undefined,
+  ): string | undefined {
+    const wanted = normalizeSubcategoryName(name ?? "");
+    if (wanted.length === 0) return undefined;
+    if (!categoryName) {
+      throw new Error("Subkategori hanya bisa dipilih kalau produk punya kategori.");
+    }
+    const category = categoryRows.find(
+      (row) => categoryNameKey(row.name) === categoryNameKey(categoryName),
+    );
+    if (!category) throw new Error(`Kategori “${categoryName}” tidak ada di workspace ini.`);
+    const found = subcategoryRows.find(
+      (row) =>
+        row.categoryId === category.id &&
+        subcategoryNameKey(row.name) === subcategoryNameKey(wanted),
+    );
+    if (!found) {
+      throw new Error(
+        `Subkategori “${wanted}” tidak ada di kategori itu — buat dulu di kartu “Kategori produk”, atau pilih yang lain.`,
+      );
+    }
+    if (!found.active) {
+      throw new Error(
+        `Subkategori ${found.name} sedang nonaktif — aktifkan dulu di halaman Produk & Stok, atau pilih subkategori lain.`,
+      );
+    }
+    return found.name;
+  }
 
   // Modul plug-in: demo membaca pilihan dari sesi, memakai aturan paket yang
   // sama dengan backend sehingga perilakunya identik tanpa server.
@@ -2315,6 +2422,194 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
     },
     [tenantProfile, setTenantProfile],
   );
+
+  /**
+   * Kategori utama bisnis yang tersimpan di sesi. Di mode demo sesi inilah
+   * satu-satunya rumahnya; di mode Convex nilai yang sama datang dari baris tenant
+   * (`tenants.listMine`).
+   */
+  const businessCategory = session?.tenant?.businessCategory ?? null;
+
+  /**
+   * Katalog kategori utama di mode demo: bawaan kode. Backstage (tempat pemilik
+   * platform mengubahnya) memang hanya hidup di mode Convex — halaman itu sendiri
+   * menolak berjalan dengan data demo — jadi demo memakai taksonomi bawaan apa
+   * adanya, sama seperti deployment yang belum pernah mengubahnya.
+   */
+  const businessCategories = useMemo(
+    () => activeBusinessCategoryOptions(defaultBusinessCategoryRows()),
+    [],
+  );
+
+  /**
+   * Mode demo tidak punya akun platform: penanda `users.platformRole` hidup di
+   * baris pengguna server, dan backstage `/platform` sendiri menolak berjalan
+   * dengan data demo. Karena itu menu Backstage memang tidak pernah muncul di
+   * sini — sama seperti tidak ada akun yang bisa membukanya.
+   */
+  const platformDeveloper = false;
+
+  /**
+   * Menjalankan **preset katalog produk** untuk satu pilihan bisnis di mode demo.
+   *
+   * Rencananya dihitung aturan murni `@/convex/lib/productCatalogPresets` — sama
+   * persis dengan server — lalu baris yang belum ada ditambahkan. Hanya menambah:
+   * tidak ada nama yang diganti, dinonaktifkan, atau dihapus, dan produk tidak
+   * tersentuh; menjalankannya dua kali tidak menambah apa pun yang kedua kalinya.
+   */
+  const applyProductCatalogPreset = useCallback(
+    (locked: LockedBusinessCategory) => {
+      const preset = productCatalogPresetFor({
+        category: locked.category,
+        subcategory: locked.subcategory,
+        categoryLabel: locked.categoryLabel,
+        subcategoryLabel: locked.subcategoryLabel,
+      });
+      const plan = planProductCatalogSeeding({
+        preset: preset.categories,
+        existingCategoryNames: categoryRows.map((row) => row.name),
+        existingSubcategories: subcategoryRows
+          .map((row) => {
+            const parent = categoryRows.find((item) => item.id === row.categoryId);
+            return parent ? { categoryName: parent.name, name: row.name } : null;
+          })
+          .filter((row): row is { categoryName: string; name: string } => row !== null),
+      });
+      const createdSubcategoryCount =
+        plan.categories.reduce((sum, row) => sum + row.subcategories.length, 0) +
+        plan.subcategoriesForExistingCategories.reduce(
+          (sum, row) => sum + row.subcategories.length,
+          0,
+        );
+      const label = businessCategoryLabel(locked);
+      const sentence = productCatalogSeedSentence({
+        businessLabel: label,
+        createdCategoryNames: plan.categories.map((row) => row.name),
+        createdSubcategoryCount,
+        skippedCategoryNames: plan.skippedCategoryNames,
+      });
+
+      if (!productCatalogPlanIsEmpty(plan)) {
+        const stamp = Date.now();
+        const createdCategories: { id: string; name: string }[] = [];
+        const createdSubcategories: DemoSubcategoryRow[] = [];
+        for (const row of plan.categories) {
+          const id = `cat-${stamp}-${createdCategories.length + 1}`;
+          createdCategories.push({ id, name: row.name });
+          let subOrder = 0;
+          for (const name of row.subcategories) {
+            createdSubcategories.push({
+              id: `sub-${stamp}-${createdSubcategories.length + 1}`,
+              categoryId: id,
+              name,
+              active: true,
+              sortOrder: subOrder,
+            });
+            subOrder += 1;
+          }
+        }
+        for (const row of plan.subcategoriesForExistingCategories) {
+          const parent = categoryRows.find(
+            (item) => categoryNameKey(item.name) === categoryNameKey(row.name),
+          );
+          if (!parent) continue;
+          let subOrder = subcategoryRows.filter(
+            (item) => item.categoryId === parent.id,
+          ).length;
+          for (const name of row.subcategories) {
+            createdSubcategories.push({
+              id: `sub-${stamp}-${createdSubcategories.length + 1}`,
+              categoryId: parent.id,
+              name,
+              active: true,
+              sortOrder: subOrder,
+            });
+            subOrder += 1;
+          }
+        }
+
+        if (createdCategories.length > 0) {
+          setCategoryRows((current) => [
+            ...current,
+            ...createdCategories.map((row, index) => ({
+              id: row.id,
+              name: row.name,
+              active: true,
+              sortOrder:
+                current.reduce((max, item) => Math.max(max, item.sortOrder + 1), 0) +
+                index,
+            })),
+          ]);
+        }
+        if (createdSubcategories.length > 0) {
+          setSubcategoryRows((current) => [...current, ...createdSubcategories]);
+        }
+      }
+
+      return {
+        changed: !productCatalogPlanIsEmpty(plan),
+        businessCategoryLabel: label,
+        createdCategories: plan.categories.map((row) => row.name),
+        createdSubcategories: createdSubcategoryCount,
+        skippedCategories: plan.skippedCategoryNames,
+        sentence,
+      };
+    },
+    [categoryRows, subcategoryRows],
+  );
+
+  /**
+   * Mengunci kategori utama bisnis dengan aturan murni yang sama dengan server.
+   * Pilihan pertama tersimpan; pilihan berbeda ditolak selamanya; pilihan yang
+   * sama tidak menulis apa pun. `lockedBy` memakai email pemilik karena mode demo
+   * tidak punya id pengguna.
+   */
+  const setBusinessCategoryValue = useCallback(
+    async (input: BusinessCategoryChoice): Promise<UpdatedBusinessCategory> => {
+      const decision = lockBusinessCategory({
+        current: businessCategory,
+        choice: input,
+        actorId: session?.user.email ?? "pemilik@demo.mesinpos",
+      });
+      if (!decision.ok) throw new Error(decision.reason);
+      if (decision.changed) setSessionBusinessCategory(decision.value);
+      /*
+        Pilihan bisnis pertama juga menyemai katalog produk di mode demo — sama
+        seperti `tenants.setBusinessCategory` di server: master kategori &
+        subkategori produk yang relevan langsung tersedia, tanpa mengubah kategori
+        yang sudah ada.
+      */
+      const seeded = decision.changed
+        ? applyProductCatalogPreset(decision.value)
+        : null;
+      return {
+        businessCategory: decision.value,
+        changed: decision.changed,
+        sentence: businessCategorySentence(decision.value),
+        productCatalogSentence: seeded?.sentence,
+      };
+    },
+    [applyProductCatalogPreset, businessCategory, session, setSessionBusinessCategory],
+  );
+
+  /**
+   * Menyamakan katalog produk dengan kategori bisnis workspace demo.
+   *
+   * Memakai aturan murni yang sama dengan server (`lib/productCatalogPresets`):
+   * rencananya dihitung dari kategori/subkategori yang sudah ada, lalu barisnya
+   * ditambahkan — hanya menambah, idempoten, tidak menyentuh produk. Beda dengan
+   * mode Convex yang menunggu balikan server, di sini rencananya dijalankan di
+   * perangkat, jadi perilakunya sama persis seperti yang dijelaskan kalimatnya.
+   */
+  const syncProductCategories = useCallback(async (): Promise<SyncedProductCategories> => {
+    const locked = businessCategory;
+    if (!locked) {
+      throw new Error(
+        "Workspace ini belum memilih kategori utama bisnis. Pilih lebih dulu di halaman Profil supaya katalog produknya bisa menyesuaikan.",
+      );
+    }
+    return applyProductCatalogPreset(locked);
+  }, [applyProductCatalogPreset, businessCategory]);
 
   /**
    * Laporan pajak & pungutan F&B per bulan (12 bulan terakhir, tertua dulu).
@@ -3066,7 +3361,11 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       if (name.length < 2) throw new Error("Nama produk minimal 2 karakter.");
       if (input.price < 0) throw new Error("Harga tidak boleh negatif.");
 
-      const category = input.category?.trim() || "Tanpa kategori";
+      const categoryInput = input.category?.trim() || undefined;
+      const category = categoryInput ?? "Tanpa kategori";
+      // Subkategori dicocokkan ke daftar yang dibuat **di bawah** kategorinya —
+      // aturan yang sama dengan server, bukan teks bebas.
+      const subcategory = resolveDemoSubcategory(categoryInput, input.subcategory);
       /**
        * SKU kosong = dibuat otomatis, memakai aturan & format yang sama dengan
        * server (`lib/productSku.ts`): nomor berikutnya dihitung dari SKU yang
@@ -3097,6 +3396,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
           price: Math.max(0, Math.round(input.price)),
           cost: Math.max(0, Math.round(input.cost ?? 0)),
           category,
+          subcategory,
           stock: openingStock,
           unit: (input.unit ?? "").trim().toUpperCase() || "PCS",
         },
@@ -3104,7 +3404,10 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
 
       return { id, sku };
     },
-    [updateProducts],
+    // Daftar kategori & subkategori ikut jadi dependensi: subkategori yang baru
+    // dibuat di kartu “Kategori produk” harus terlihat oleh validasi di atas,
+    // bukan tertinggal di closure render pertama (yang masih kosong).
+    [updateProducts, categoryRows, subcategoryRows],
   );
 
   /**
@@ -3387,7 +3690,12 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
   const setCategory = useCallback(
     async (
       input: SetProductCategoryInput,
-    ): Promise<{ sku: string; previousSku: string; category: string | null }> => {
+    ): Promise<{
+      sku: string;
+      previousSku: string;
+      category: string | null;
+      subcategory: string | null;
+    }> => {
       const product = productsRef.current.find((row) => row.id === input.productId);
       if (!product) throw new Error("Produk tidak ditemukan.");
 
@@ -3407,6 +3715,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
         }
       }
       const category = hasCategory ? trimmed : "Tanpa kategori";
+      const subcategory = resolveDemoSubcategory(hasCategory ? category : undefined, input.subcategory);
       const takenSkus = productsRef.current
         .filter((row) => row.id !== input.productId)
         .map((row) => row.sku);
@@ -3421,16 +3730,21 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       }
 
       updateProducts((current) =>
-        current.map((row) => (row.id === input.productId ? { ...row, category, sku } : row)),
+        current.map((row) =>
+          row.id === input.productId ? { ...row, category, subcategory, sku } : row,
+        ),
       );
 
       return {
         sku,
         previousSku: product.sku,
         category: hasCategory ? category : null,
+        subcategory: subcategory ?? null,
       };
     },
-    [categoryRows, updateProducts],
+    // `subcategoryRows` wajib ikut: validasi subkategori di dalamnya membaca daftar
+    // yang bisa berubah tanpa `categoryRows` ikut berubah.
+    [categoryRows, subcategoryRows, updateProducts],
   );
 
   /**
@@ -3529,19 +3843,151 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       const detached = productsRef.current.filter(
         (row) => categoryNameKey(row.category) === categoryNameKey(existing.name),
       ).length;
+      const removedSubcategories = subcategoryRows.filter(
+        (row) => row.categoryId === categoryId,
+      ).length;
 
       updateProducts((current) =>
         current.map((row) =>
           categoryNameKey(row.category) === categoryNameKey(existing.name)
-            ? { ...row, category: "Tanpa kategori" }
+            ? { ...row, category: "Tanpa kategori", subcategory: undefined }
             : row,
         ),
       );
       setCategoryRows((current) => current.filter((row) => row.id !== categoryId));
+      // Subkategori tidak punya arti tanpa kategorinya — ikut terhapus, sama
+      // seperti di server (`categories.remove`).
+      setSubcategoryRows((current) => current.filter((row) => row.categoryId !== categoryId));
+
+      return {
+        name: existing.name,
+        detachedProducts: detached,
+        removedSubcategories,
+      };
+    },
+    [categoryRows, subcategoryRows, updateProducts],
+  );
+
+  /**
+   * Subkategori (`category.manage`) di mode demo: tambah — selalu **di bawah**
+   * sebuah kategori —, ganti nama, aktif/nonaktif, dan hapus. Aturannya sama dengan
+   * `src/convex/subcategories.ts`: produk menunjuk namanya, jadi ganti nama ikut
+   * memperbarui label produk demo (di server produk menunjuk id, jadi hasil
+   * tampilannya sama); hapus hanya melepas subkategorinya, kategorinya tetap.
+   */
+  const createSubcategory = useCallback(
+    async (input: CreateSubcategoryInput): Promise<{ id: string; name: string }> => {
+      const category = categoryRows.find((row) => row.id === input.categoryId);
+      if (!category) throw new Error("Kategori tidak ditemukan untuk tenant ini.");
+
+      const siblings = subcategoryRows.filter((row) => row.categoryId === input.categoryId);
+      const decision = validateSubcategoryName(
+        { name: input.name },
+        {
+          existingNames: siblings.map((row) => row.name),
+          count: siblings.length,
+        },
+      );
+      if (!decision.ok) throw new Error(decision.reason);
+
+      const id = `sub-${Date.now()}`;
+      setSubcategoryRows((current) => [
+        ...current,
+        {
+          id,
+          categoryId: input.categoryId,
+          name: decision.value.name,
+          active: true,
+          sortOrder: current.reduce((max, row) => Math.max(max, row.sortOrder + 1), 0),
+        },
+      ]);
+      return { id, name: decision.value.name };
+    },
+    [categoryRows, subcategoryRows],
+  );
+
+  const renameSubcategory = useCallback(
+    async (input: RenameSubcategoryInput): Promise<RenamedSubcategory> => {
+      const existing = subcategoryRows.find((row) => row.id === input.subcategoryId);
+      if (!existing) throw new Error("Subkategori tidak ditemukan untuk tenant ini.");
+
+      const siblings = subcategoryRows.filter(
+        (row) => row.categoryId === existing.categoryId && row.id !== input.subcategoryId,
+      );
+      const decision = validateSubcategoryName(
+        { name: input.name },
+        { existingNames: siblings.map((row) => row.name) },
+      );
+      if (!decision.ok) throw new Error(decision.reason);
+
+      const previousName = existing.name;
+      if (decision.value.name === previousName) {
+        return { name: previousName, previousName };
+      }
+
+      setSubcategoryRows((current) =>
+        current.map((row) =>
+          row.id === input.subcategoryId ? { ...row, name: decision.value.name } : row,
+        ),
+      );
+      // Produk demo menyimpan nama subkategorinya; di server produk menunjuk id,
+      // jadi label barunya muncul dengan sendirinya — di sini disamakan.
+      const parent = categoryRows.find((row) => row.id === existing.categoryId);
+      if (parent) {
+        updateProducts((current) =>
+          current.map((row) =>
+            categoryNameKey(row.category) === categoryNameKey(parent.name) &&
+            subcategoryNameKey(row.subcategory ?? "") === subcategoryNameKey(previousName)
+              ? { ...row, subcategory: decision.value.name }
+              : row,
+          ),
+        );
+      }
+
+      return { name: decision.value.name, previousName };
+    },
+    [subcategoryRows, categoryRows, updateProducts],
+  );
+
+  const setSubcategoryActive = useCallback(
+    async (subcategoryId: string, active: boolean): Promise<void> => {
+      const existing = subcategoryRows.find((row) => row.id === subcategoryId);
+      if (!existing) throw new Error("Subkategori tidak ditemukan untuk tenant ini.");
+      setSubcategoryRows((current) =>
+        current.map((row) => (row.id === subcategoryId ? { ...row, active } : row)),
+      );
+    },
+    [subcategoryRows],
+  );
+
+  const removeSubcategory = useCallback(
+    async (subcategoryId: string): Promise<RemovedSubcategory> => {
+      const existing = subcategoryRows.find((row) => row.id === subcategoryId);
+      if (!existing) throw new Error("Subkategori tidak ditemukan untuk tenant ini.");
+
+      const parent = categoryRows.find((row) => row.id === existing.categoryId);
+      const detached = parent
+        ? productsRef.current.filter(
+            (row) =>
+              categoryNameKey(row.category) === categoryNameKey(parent.name) &&
+              subcategoryNameKey(row.subcategory ?? "") === subcategoryNameKey(existing.name),
+          ).length
+        : 0;
+
+      updateProducts((current) =>
+        current.map((row) =>
+          parent &&
+          categoryNameKey(row.category) === categoryNameKey(parent.name) &&
+          subcategoryNameKey(row.subcategory ?? "") === subcategoryNameKey(existing.name)
+            ? { ...row, subcategory: undefined }
+            : row,
+        ),
+      );
+      setSubcategoryRows((current) => current.filter((row) => row.id !== subcategoryId));
 
       return { name: existing.name, detachedProducts: detached };
     },
-    [categoryRows, updateProducts],
+    [subcategoryRows, categoryRows, updateProducts],
   );
 
   /** Limit & umur piutang: angka yang sama dengan backend, bukan salinan. */
@@ -7377,6 +7823,12 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       renameCategory,
       setCategoryActive,
       removeCategory,
+      syncProductCategories,
+      subcategories,
+      createSubcategory,
+      renameSubcategory,
+      setSubcategoryActive,
+      removeSubcategory,
       modules,
       setModules,
       tax,
@@ -7402,6 +7854,10 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       setMyProfile,
       tenantProfile,
       setTenantProfile: setTenantProfileValue,
+      businessCategory,
+      setBusinessCategory: setBusinessCategoryValue,
+      businessCategories,
+      platformDeveloper,
       changePlan,
       createProduct,
       updateProduct,
@@ -7551,6 +8007,12 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       renameCategory,
       setCategoryActive,
       removeCategory,
+      syncProductCategories,
+      subcategories,
+      createSubcategory,
+      renameSubcategory,
+      setSubcategoryActive,
+      removeSubcategory,
       modules,
       setModules,
       tax,
@@ -7576,6 +8038,10 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       setMyProfile,
       tenantProfile,
       setTenantProfileValue,
+      businessCategory,
+      setBusinessCategoryValue,
+      businessCategories,
+      platformDeveloper,
       changePlan,
       createProduct,
       updateProduct,

@@ -44,6 +44,29 @@ Aturan isi entri:
 
 Daftar perintah verifikasi rutin ada di bagian akhir `worklog.md`.
 
+## Data uji wajib dibersihkan (tidak opsional)
+
+Deployment dev dipakai bersama oleh aplikasi sungguhan dan harness. Setiap kali menjalankan
+uji yang **menulis ke deployment** (`verify-backend.mjs`, uji CLI `bun convex run`, uji browser
+yang mendirikan workspace, atau uji manual di aplikasi), sesudahnya **wajib** membersihkan akun
+uji yang ditinggalkannya:
+
+```bash
+bun run bersih:uji          # akun bisnis berdomain uji, lalu baris pengguna yang yatim
+```
+
+Aturannya:
+
+- Jalankan **sesudah** uji, bukan sebelumnya — kalau tidak, akun uji yang baru lahir tertinggal.
+- Kalau uji membuat data di **produksi**, sebutkan dan bersihkan dengan cara yang sama
+  (`--prod`) serta laporkan hasilnya di entri worklog.
+- Jangan mengandalkan cron harian (`platform:purgeFixtureTenantsAuto` pukul 19:00 UTC dan
+  `platform:purgeFixtureUsers` pukul 19:30 UTC) sebagai pengganti: cron hanya jaring pengaman.
+- Yang tidak boleh dihapus: akun berdomain non-uji, akun platform (`platformRole`), workspace
+  pengelola sendiri, dan siapa pun yang masih tercatat sebagai anggota workspace.
+- Hasil pembersihan (jumlah akun yang dihapus, sisa yang dilewati) ditulis di entri worklog
+  sebagai bagian Verifikasi — bukan sebagai klaim “sudah dibersihkan”.
+
 ## Sebelum menyatakan pekerjaan selesai
 
 - Jalankan perintah verifikasi yang relevan dan laporkan hasil apa adanya.

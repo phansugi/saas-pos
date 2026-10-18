@@ -414,11 +414,20 @@ try {
     await view.close();
 
     const off = await renderApp("/app/kds", starter);
+    /*
+      Halaman modul tanpa langganan kini **hanya bisa dibaca**: gerbangnya di
+      tingkat rute (`ModuleRoute`), jadi yang terbaca di sini kalimat read-only
+      beserta sebabnya — bukan lagi ajakan menyalakan modul yang paketnya pun
+      tidak memuat fiturnya.
+    */
     check(
-      "Starter + modul UMKM: halaman Dapur menjelaskan modulnya, bukan gagal",
-      off.text.includes("Butuh modul F&B") &&
-        off.text.includes("hidup di modul Food & Beverage"),
-      off.text.slice(0, 260),
+      "Starter + modul UMKM: halaman Dapur hanya bisa dibaca beserta alasannya",
+      off.text.includes("hanya bisa dibaca") &&
+        off.text.includes("Kitchen Display System & KOT terpisah") &&
+        // Modulnya yang belum aktif di sesi ini (verticals `umkm` saja), jadi
+        // alasan yang benar adalah modulnya — bukan paketnya.
+        off.text.includes("memerlukan modul Food & Beverage yang belum aktif"),
+      off.text.slice(0, 320),
     );
     check(
       "Starter + modul UMKM: layar dapur tidak diklaim aktif",

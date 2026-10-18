@@ -11,7 +11,8 @@
     "typecheck": "tsc -b --noEmit",
     "panduan:pdf": "bun scripts/gen-panduan-pdf.mjs",
     "convex:dev": "convex dev",
-    "backup:data": "bun scripts/backup-data.mjs"
+    "backup:data": "bun scripts/backup-data.mjs",
+    "bersih:uji": "bun convex run platform:purgeFixtureTenantsAuto '{}' && bun convex run platform:purgeFixtureUsers '{}'"
   },
   "dependencies": {
     "@auth/core": "0.41.1",

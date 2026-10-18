@@ -19,6 +19,15 @@
  */
 import { Window } from "happy-dom";
 
+/*
+  Harness DOM tiruan selalu bekerja pada **data demo**, apa pun isi `.env.local`
+  mesin ini (mis. saat preview dijalankan dalam mode Convex supaya backstage hidup).
+  Aplikasi memilih sumber datanya saat modul dievaluasi (`src/lib/store/config.ts`),
+  dan nilai yang diset di proses menang atas berkas env — jadi menetapkannya di sini
+  membuat hasil harness tidak bergantung pada setelan mesin pengembang.
+*/
+process.env.VITE_DATA_SOURCE = "demo";
+
 const window = new Window({ url: "https://mesinpos.test/" });
 
 globalThis.window = window;

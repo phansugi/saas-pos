@@ -99,7 +99,7 @@ export const WEBHOOK_EVENTS: WebhookEventDefinition[] = [
     key: "product.updated",
     label: "Produk berubah",
     description:
-      "Nama, SKU, harga, satuan, atau status produk berubah — termasuk harga baru yang harus dipakai platform.",
+      "Nama, SKU, harga, satuan, kategori/subkategori, atau status produk berubah — termasuk harga & katalog baru yang harus dipakai platform.",
   },
   {
     key: "stock.changed",

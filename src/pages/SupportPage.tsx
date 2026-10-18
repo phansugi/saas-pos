@@ -39,6 +39,7 @@ import {
 } from "@/lib/support";
 import { useSession } from "@/lib/session";
 import { useStore } from "@/lib/store";
+import { featureUnavailableReason } from "@/lib/store/modules";
 import { useCan } from "@/lib/usePermission";
 import { cn } from "@/lib/utils";
 
@@ -102,10 +103,21 @@ export function SupportPage() {
     supportLimits,
     createSupportTicket,
     actSupportTicket,
+    modules,
   } = useStore();
   const { session } = useSession();
   const can = useCan();
   const planKey = session?.tenant?.planKey ?? "starter";
+  /*
+    Dukungan khusus (`support.dedicated`) milik paket Enterprise. Tanpa fiturnya
+    halaman ini hanya bisa dibaca (gerbang rutenya `ModuleRoute`), jadi kalimat
+    alasannya dipakai di sini juga.
+  */
+  const gateReason = featureUnavailableReason(
+    planKey,
+    modules.activeVerticals,
+    "support.dedicated",
+  );
   const canManage = can("support.manage");
   const canView = can("support.view");
 
@@ -177,10 +189,10 @@ export function SupportPage() {
           {!supportPlan.dedicated && (
             <p className="flex items-start gap-2 rounded-lg border border-border/60 bg-secondary/20 px-3 py-2 text-sm text-muted-foreground">
               <Lock className="mt-0.5 size-3.5 shrink-0" />
-              Paket ini belum memuat jalur dukungan khusus: tiket prioritas
-              Normal &amp; Rendah tetap bisa dibuka, tetapi prioritas Tinggi
-              &amp; Mendesak dan eskalasi ke manajer akun menunggu paket
-              Enterprise.
+              {gateReason} Halaman ini hanya bisa dibaca: tiket lama tetap
+              terlihat, tetapi membuka tiket baru, menambah catatan, menutup, dan
+              mengeskalasinya tidak bisa dari sini sampai langganannya memuat
+              modul itu.
             </p>
           )}
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

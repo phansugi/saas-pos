@@ -38,6 +38,7 @@ import {
   API_DOC_NOT_YET,
   API_DOC_VERSION,
   SAMPLE_ORDER_BODY,
+  SYNC_DOC,
   WEBHOOK_DOC,
   apiSiteUrl,
 } from "../src/lib/apiDocs.ts";
@@ -119,6 +120,34 @@ for (const endpoint of API_DOC_ENDPOINTS) {
     `contoh balasan ${endpoint.resource} berbentuk amplop`,
     parsed && parsed.ok === true && parsed.resource === endpoint.resource && parsed.data !== null,
     JSON.stringify(parsed)?.slice(0, 120),
+  );
+}
+
+// Katalog dua tingkat: dokumentasi harus menyebut kategori & subkategori pada
+// endpoint produk, bukan hanya di kode. Contohnya ikut diperiksa supaya field
+// yang dijanjikan tidak hilang dari balasan contoh.
+{
+  const productDoc = docByResource.get("products");
+  const fieldNames = productDoc.fields.map((row) => row.name);
+  check(
+    "dokumentasi produk menjelaskan kategori & subkategori",
+    fieldNames.includes("category") &&
+      fieldNames.includes("subcategory") &&
+      productDoc.responseExample.includes('"category"') &&
+      productDoc.responseExample.includes('"subcategory"'),
+    fieldNames.join(", "),
+  );
+  check(
+    "catatan produk menjelaskan subkategori tidak mengubah SKU",
+    productDoc.notes.some(
+      (note) => note.includes("Subkategori") && note.includes("SKU"),
+    ),
+    productDoc.notes.join(" | "),
+  );
+  check(
+    "kontrak sinkronisasi menyebut katalog dua tingkat",
+    JSON.stringify(SYNC_DOC).includes("subcategory"),
+    "SYNC_DOC tidak menyebut subkategori",
   );
 }
 

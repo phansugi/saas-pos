@@ -36,6 +36,24 @@ import { productSkuCategoryCode, PRODUCT_SKU_NO_CATEGORY_LABEL } from "./product
 export const CATEGORY_NAME_MIN = 2;
 export const CATEGORY_NAME_MAX = 40;
 
+/**
+ * Subkategori: satu tingkat katalog **di dalam** kategori, mis.
+ * “Semen & Mortar › Semen Portland”.
+ *
+ * Bedanya dengan kategori sengaja tegas: kategori menentukan kode di tengah SKU
+ * dan tab POS, sedangkan subkategori **tidak** menyentuh keduanya — ia bagian
+ * katalog yang ikut disinkronkan (API & webhook). Karena itu subkategori punya
+ * barisnya sendiri (`subcategories`, induknya `categoryId`) yang **dibuat di bawah
+ * kategori** di halaman Produk & Stok, dan produk menunjuk **id**-nya: ganti nama
+ * subkategori tidak menulis ulang apa pun, dan hapus subkategori melepas produknya
+ * tanpa menghapus produk maupun mengubah SKU-nya.
+ */
+export const SUBCATEGORY_NAME_MIN = 2;
+export const SUBCATEGORY_NAME_MAX = 40;
+
+/** Batas jumlah subkategori per kategori, supaya pemilihnya tetap bisa dibaca. */
+export const MAX_SUBCATEGORIES_PER_CATEGORY = 50;
+
 /** Batas jumlah kategori per workspace, supaya pemilihnya tetap bisa dibaca. */
 export const MAX_CATEGORIES_PER_TENANT = 100;
 
@@ -83,6 +101,127 @@ export function isReservedCategoryName(raw: string): boolean {
 /** Kode tiga huruf kategori di dalam SKU (`Sanitasi` → `SAN`). */
 export function categorySkuCode(name: string): string {
   return productSkuCategoryCode(name);
+}
+
+/**
+ * Rapikan nama subkategori dengan aturan spasi yang sama seperti kategori, supaya
+ * “Semen  Portland” dan “Semen Portland” tidak hidup sebagai dua label berbeda.
+ */
+export function normalizeSubcategoryName(raw: string): string {
+  return normalizeCategoryName(raw);
+}
+
+export interface SubcategoryLike {
+  name: string;
+  categoryId?: string | null;
+  /** Baris lama (sebelum ada kolom `active`) tidak punya nilai ini. */
+  active?: boolean | null;
+}
+
+export interface SubcategoryInput {
+  name: string;
+  active?: boolean;
+}
+
+export type SubcategoryValidation =
+  | { ok: true; value: { name: string; active: boolean } }
+  | { ok: false; reason: string };
+
+/** Kunci pembanding nama subkategori — aturannya sama dengan nama kategori. */
+export function subcategoryNameKey(raw: string): string {
+  return categoryNameKey(raw);
+}
+
+/**
+ * Validasi nama subkategori yang **dibuat di bawah sebuah kategori**.
+ *
+ * Aturannya sama bentuknya dengan nama kategori (2–40 karakter, tanpa duplikat di
+ * kategori yang sama, “Tanpa kategori” terlarang) supaya kedua pemilih di halaman
+ * terasa satu sistem. Duplikatnya diperiksa **per kategori** — “Lainnya” di dua
+ * kategori berbeda adalah dua subkategori yang memang berbeda.
+ */
+export function validateSubcategoryName(
+  input: SubcategoryInput,
+  options: { existingNames?: readonly string[]; count?: number } = {},
+): SubcategoryValidation {
+  const name = normalizeSubcategoryName(input.name ?? "");
+  if (name.length < SUBCATEGORY_NAME_MIN || name.length > SUBCATEGORY_NAME_MAX) {
+    return {
+      ok: false,
+      reason: `Nama subkategori harus ${SUBCATEGORY_NAME_MIN}–${SUBCATEGORY_NAME_MAX} karakter.`,
+    };
+  }
+  if (isReservedCategoryName(name)) {
+    return {
+      ok: false,
+      reason: `"${CATEGORY_NO_CATEGORY_LABEL}" dipakai sistem untuk produk tanpa kategori; pakai nama subkategori lain.`,
+    };
+  }
+
+  const key = subcategoryNameKey(name);
+  const duplicate = (options.existingNames ?? []).some(
+    (existing) => subcategoryNameKey(existing) === key,
+  );
+  if (duplicate) {
+    return { ok: false, reason: `Subkategori "${name}" sudah ada di kategori ini.` };
+  }
+
+  if (options.count !== undefined && options.count >= MAX_SUBCATEGORIES_PER_CATEGORY) {
+    return {
+      ok: false,
+      reason: `Maksimal ${MAX_SUBCATEGORIES_PER_CATEGORY} subkategori per kategori.`,
+    };
+  }
+
+  return { ok: true, value: { name, active: input.active ?? true } };
+}
+
+/** Baris subkategori dianggap aktif kecuali ditandai nonaktif (baris lama). */
+export function subcategoryIsActive(row: SubcategoryLike): boolean {
+  return row.active !== false;
+}
+
+/**
+ * Subkategori yang boleh dipilih untuk sebuah produk: milik kategori itu yang
+ * **aktif**, ditambah subkategori yang sedang dipakai produk ini walau sudah
+ * nonaktif — kalau tidak, membuka “Atur harga” akan tampak seperti memindahkan
+ * produknya.
+ */
+export function selectableSubcategoryNames(
+  rows: readonly SubcategoryLike[],
+  /** Kategori induk; kosong (produk tanpa kategori) berarti tidak ada pilihan. */
+  categoryId: string | undefined | null,
+  currentName?: string | null,
+): string[] {
+  const names = categoryId
+    ? rows
+        .filter((row) => row.categoryId === categoryId && subcategoryIsActive(row))
+        .map((row) => row.name)
+    : [];
+  const current = normalizeSubcategoryName(currentName ?? "");
+  if (
+    current.length > 0 &&
+    !names.some((name) => subcategoryNameKey(name) === subcategoryNameKey(current))
+  ) {
+    names.push(current);
+  }
+  return names;
+}
+
+/** Jumlah produk yang sekarang memakai sebuah subkategori (pembanding id). */
+export function countProductsInSubcategory(
+  subcategoryId: string,
+  products: readonly { subcategoryId?: string | null }[],
+): number {
+  return products.filter((product) => product.subcategoryId === subcategoryId).length;
+}
+
+/** Kalimat dampak sebelum subkategori dihapus — jumlahnya pasti. */
+export function deleteSubcategorySentence(name: string, productCount: number): string {
+  if (productCount === 0) {
+    return `Subkategori "${name}" tidak dipakai produk mana pun, jadi menghapusnya tidak mengubah katalog.`;
+  }
+  return `Subkategori "${name}" masih dipakai ${productCount} produk. Menghapusnya tidak menghapus produknya: ${productCount} produk itu kehilangan subkategorinya (kategorinya tetap).`;
 }
 
 /** Benar kalau ganti nama kategori ikut mengubah kode di SKU produk berikutnya. */
@@ -203,10 +342,23 @@ export function duplicateCategoryCodes(
     .map(([code, names]) => ({ code, names }));
 }
 
-/** Kalimat dampak sebelum kategori dihapus — jumlahnya pasti, bukan “beberapa”. */
-export function deleteCategorySentence(name: string, productCount: number): string {
+/**
+ * Kalimat dampak sebelum kategori dihapus — jumlahnya pasti, bukan “beberapa”.
+ * `subcategoryCount` menyebut subkategori di dalamnya yang ikut terhapus, supaya
+ * akibatnya terlihat sebelum tombolnya ditekan (produknya tetap, hanya kehilangan
+ * kategori & subkategorinya).
+ */
+export function deleteCategorySentence(
+  name: string,
+  productCount: number,
+  subcategoryCount = 0,
+): string {
+  const subSentence =
+    subcategoryCount > 0
+      ? ` ${subcategoryCount} subkategori di bawahnya juga ikut terhapus, dan produk yang memakainya kehilangan subkategorinya.`
+      : "";
   if (productCount === 0) {
-    return `Kategori "${name}" tidak dipakai produk mana pun, jadi menghapusnya tidak mengubah katalog.`;
+    return `Kategori "${name}" tidak dipakai produk mana pun, jadi menghapusnya tidak mengubah katalog.${subSentence}`;
   }
-  return `Kategori "${name}" masih dipakai ${productCount} produk. Menghapusnya tidak menghapus produknya: ${productCount} produk itu menjadi “${CATEGORY_NO_CATEGORY_LABEL}”, dan SKU-nya tidak ditulis ulang.`;
+  return `Kategori "${name}" masih dipakai ${productCount} produk. Menghapusnya tidak menghapus produknya: ${productCount} produk itu menjadi “${CATEGORY_NO_CATEGORY_LABEL}”, dan SKU-nya tidak ditulis ulang.${subSentence}`;
 }

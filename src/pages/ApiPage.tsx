@@ -249,9 +249,9 @@ export function ApiPage() {
 
       {gateReason && (
         <p className="rounded-lg border border-accent/40 bg-accent/10 px-4 py-3 text-sm text-accent">
-          {gateReason} Kunci dan endpoint yang sudah ada tetap terlihat, dan keduanya
-          tetap bisa dicabut/dimatikan; yang ditolak adalah membuat kunci atau endpoint
-          baru.{" "}
+          {gateReason} Halaman ini hanya bisa dibaca: kunci dan endpoint lama tetap
+          terlihat, tetapi membuat, mencabut, atau mengubahnya tidak bisa dari sini
+          sampai langganannya memuat modul itu.{" "}
           {can("billing.manage") && (
             <Link to="/app/subscription" className="underline">
               Kelola langganan

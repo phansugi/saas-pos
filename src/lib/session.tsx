@@ -31,6 +31,11 @@ import {
 } from "react";
 import { Link, Navigate, useLocation } from "react-router-dom";
 import { isRole, ROLE_LABELS, type Permission, type Role } from "@/lib/authz";
+import {
+  lockBusinessCategory,
+  type BusinessCategoryChoice,
+  type LockedBusinessCategory,
+} from "@/lib/businessCategory";
 import { DEFAULT_TAX_RATE_PCT, type PlanKey, type Vertical } from "@/lib/billing";
 import { effectivePermissions, sanitizePermissions } from "@/lib/rbac";
 import {
@@ -85,6 +90,15 @@ export interface SessionTenant {
   address?: string;
   email?: string;
   whatsapp?: string;
+  /**
+   * Kategori utama bisnis yang dipilih pemilik, beserta subkategorinya.
+   *
+   * Kosong = workspace lama yang belum pernah memilih; setelah terisi, nilai ini
+   * **terkunci permanen** (`tenants.setBusinessCategory`), dan sesi hanya menjadi
+   * cerminnya supaya halaman Profil, onboarding, dan header membaca sumber yang
+   * sama di mode demo maupun Convex.
+   */
+  businessCategory?: LockedBusinessCategory | null;
   /** Modul utama pilihan saat onboarding (modul pertama yang aktif). */
   vertical: Vertical;
   /**
@@ -182,6 +196,12 @@ export interface CreateTenantInput {
   storeName: string;
   vertical: Vertical;
   planKey: PlanKey;
+  /**
+   * Kategori utama bisnis dari onboarding. Wajib diisi halaman onboarding, tetapi
+   * opsional di tipe ini supaya pemanggil lama (dan sesi contoh) tetap sah —
+   * aturan “wajib dipilih” ditegakkan di halaman, bukan di penyimpanan sesi.
+   */
+  businessCategory?: BusinessCategoryChoice;
 }
 
 /**
@@ -204,6 +224,8 @@ export interface AdoptWorkspaceInput {
   address?: string;
   email?: string;
   whatsapp?: string;
+  /** Kategori utama terkunci (`tenants.businessCategory`); `undefined` = belum ada. */
+  businessCategory?: LockedBusinessCategory | null;
 }
 
 interface SessionContextValue {
@@ -267,6 +289,13 @@ interface SessionContextValue {
    * harus masuk ulang hanya untuk melihat namanya berubah.
    */
   setUserProfile: (profile: { name: string; whatsapp: string | null }) => void;
+  /**
+   * Menyimpan kategori utama bisnis yang sudah dikunci. Nilainya datang dari
+   * aturan murni (`lockBusinessCategory`) di mode demo, atau dari balikan
+   * `tenants.setBusinessCategory` di mode Convex — jadi sesi tidak pernah memutuskan
+   * sendiri hasil penguncian.
+   */
+  setBusinessCategory: (value: LockedBusinessCategory | null) => void;
   /**
    * Menyimpan identitas usaha (nama, alamat, email, nomor WA) hasil
    * `tenants.updateProfile` di server. Di mode demo inilah satu-satunya tempat
@@ -432,10 +461,27 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     (input: CreateTenantInput): SessionTenant => {
       const now = new Date();
       const trialEnds = new Date(now.getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
+      /*
+        Kategori utama langsung dikunci di sesi dengan aturan yang sama seperti
+        server. `lockedBy` di mode demo memakai email pemilik karena demo tidak
+        punya id pengguna; di mode Convex nilai ini diganti jawaban server saat
+        workspace benar-benar dibuat.
+      */
+      const lockedCategory = input.businessCategory
+        ? lockBusinessCategory({
+            current: null,
+            choice: input.businessCategory,
+            actorId: session?.user.email ?? "pemilik@demo.mesinpos",
+            now: now.getTime(),
+          })
+        : null;
+      const businessCategory =
+        lockedCategory && lockedCategory.ok ? lockedCategory.value : null;
       const tenant: SessionTenant = {
         name: input.businessName,
         slug: slugify(input.businessName) || "toko",
         storeName: input.storeName,
+        businessCategory,
         vertical: input.vertical,
         verticals: [input.vertical],
         planKey: input.planKey,
@@ -469,7 +515,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }));
       return tenant;
     },
-    [],
+    [session],
   );
 
   const adoptWorkspace = useCallback((input: AdoptWorkspaceInput) => {
@@ -485,6 +531,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         name: input.name,
         slug: input.slug,
         storeName: input.storeName ?? previous?.storeName ?? "Toko Utama",
+        // Kategori utama ikut dipulihkan di perangkat baru; `undefined` (server
+        // workspace lama) mempertahankan yang sudah dipegang sesi ini.
+        businessCategory:
+          input.businessCategory === undefined
+            ? previous?.businessCategory
+            : input.businessCategory,
         // Identitas usaha ikut dipulihkan di perangkat baru: alamat/email/WA
         // yang sudah diisi di server tidak boleh tampak kosong hanya karena
         // perangkat ini belum pernah membukanya. Yang tidak dikirim server
@@ -515,6 +567,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         previous.address === next.address &&
         previous.email === next.email &&
         previous.whatsapp === next.whatsapp &&
+        previous.businessCategory?.category === next.businessCategory?.category &&
+        previous.businessCategory?.subcategory === next.businessCategory?.subcategory &&
+        previous.businessCategory?.lockedAt === next.businessCategory?.lockedAt &&
         previous.verticals.join(",") === next.verticals.join(",")
       ) {
         return current;
@@ -671,6 +726,29 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  /**
+   * Menyimpan kategori utama yang sudah dikunci. Nilai yang sama tidak memicu
+   * render ulang; nilai berbeda **tidak** bisa masuk lewat sini — pemanggilnya
+   * sudah melewati aturan penguncian (`lockBusinessCategory` atau mutation server).
+   */
+  const setBusinessCategory = useCallback((value: LockedBusinessCategory | null) => {
+    setSession((current) => {
+      if (!current?.tenant) return current;
+      const before = current.tenant.businessCategory ?? null;
+      if (
+        (before === null && value === null) ||
+        (before !== null &&
+          value !== null &&
+          before.category === value.category &&
+          before.subcategory === value.subcategory &&
+          before.lockedAt === value.lockedAt)
+      ) {
+        return current;
+      }
+      return { ...current, tenant: { ...current.tenant, businessCategory: value } };
+    });
+  }, []);
+
   const setCustomRole = useCallback((role: SessionCustomRole | null) => {
     setSession((current) => {
       if (!current?.tenant) return current;
@@ -746,6 +824,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setLogoUrl,
       setUserProfile,
       setTenantProfile,
+      setBusinessCategory,
       setCustomRole,
       setRolePermissions,
       signOut,
@@ -766,6 +845,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setLogoUrl,
       setUserProfile,
       setTenantProfile,
+      setBusinessCategory,
       setCustomRole,
       setRolePermissions,
       signOut,

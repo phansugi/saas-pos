@@ -10,6 +10,7 @@ import {
   CreditCard,
   Loader2,
   Rocket,
+  ShieldCheck,
   Store,
   Truck,
 } from "lucide-react";
@@ -20,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn, formatIDR } from "@/lib/utils";
 import { PLAN_LIST, VERTICAL_LABELS, type PlanKey, type Vertical } from "@/lib/billing";
+import { suggestedVerticalFor } from "@/lib/businessCategory";
 import { useSession, TRIAL_DAYS } from "@/lib/session";
 import { useStore } from "@/lib/store";
 
@@ -47,6 +49,13 @@ export function OnboardingPage() {
     workspacePending,
     error: storeError,
     cancelRegistration,
+    // Katalog yang boleh dipilih datang dari store: di mode Convex isinya
+    // mengikuti pengelolaan backstage (kategori nonaktif tidak ditawarkan), di
+    // mode demo taksonomi bawaannya.
+    businessCategories,
+    // Akun platform developer tidak selalu punya workspace; tautan backstage di
+    // header ini jalan masuknya saat sidebar aplikasi belum bisa dibuka.
+    platformDeveloper,
   } = useStore();
   const navigate = useNavigate();
   const [params] = useSearchParams();
@@ -62,6 +71,15 @@ export function OnboardingPage() {
   const [storeName, setStoreName] = useState("");
   const [vertical, setVertical] = useState<Vertical>("umkm");
   const [planKey, setPlanKey] = useState<PlanKey>("starter");
+  /*
+    Kategori utama bisnis dipilih **sekali** di sini dan ikut dikunci saat trial
+    dimulai. Karena itu subkategorinya direset setiap kali kategorinya berganti —
+    pasangan lama tidak boleh tertinggal dan ikut terkunci tanpa dibaca pemilik.
+  */
+  const [businessCategoryKey, setBusinessCategoryKey] = useState("");
+  const [businessSubcategoryKey, setBusinessSubcategoryKey] = useState("");
+  const kategoriUtama =
+    businessCategories.find((row) => row.key === businessCategoryKey) ?? null;
   /** Keadaan tautan “Batalkan” — sedang menghapus, atau alasan penolakannya. */
   const [cancelBusy, setCancelBusy] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
@@ -109,14 +127,23 @@ export function OnboardingPage() {
   const canContinue =
     step === 0
       ? businessName.trim().length >= 2 && storeName.trim().length >= 2
-      : true;
+      : step === 1
+        ? Boolean(kategoriUtama && businessSubcategoryKey)
+        : true;
 
   const finish = () => {
+    // Halaman tidak boleh mengunci pasangan yang belum lengkap: tombolnya memang
+    // sudah nonaktif, dan penjagaan ini menutup jalur panggilan langsung.
+    if (!kategoriUtama || !businessSubcategoryKey) return;
     createTenant({
       businessName: businessName.trim(),
       storeName: storeName.trim(),
       vertical,
       planKey: effectivePlan,
+      businessCategory: {
+        category: kategoriUtama.key,
+        subcategory: businessSubcategoryKey,
+      },
     });
     navigate(returnTo, { replace: true });
   };
@@ -155,14 +182,27 @@ export function OnboardingPage() {
       <div className="absolute inset-0 -z-10 bg-grid opacity-25" />
 
       <div className="mx-auto w-full max-w-2xl">
-        <Link to="/" className="flex items-center gap-2.5">
-          <span className="grid size-9 place-items-center rounded-lg bg-primary/15 text-primary">
-            <Store className="size-5" />
-          </span>
-          <span className="text-lg font-bold tracking-tight">
-            Mesin<span className="text-primary">POS</span>
-          </span>
-        </Link>
+        <div className="flex items-center justify-between gap-3">
+          <Link to="/" className="flex items-center gap-2.5">
+            <span className="grid size-9 place-items-center rounded-lg bg-primary/15 text-primary">
+              <Store className="size-5" />
+            </span>
+            <span className="text-lg font-bold tracking-tight">
+              Mesin<span className="text-primary">POS</span>
+            </span>
+          </Link>
+          {platformDeveloper && (
+            <Link
+              to="/platform"
+              data-testid="onboarding-backstage"
+              className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+              title="Backstage pengembang platform: kategori bisnis, pendampingan tenant, dan jejak audit."
+            >
+              <ShieldCheck className="size-3.5" />
+              Backstage platform
+            </Link>
+          )}
+        </div>
 
         <div className="mt-10">
           <h1 className="text-3xl font-bold tracking-tight text-balance">
@@ -244,8 +284,84 @@ export function OnboardingPage() {
           )}
 
           {step === 1 && (
-            <div className="grid gap-3 sm:grid-cols-3">
-              {(Object.keys(VERTICAL_LABELS) as Vertical[]).map((key) => {
+            <div className="space-y-4">
+              {/**
+                Kategori utama berada **sebelum** pilihan modul karena ia yang
+                menjelaskan bisnisnya; modul di bawahnya hanya fitur. Pilihan ini
+                dikunci permanen saat trial dimulai, jadi peringatannya ditulis
+                sebelum pemilik memilih — bukan setelah.
+              */}
+              <div
+                data-testid="onboarding-kategori-utama"
+                className="rounded-lg border border-border bg-card p-4"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 text-sm font-semibold">
+                      <Building2 className="size-4 text-primary" />
+                      Kategori utama bisnis
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Pilih sekali. Setelah trial dimulai, MesinPOS mengunci kategori
+                      dan subkategori ini permanen — tidak bisa diubah, termasuk oleh
+                      pemilik.
+                    </p>
+                  </div>
+                  <Badge variant="accent" className="shrink-0">
+                    Dikunci permanen
+                  </Badge>
+                </div>
+
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <label className="space-y-1 text-xs text-muted-foreground">
+                    Kategori
+                    <select
+                      data-testid="onboarding-kategori"
+                      className="w-full rounded border border-border bg-background px-2 py-2 text-sm text-foreground"
+                      value={businessCategoryKey}
+                      onChange={(event) => {
+                        const key = event.target.value;
+                        setBusinessCategoryKey(key);
+                        // Subkategori hanya berlaku di dalam kategorinya, dan modul
+                        // yang ditawarkan mengikuti kategori baru.
+                        setBusinessSubcategoryKey("");
+                        if (key) setVertical(suggestedVerticalFor(key));
+                      }}
+                    >
+                      <option value="">Pilih kategori utama…</option>
+                      {businessCategories.map((row) => (
+                        <option key={row.key} value={row.key}>
+                          {row.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="space-y-1 text-xs text-muted-foreground">
+                    Subkategori
+                    <select
+                      data-testid="onboarding-subkategori"
+                      className="w-full rounded border border-border bg-background px-2 py-2 text-sm text-foreground disabled:opacity-60"
+                      value={businessSubcategoryKey}
+                      disabled={!kategoriUtama}
+                      onChange={(event) => setBusinessSubcategoryKey(event.target.value)}
+                    >
+                      <option value="">Pilih subkategori…</option>
+                      {(kategoriUtama?.subcategories ?? []).map((row) => (
+                        <option key={row.key} value={row.key}>
+                          {row.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <p className="mt-3 text-[11px] text-muted-foreground">
+                  Dipakai sebagai identitas bisnis Anda di seluruh MesinPOS — termasuk
+                  laporan dan dukungan. Tidak ada tombol “ubah” setelah dikunci.
+                </p>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-3">
+                {(Object.keys(VERTICAL_LABELS) as Vertical[]).map((key) => {
                 const Icon = VERTICAL_ICONS[key];
                 const selected = vertical === key;
                 return (
@@ -280,7 +396,12 @@ export function OnboardingPage() {
                     </p>
                   </button>
                 );
-              })}
+                })}
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Modul dipilihkan sesuai kategori utama, tetapi masih bisa diganti di
+                sini. Modul mengatur fitur yang aktif, bukan identitas bisnis.
+              </p>
             </div>
           )}
 

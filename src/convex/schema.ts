@@ -183,6 +183,14 @@ export const subscriptionStatusValidator = v.union(
   v.literal("canceled"),
 );
 
+/** Tindakan pengelola platform atas akun bisnis (lihat `platformAuditLogs`). */
+export const platformActionValidator = v.union(
+  v.literal("suspend"),
+  v.literal("activate"),
+  v.literal("delete"),
+  v.literal("update"),
+);
+
 /** Kategori tiket dukungan (`support.dedicated`, Phase 5). */
 export const supportCategoryValidator = v.union(
   v.literal("bug"),
@@ -495,10 +503,101 @@ export default defineSchema({
      */
     logo: v.optional(v.id("_storage")),
     verticals: v.array(verticalValidator),
+    /**
+     * Kategori utama bisnis yang dipilih pemilik (`tenants.setBusinessCategory`).
+     *
+     * **Sekali tulis, terkunci selamanya.** Kolomnya opsional supaya workspace
+     * yang dibuat sebelum fitur ini ada tetap sah dan bisa memilih sekali dari
+     * halaman Profil; setelah terisi, mutation menolak perubahan apa pun — termasuk
+     * pengosongan. Label ikut disimpan sebagai salinan saat penguncian, sehingga
+     * laporan lama tetap terbaca walau taksonomi kelak diperluas.
+     */
+    businessCategory: v.optional(
+      v.object({
+        category: v.string(),
+        categoryLabel: v.string(),
+        subcategory: v.string(),
+        subcategoryLabel: v.string(),
+        /** Milidetik epoch saat pilihan pertama kali dikunci. */
+        lockedAt: v.number(),
+        /** Pemilik yang mengunci pilihan ini. */
+        lockedBy: v.id("users"),
+      }),
+    ),
+    /**
+     * Akun bisnis yang **dinonaktifkan pengelola platform** dari backstage
+     * (`platform.setTenantSuspended`).
+     *
+     * Sengaja kolom sendiri, bukan `status: "suspended"`: `status` adalah siklus
+     * **langganan** (trial, tertunda, batal) yang dihitung mesin billing, dan
+     * menimpanya dengan penangguhan admin akan menghapus keadaan langganan yang
+     * sebenarnya. Selama kolom ini terisi, `accessForTenant` menjawab `blocked`
+     * dengan alasannya sendiri — penjualan baru berhenti, pelunasan tagihan yang
+     * sudah ada tetap boleh — dan mengaktifkannya kembali cukup mengosongkan
+     * kolom ini tanpa menebak status langganan yang lama.
+     */
+    platformSuspended: v.optional(
+      v.object({
+        at: v.number(),
+        by: v.id("users"),
+        /** Alasan tertulis pengelola; ikut tampil di daftar backstage. */
+        note: v.optional(v.string()),
+      }),
+    ),
+    /**
+     * Penghapusan akun bisnis yang sedang berjalan (`platform.deleteTenant`).
+     *
+     * Penghapusan dilakukan **bertahap**: satu mutation tidak boleh menghapus
+     * ribuan baris sekaligus, jadi baris tenant ditandai lebih dulu, lalu pekerja
+     * `platform.deleteTenantChunk` menyapu tabel milik tenant satu per satu.
+     * `table` adalah nomor urut tabel yang sedang disapu (lihat `TENANT_TABLES`),
+     * sehingga pekerjaan bisa dilanjutkan walau deployment sempat berhenti.
+     */
+    deletion: v.optional(
+      v.object({
+        startedAt: v.number(),
+        by: v.id("users"),
+        note: v.optional(v.string()),
+        table: v.number(),
+      }),
+    ),
     createdAt: v.number(),
   })
     .index("by_slug", ["slug"])
     .index("by_owner", ["ownerId"]),
+
+  /**
+   * Taksonomi **kategori utama bisnis** yang dikelola pemilik platform
+   * (`platformCategories.*` di backstage): dibuat, diubah namanya,
+   * diaktifkan/nonaktifkan, dan dihapus dari sana.
+   *
+   * Tabel ini **bukan** milik tenant — ia katalog lintas-workspace, sama untuk
+   * semua orang. Subkategorinya sengaja disimpan sebagai larik di dalam barisnya
+   * (bukan tabel terpisah): jumlahnya kecil, selalu dibaca bersama induknya, dan
+   * urutannya milik induk itu.
+   *
+   * Baris lama yang belum ada di tabel dibaca dari bawaan `lib/businessCategory`,
+   * dan perubahan pertama dari backstage menyimpan bawaannya lebih dulu — jadi
+   * deployment lama tidak perlu migrasi. Nilai yang sudah **terkunci** di baris
+   * tenant menyimpan salinan labelnya sendiri, sehingga ganti nama/hapus di sini
+   * tidak mengubah identitas bisnis yang sudah berdiri.
+   */
+  businessCategories: defineTable({
+    key: v.string(),
+    label: v.string(),
+    active: v.boolean(),
+    sortOrder: v.number(),
+    subcategories: v.array(
+      v.object({
+        key: v.string(),
+        label: v.string(),
+        active: v.boolean(),
+        sortOrder: v.number(),
+      }),
+    ),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_key", ["key"]),
 
   memberships: defineTable({
     tenantId: v.id("tenants"),
@@ -843,6 +942,29 @@ export default defineSchema({
   }).index("by_tenant", ["tenantId"]),
 
   /**
+   * Subkategori (`category.manage`) — satu tingkat katalog **di bawah** kategori,
+   * mis. “Semen & Mortar › Semen Portland”.
+   *
+   * Sengaja tabel sendiri, bukan baris `categories` ber-`parentId`: kategori
+   * menentukan kode di tengah SKU (`PBB-<KATEGORI>-<nomor>`) dan tab POS,
+   * sedangkan subkategori **tidak** menyentuh keduanya — ia bagian katalog yang
+   * ikut disinkronkan (API & webhook). Produk menunjuk `subcategoryId`, jadi ganti
+   * nama subkategori tidak menulis ulang apa pun; hapus subkategori melepas
+   * produknya tanpa menghapus produk atau mengubah SKU-nya.
+   */
+  subcategories: defineTable({
+    tenantId: v.id("tenants"),
+    categoryId: v.id("categories"),
+    name: v.string(),
+    sortOrder: v.number(),
+    /** `false` = tidak bisa dipakai produk baru; `undefined` = aktif. */
+    active: v.optional(v.boolean()),
+    createdAt: v.optional(v.number()),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_tenant_category", ["tenantId", "categoryId"]),
+
+  /**
    * Denah meja (`pos.table`); modul F&B. Status meja TIDAK disimpan di sini —
    * meja terisi kalau ada pesanan berstatus `held` yang menunjuknya, sehingga
    * menyelesaikan pesanan selalu mengosongkan mejanya (lihat lib/fnb.ts).
@@ -941,6 +1063,14 @@ export default defineSchema({
     sku: v.string(),
     name: v.string(),
     categoryId: v.optional(v.id("categories")),
+    /**
+     * Subkategori katalog — menunjuk baris `subcategories` yang dibuat **di bawah**
+     * kategori produk ini. Id, bukan nama: ganti nama subkategori tidak menulis
+     * ulang produk mana pun. Ikut dikirim sebagai **nama** di `GET /api/v1/products`
+     * & `product.updated` supaya platform mitra bisa menyusun katalog dua tingkat.
+     * Selalu kosong saat `categoryId` kosong (dijaga `products.create`/`setCategory`).
+     */
+    subcategoryId: v.optional(v.id("subcategories")),
     /** Integer rupiah per satuan dasar, tax-exclusive. */
     price: v.number(),
     cost: v.number(),
@@ -1580,6 +1710,36 @@ export default defineSchema({
     .index("by_actor_status", ["actorId", "status"])
     .index("by_tenant", ["tenantId"])
     .index("by_status_expires", ["status", "expiresAt"]),
+
+  /**
+   * Tindakan **pengelola platform** terhadap akun bisnis: menonaktifkan,
+   * mengaktifkan, dan menghapus.
+   *
+   * Kenapa tabel terpisah, bukan `auditLogs` milik tenant: baris audit tenant
+   * ikut terhapus bersama tenantnya, padahal justru penghapusan itu yang paling
+   * perlu bisa ditelusuri. Log ini **tidak** menyimpan isi data pelanggan — hanya
+   * nama/slug bisnis, siapa yang bertindak, kapan, dan catatannya.
+   */
+  platformAuditLogs: defineTable({
+    actorId: v.id("users"),
+    actorEmail: v.string(),
+    action: platformActionValidator,
+    /** Disimpan sebagai teks supaya jejaknya tetap ada setelah tenant dihapus. */
+    tenantId: v.string(),
+    tenantName: v.string(),
+    tenantSlug: v.string(),
+    note: v.optional(v.string()),
+    /**
+     * Apa yang berubah, dalam kalimat pendek (“nama "A" → "B"; paket starter →
+     * professional”). Dipisah dari `note` (catatan bebas pengelola) supaya daftar
+     * riwayat tetap bisa menjelaskan tindakannya walau tanpa catatan.
+     *
+     * Opsional: baris lama (sebelum tindakan `update` ada) memang tidak punya
+     * rincian, dan itu bukan baris rusak.
+     */
+    detail: v.optional(v.string()),
+    at: v.number(),
+  }).index("by_at", ["at"]),
 
   /** Per-tenant monotonic sequences (sale numbers, invoice numbers). */
   counters: defineTable({

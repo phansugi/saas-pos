@@ -1157,7 +1157,7 @@ try {
       String(captured?.workspacePending),
     );
 
-    const onboarding = (workspacePending) =>
+    const onboarding = (workspacePending, platformDeveloper = false) =>
       React.createElement(
         MemoryRouter,
         { initialEntries: ["/onboarding"] },
@@ -1166,7 +1166,7 @@ try {
           null,
           React.createElement(
             StoreContext.Provider,
-            { value: { ...captured, workspacePending } },
+            { value: { ...captured, workspacePending, platformDeveloper } },
             React.createElement(OnboardingPage, null),
           ),
         ),
@@ -1204,6 +1204,30 @@ try {
       siap.newErrors.length === 0,
       siap.newErrors.join(" | ").slice(0, 200),
     );
+
+    /*
+      Jalan masuk backstage. Halaman `/platform` tidak punya menu di mana pun
+      sebelum ini, jadi pemilik platform harus mengetik alamatnya sendiri — dan
+      itulah keluhan “Backstage platform tidak ketemu”. Akun platform yang belum
+      punya workspace hanya melihat halaman onboarding, jadi tautannya ada di
+      sini juga. Akun biasa tetap tidak ditawari apa pun.
+    */
+    const pengembangOnboarding = await renderInteractive(onboarding(false, true));
+    const tautanBackstage = pengembangOnboarding.query(
+      '[data-testid="onboarding-backstage"]',
+    );
+    check(
+      "akun platform developer melihat jalan masuk backstage dari onboarding",
+      tautanBackstage?.getAttribute("href") === "/platform" &&
+        (tautanBackstage.textContent ?? "").includes("Backstage platform"),
+      `href=${tautanBackstage?.getAttribute("href")} teks=${tautanBackstage?.textContent}`,
+    );
+    check(
+      "onboarding pengguna biasa tidak menawarkan backstage",
+      !siap.text.includes("Backstage platform"),
+      siap.text.slice(0, 200),
+    );
+    await pengembangOnboarding.unmount();
 
     // Tautan “Batalkan”: pendaftaran yang belum jadi **dihapus**, bukan hanya
     // ditinggalkan. Yang diuji di sini bukan tulisannya saja — tombolnya benar-
@@ -1342,6 +1366,170 @@ try {
       );
       await ditolak.unmount();
     }
+
+    // Alur kategori utama: wajib dipilih sebelum trial bisa dimulai, dan pasangan
+    // yang dipilih benar-benar ikut tersimpan terkunci — bukan hanya tampil di
+    // layar lalu hilang.
+    {
+      window.localStorage.setItem(
+        "mesinpos.session.v1",
+        JSON.stringify({
+          user: { name: "Pemilik Baru", email: "baru@mesinpos.test" },
+          tenant: null,
+        }),
+      );
+      const alur = await renderInteractive(onboarding(false));
+      await alur.fill('[id="business"]', "Toko Kategori");
+      await alur.fill('[id="store"]', "Cabang Kategori");
+      await alur.click("Lanjut");
+
+      check(
+        "langkah modul menampilkan kategori utama beserta janji penguncian",
+        Boolean(alur.query('[data-testid="onboarding-kategori-utama"]')) &&
+          alur.text().includes("Dikunci permanen") &&
+          alur.text().includes("tidak bisa diubah, termasuk oleh pemilik"),
+        alur.text().slice(0, 600),
+      );
+      const tombolLanjut = () =>
+        [...alur.queryAll("button")].find((row) =>
+          (row.textContent ?? "").includes("Lanjut"),
+        );
+      check(
+        "tombol Lanjut terkunci sampai kategori & subkategori dipilih",
+        tombolLanjut()?.disabled === true &&
+          alur.query('[data-testid="onboarding-subkategori"]').disabled === true,
+        `lanjut=${tombolLanjut()?.disabled}, sub=${alur.query('[data-testid="onboarding-subkategori"]').disabled}`,
+      );
+
+      await alur.select('[data-testid="onboarding-kategori"]', "fnb");
+      const opsiSub = alur.queryAll('[data-testid="onboarding-subkategori"] option');
+      check(
+        "subkategori yang ditawarkan hanya milik kategori terpilih",
+        opsiSub.map((row) => row.value).join(",") === ",kafe,restoran,warung,bakery,katering",
+        opsiSub.map((row) => row.value).join(","),
+      );
+      await alur.select('[data-testid="onboarding-subkategori"]', "kafe");
+      check(
+        "setelah pasangan lengkap, tombol Lanjut hidup",
+        tombolLanjut()?.disabled === false,
+        `lanjut=${tombolLanjut()?.disabled}`,
+      );
+
+      await alur.click("Lanjut");
+      check(
+        "langkah paket muncul setelah kategori dipilih",
+        alur.text().includes("Mulai trial") && alur.text().includes("Belum ada tagihan sekarang"),
+        alur.text().slice(0, 300),
+      );
+      await alur.click("Mulai trial");
+      await React.act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+
+      const sesiBaru = JSON.parse(
+        window.localStorage.getItem("mesinpos.session.v1") ?? "null",
+      );
+      check(
+        "trial dimulai dengan kategori utama terkunci di sesi workspace",
+        sesiBaru?.tenant?.businessCategory?.category === "fnb" &&
+          sesiBaru?.tenant?.businessCategory?.subcategory === "kafe" &&
+          sesiBaru?.tenant?.businessCategory?.categoryLabel === "Makanan & Minuman" &&
+          typeof sesiBaru?.tenant?.businessCategory?.lockedAt === "number",
+        JSON.stringify(sesiBaru?.tenant?.businessCategory),
+      );
+      check(
+        "alur kategori utama tanpa error konsol",
+        alur.newErrors().length === 0,
+        alur.newErrors().join(" | ").slice(0, 200),
+      );
+      await alur.unmount();
+    }
+    withoutSession();
+  }
+
+  // 2c-bis. Jalan masuk backstage di sidebar aplikasi.
+  //
+  //         Sidebar adalah pintu sehari-hari pemilik platform: dari workspace-nya
+  //         sendiri ia bisa membuka `/platform`. Yang diuji: tautannya muncul
+  //         **hanya** saat server menandai akun ini sebagai akun platform
+  //         (`users.platformRole` → `store.platformDeveloper`), menunjuk ke
+  //         `/platform`, dan tidak pernah muncul untuk pemilik bisnis biasa.
+  {
+    const { AppLayout } = await server.ssrLoadModule("/src/layouts/AppLayout.tsx");
+    const { StoreContext, useStore } = await server.ssrLoadModule(
+      "/src/lib/store/context.ts",
+    );
+
+    window.localStorage.setItem(
+      "mesinpos.session.v1",
+      JSON.stringify({
+        user: { name: "Pemilik Platform", email: "platform@mesinpos.test" },
+        tenant: {
+          name: "Workspace Platform",
+          slug: "workspace-platform",
+          storeName: "Pusat",
+          vertical: "umkm",
+          verticals: ["umkm"],
+          planKey: "starter",
+          role: "owner",
+          createdAt: new Date().toISOString(),
+          trialEndsAt: new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString(),
+        },
+      }),
+    );
+
+    let captured = null;
+    const Probe = () => {
+      captured = useStore();
+      return null;
+    };
+    await renderTree(providers(React.createElement(Probe, null)));
+
+    const shell = (platformDeveloper) =>
+      React.createElement(
+        MemoryRouter,
+        { initialEntries: ["/app"] },
+        React.createElement(
+          SessionProvider,
+          null,
+          React.createElement(
+            StoreContext.Provider,
+            { value: { ...captured, platformDeveloper } },
+            React.createElement(
+              Routes,
+              null,
+              React.createElement(Route, {
+                path: "/app",
+                element: React.createElement(AppLayout, null),
+              }),
+            ),
+          ),
+        ),
+      );
+
+    const pemilikBisnis = await renderInteractive(shell(false));
+    check(
+      "sidebar pemilik bisnis biasa tidak menampilkan Backstage platform",
+      !pemilikBisnis.text().includes("Backstage platform") &&
+        pemilikBisnis.query('[data-testid="sidebar-backstage"]') === null,
+      pemilikBisnis.text().slice(0, 300),
+    );
+    await pemilikBisnis.unmount();
+
+    const akunPlatform = await renderInteractive(shell(true));
+    const tautanSidebar = akunPlatform.query('[data-testid="sidebar-backstage"]');
+    check(
+      "sidebar akun platform developer menautkan ke /platform",
+      tautanSidebar?.getAttribute("href") === "/platform" &&
+        (tautanSidebar.textContent ?? "").includes("Backstage platform"),
+      `href=${tautanSidebar?.getAttribute("href")} teks=${tautanSidebar?.textContent}`,
+    );
+    check(
+      "menu backstage di sidebar tidak memunculkan error konsol",
+      akunPlatform.newErrors().length === 0,
+      akunPlatform.newErrors().join(" | ").slice(0, 200),
+    );
+    await akunPlatform.unmount();
     withoutSession();
   }
 
@@ -1590,6 +1778,143 @@ try {
       text.includes("grup pilihan"),
       text.slice(0, 240),
     );
+  }
+
+  /*
+    3e. Kategori utama ikut menentukan alur meja/dapur/modifier — bukan hanya
+    modul. Sesi di sini **sama** dengan kafe di 3c (produk bermodifier, meja
+    contoh “A1”, modul F&B menyala, paket Enterprise yang memuat semuanya),
+    hanya kategori terkuncinya yang diganti. Jadi kalau yang hilang di layar
+    memang denah meja, antrean dapur, dan modifier, penyebabnya kategorinya —
+    bukan data contoh yang kebetulan kosong.
+  */
+  {
+    const withBusinessCategory = (
+      category,
+      categoryLabel,
+      subcategory,
+      subcategoryLabel,
+    ) =>
+      window.localStorage.setItem(
+        "mesinpos.session.v1",
+        JSON.stringify({
+          ...FNB_SESSION,
+          tenant: {
+            ...FNB_SESSION.tenant,
+            businessCategory: {
+              category,
+              categoryLabel,
+              subcategory,
+              subcategoryLabel,
+              lockedAt: Date.now(),
+              lockedBy: "uji@mesinpos.test",
+            },
+          },
+        }),
+      );
+
+    // Jalur yang benar-benar dipakai pengguna: `/app/pos` → sesi & tenant → shell
+    // → halaman. Sidebar ikut terbaca, jadi satu render menjawab dua permukaan.
+    const renderAppAt = (path) =>
+      renderInteractive(
+        React.createElement(
+          MemoryRouter,
+          { initialEntries: [path] },
+          React.createElement(ErrorBoundary, null, React.createElement(App, null)),
+        ),
+      );
+
+    withBusinessCategory(
+      "retail",
+      "Perdagangan Eceran",
+      "bangunan",
+      "Toko Bangunan & Material",
+    );
+    withOpenShift();
+
+    const bangunan = await renderAppAt("/app/pos");
+    const bangunanText = bangunan.text();
+    check(
+      "kasir toko bangunan benar-benar terbuka (halaman & tombol bayar ada)",
+      bangunanText.includes("Kasir") && bangunan.query('[data-testid="pos-bayar"]') !== null,
+      bangunanText.slice(0, 200),
+    );
+    check(
+      "kasir toko bangunan tidak menawarkan pemilih meja",
+      !bangunanText.includes("Tanpa meja"),
+      bangunanText.slice(0, 240),
+    );
+    check(
+      "kasir toko bangunan tidak menampilkan antrean dapur",
+      !bangunanText.includes("Pesanan di dapur"),
+      bangunanText.slice(0, 240),
+    );
+    check(
+      "kasir toko bangunan tidak menawarkan modifier pada produknya",
+      !bangunanText.includes("grup pilihan"),
+      bangunanText.slice(0, 240),
+    );
+    check(
+      "sidebar toko bangunan tidak memuat menu Dapur & Meja",
+      !bangunanText.includes("Dapur & Meja"),
+      bangunanText.slice(0, 240),
+    );
+    check(
+      "kasir toko bangunan tetap bisa dipakai berjualan tanpa error konsol",
+      bangunanText.includes("Bayar") && bangunan.newErrors().length === 0,
+      bangunan.newErrors().join(" | ").slice(0, 200),
+    );
+    await bangunan.unmount();
+
+    // Alamat langsung `/app/kds` pun tidak lagi menampilkan pengaturan meja —
+    // menu sidebar sudah tidak ada, jadi halaman yang terbuka dari tautan lama
+    // harus menjelaskan keadaannya sendiri, bukan diam-diam menampilkan denah.
+    const kdsBangunan = await renderAppAt("/app/kds");
+    const kdsBangunanText = kdsBangunan.text();
+    check(
+      "halaman dapur menjelaskan alasan kategorinya, bukan menyalahkan modul",
+      kdsBangunanText.includes("tidak dipakai kategori") &&
+        kdsBangunanText.includes("Toko Bangunan & Material") &&
+        !kdsBangunanText.includes("Kelola modul"),
+      kdsBangunanText.slice(0, 300),
+    );
+    /*
+      Kalimat penjelasnya sendiri menyebut “Denah meja & antrean dapur”, jadi yang
+      diperiksa bukan kata itu — melainkan isi alurnya: judul kartu denah, form
+      tambah meja, dan meja contohnya. Kalau ketiganya tidak ada, pengaturannya
+      memang tidak dirender.
+    */
+    check(
+      "halaman dapur untuk toko bangunan tidak menampilkan pengaturan & denah mejanya",
+      !kdsBangunanText.includes("Tambah meja") && !kdsBangunanText.includes("A1"),
+      kdsBangunanText.slice(0, 300),
+    );
+    check(
+      "lencana halaman dapur menyebut sebab yang benar (kategori, bukan modul)",
+      kdsBangunanText.includes("Bukan layanan meja") &&
+        !kdsBangunanText.includes("Butuh modul F&B"),
+      kdsBangunanText.slice(0, 300),
+    );
+    await kdsBangunan.unmount();
+
+    // Pembanding: kafe dengan modul yang sama tetap mendapat semuanya. Ini yang
+    // mencegah “sembunyikan kalau ragu” lolos sebagai perbaikan.
+    withBusinessCategory("fnb", "Makanan & Minuman", "kafe", "Kafe & Coffee Shop");
+    const kafe = await renderAppAt("/app/pos");
+    const kafeText = kafe.text();
+    check(
+      "kasir kafe tetap menawarkan meja, dapur, dan modifier",
+      kafeText.includes("Tanpa meja") &&
+        kafeText.includes("Pesanan di dapur") &&
+        kafeText.includes("grup pilihan"),
+      kafeText.slice(0, 240),
+    );
+    check(
+      "sidebar kafe tetap memuat menu Dapur & Meja",
+      kafeText.includes("Dapur & Meja"),
+      kafeText.slice(0, 240),
+    );
+    await kafe.unmount();
   }
 
   // 3d. Gerbang kasir & pengingat tutup shift di halaman Kasir. Shift hidup di
@@ -3061,9 +3386,17 @@ try {
     const { text } = await renderTree(
       providers(React.createElement(ReceivablesPage, null)),
     );
+    /*
+      Halaman modul tanpa langganan hanya bisa dibaca: datanya tetap terlihat,
+      tetapi halaman mengatakannya apa adanya — bukan menjanjikan aksi yang akan
+      ditolak server (dan bukan pula menyembunyikan isinya).
+    */
     check(
-      "halaman Piutang menjelaskan modul Grosir yang belum aktif",
-      text.includes("belum aktif") && text.includes("tetap bisa ditagih"),
+      "halaman Piutang menjelaskan modul Grosir yang belum aktif & menyatakan dirinya hanya bisa dibaca",
+      text.includes("belum aktif") &&
+        text.includes("hanya bisa dibaca") &&
+        text.includes("nota lama tetap") &&
+        text.includes("tidak bisa ditagih"),
       text.slice(0, 300),
     );
   }
@@ -5648,6 +5981,140 @@ try {
     }
   }
 
+  /*
+    3e-6b. Halaman modul tanpa langganan = **hanya bisa dibaca**. Gerbangnya
+    dipasang sekali di tingkat rute (`ModuleRoute` di `App.tsx`), jadi yang diuji
+    di sini jalur yang benar-benar dipakai pengguna: alamat rutenya dibuka dengan
+    sesi paket Starter, dan seluruh isi halaman harus berada di dalam wadah
+    read-only — abu-abu, `inert`, `aria-disabled` — beserta alasan yang terbaca.
+    Sesi Enterprise jadi pembanding: tidak boleh ada wadah itu, dan halaman
+    **dasar** (Kasir, Produk & Stok) tidak boleh ikut terkunci di paket Starter.
+  */
+  {
+    const { App: AppRoot } = await server.ssrLoadModule("/src/App.tsx");
+    const renderAt = (path) =>
+      renderInteractive(
+        React.createElement(
+          MemoryRouter,
+          { initialEntries: [path] },
+          React.createElement(ErrorBoundary, null, React.createElement(AppRoot, null)),
+        ),
+      );
+
+    /** [rute, label fitur yang harus disebut di alasannya]. */
+    const ruteModul = [
+      ["/app/kds", "Kitchen Display System & KOT terpisah"],
+      ["/app/opname", "Stock opname & audit selisih"],
+      ["/app/purchasing", "Purchasing (PR · PO · GRN)"],
+      ["/app/receivables", "Piutang B2B & credit limit"],
+      ["/app/members", "Manajemen diskon & member"],
+      ["/app/payments", "Pembayaran digital QRIS / VA"],
+      ["/app/sync", "Sinkronisasi real-time multi-perangkat"],
+      ["/app/support", "Dedicated support"],
+      ["/app/api", "API akses penuh & webhook"],
+    ];
+
+    withEnterpriseSession("starter");
+    for (const [rute, label] of ruteModul) {
+      const view = await renderAt(rute);
+      const wadah = view.query('[data-testid="modul-baca-saja"]');
+      const isi = view.query('[data-testid="modul-baca-saja-isi"]');
+      const kelas = (isi?.getAttribute("class") ?? "").split(/\s+/);
+      check(
+        `${rute}: isinya terkunci read-only (inert, aria-disabled, dan abu-abu)`,
+        wadah !== null &&
+          wadah.getAttribute("data-readonly") === "true" &&
+          isi !== null &&
+          isi.hasAttribute("inert") &&
+          isi.getAttribute("aria-disabled") === "true" &&
+          kelas.includes("text-muted-foreground") &&
+          kelas.includes("opacity-60") &&
+          kelas.includes("grayscale") &&
+          kelas.includes("pointer-events-none"),
+        `${rute} wadah=${wadah !== null} inert=${isi?.hasAttribute("inert")} kelas=${kelas.join(" ")}`,
+      );
+      check(
+        `${rute}: alasannya menyebut fitur yang kurang & menyatakan hanya bisa dibaca`,
+        view.text().includes(label) &&
+          view.text().includes("hanya bisa dibaca") &&
+          view.text().includes("tidak termasuk") ,
+        view.text().slice(0, 300),
+      );
+      check(
+        `${rute}: isi halamannya tetap terlihat (tidak disembunyikan) dan tanpa error konsol`,
+        isi !== null &&
+          (isi.textContent ?? "").trim().length > 0 &&
+          view.newErrors().length === 0,
+        `panjang_isi=${(isi?.textContent ?? "").trim().length} error=${view.newErrors().join(" | ").slice(0, 120)}`,
+      );
+      await view.unmount();
+    }
+
+    /*
+      Dua halaman yang hanya **sebagian** milik modul: yang dikunci adalah
+      permukaan modulnya, sedangkan bagian yang dibayar semua paket tetap hidup.
+      Tanpa cek ini, “read-only tanpa kecuali” bisa berubah jadi “seluruh halaman
+      dibekukan”, dan anggota tim/stok dasar ikut mati tanpa sebab.
+    */
+    for (const [rute, label] of [
+      ["/app/inventory", "Multi-warehouse & lokasi rak"],
+      ["/app/team", "Custom role (RBAC)"],
+    ]) {
+      const view = await renderAt(rute);
+      const isi = view.query('[data-testid="modul-baca-saja-isi"]');
+      check(
+        `${rute}: bagian modulnya terkunci read-only`,
+        isi !== null &&
+          isi.hasAttribute("inert") &&
+          isi.getAttribute("aria-disabled") === "true",
+        `inert=${isi?.hasAttribute("inert")} aria=${isi?.getAttribute("aria-disabled")}`,
+      );
+      check(
+        `${rute}: alasannya menyebut fitur yang kurang & menyatakan hanya bisa dibaca`,
+        view.text().includes(label) && view.text().includes("hanya bisa dibaca"),
+        view.text().slice(0, 240),
+      );
+      // Bagian yang bukan milik modul harus berada **di luar** wadah `inert`.
+      const bebas =
+        rute === "/app/team"
+          ? (() => {
+              const input = view.query('input[placeholder="sari@bisnis.id"]');
+              return input !== null && input.closest("[inert]") === null;
+            })()
+          : view.queryAll("table").some((table) => table.closest("[inert]") === null);
+      check(
+        `${rute}: bagian yang bukan milik modul tetap bisa dipakai`,
+        bebas,
+        rute === "/app/team" ? "kolom undangan anggota" : "tabel stok per lokasi",
+      );
+      check(`${rute}: tanpa error konsol`, view.newErrors().length === 0, view.newErrors().join(" | ").slice(0, 120));
+      await view.unmount();
+    }
+
+    // Halaman dasar tidak boleh ikut terkunci: Kasir & Produk hidup di semua paket.
+    for (const rute of ["/app/pos", "/app/products"]) {
+      const view = await renderAt(rute);
+      check(
+        `${rute}: halaman dasar tidak dikunci di paket Starter`,
+        view.query('[data-testid="modul-baca-saja"]') === null,
+        view.text().slice(0, 200),
+      );
+      await view.unmount();
+    }
+
+    // Pembanding: paket Enterprise memuat semuanya — tidak ada wadah read-only.
+    withEnterpriseSession();
+    for (const rute of ["/app/opname", "/app/api", "/app/support"]) {
+      const view = await renderAt(rute);
+      check(
+        `${rute}: paket Enterprise tidak dikunci read-only`,
+        view.query('[data-testid="modul-baca-saja"]') === null,
+        view.text().slice(0, 200),
+      );
+      await view.unmount();
+    }
+  }
+
   // 3e-7. Peran kustom (`rbac.custom`, Phase 4): halaman Tim & Peran, dan yang
   //       lebih penting — gerbang klien mengikuti **izin peran kustom**, bukan
   //       peran bawaan, karena server pun begitu.
@@ -6548,6 +7015,83 @@ try {
     );
     await ui.unmount();
 
+    /*
+      --- 4b) Paket **Starter**: menyunting izin peran bawaan ditolak server
+      (`roles.setBuiltin` → `requireFeature("rbac.custom")`). Dulu tombolnya
+      hidup di paket itu, jadi pengguna baru tahu setelah server menjawab
+      “Fitur Custom role (RBAC) tidak termasuk paket Starter.” Yang diperiksa di
+      sini: tombolnya tetap terlihat tetapi mati, sebabnya terbaca, dan halaman
+      mengatakannya sebelum ada request dikirim.
+    */
+    {
+      withEnterpriseSession("starter");
+      const starter = await renderInteractive(
+        providers(React.createElement(TeamPage, null)),
+      );
+      const ubahIzin = starter.query('[aria-label="Ubah izin peran Kasir terkunci"]');
+      check(
+        "paket Starter: tombol Ubah izin peran bawaan tampil tetapi mati",
+        ubahIzin !== null && ubahIzin.disabled === true,
+        `ada=${ubahIzin !== null} disabled=${ubahIzin?.disabled}`,
+      );
+      check(
+        "paket Starter: sebab tombolnya mati terbaca (kalimat yang sama dengan server)",
+        (ubahIzin?.getAttribute("title") ?? "").includes(
+          "tidak termasuk paket Starter",
+        ),
+        ubahIzin?.getAttribute("title") ?? "(tanpa title)",
+      );
+      check(
+        "paket Starter: menekan tombolnya tidak membuka editor izin",
+        starter.query('[data-testid="editor-peran-bawaan"]') === null,
+        starter.text().slice(0, 200),
+      );
+      check(
+        "paket Starter: catatan halaman menyebut bagian Peran hanya bisa dibaca (anggota tetap bisa diurus)",
+        starter.text().includes("Bagian Peran") &&
+          starter.text().includes("hanya bisa dibaca") &&
+          starter.text().includes("Mengelola anggota"),
+        starter.text().slice(0, 400),
+      );
+      /*
+        Menugaskan **peran bawaan** tidak butuh `rbac.custom` (server hanya
+        menuntutnya saat `customRoleId` diisi), jadi pemilih peran di formulir
+        undangan harus tetap bisa dipakai di paket Starter — yang hilang hanya
+        kelompok peran tambahannya.
+      */
+      const pemilihPeran = starter.query("#member-role");
+      const grupPeran = [
+        ...(pemilihPeran?.querySelectorAll("optgroup") ?? []),
+      ].map((row) => row.getAttribute("label"));
+      check(
+        "paket Starter: pemilih peran undangan tetap bisa dipakai untuk peran bawaan",
+        pemilihPeran !== null &&
+          pemilihPeran.disabled === false &&
+          grupPeran.join("|") === "Peran bawaan",
+        `disabled=${pemilihPeran?.disabled} grup=${grupPeran.join("|")}`,
+      );
+      check(
+        "paket Starter: catatan pemilih peran menyebut peran bawaan tetap bisa ditugaskan",
+        (starter.query('[data-testid="member-role-catatan"]')?.textContent ?? "").includes(
+          "Peran bawaan tetap bisa ditugaskan",
+        ),
+        starter.query('[data-testid="member-role-catatan"]')?.textContent ??
+          "(tidak ada)",
+      );
+      check(
+        "paket Starter: menonaktifkan & menghapus peran tetap bisa ditekan",
+        starter.query('[aria-label="Nonaktifkan peran Kasir"]')?.disabled === false &&
+          starter.query('[aria-label="Hapus peran Keuangan"]')?.disabled === false,
+        starter.text().slice(0, 200),
+      );
+      check(
+        "paket Starter: halaman Tim & Peran tanpa error konsol",
+        starter.newErrors().length === 0,
+        starter.newErrors().join(" | ").slice(0, 200),
+      );
+      await starter.unmount();
+    }
+
     // --- 5) Sesi kasir yang izinnya dipersempit workspace ---
     window.localStorage.setItem(
       "mesinpos.session.v1",
@@ -6948,8 +7492,10 @@ try {
       providers(React.createElement(SupportPage, null)),
     );
     check(
-      "paket tanpa fiturnya menjelaskan bahwa jalur cepat belum termasuk",
-      starter.text.includes("belum memuat jalur dukungan khusus") &&
+      "paket tanpa fiturnya menjelaskan bahwa halaman Dukungan hanya bisa dibaca",
+      starter.text.includes("tidak termasuk paket Starter") &&
+        starter.text.includes("hanya bisa dibaca") &&
+        starter.text.includes("membuka tiket baru") &&
         starter.text.includes("Tiket tenant ini"),
       starter.text.slice(0, 500),
     );
@@ -7145,8 +7691,10 @@ try {
       providers(React.createElement(PaymentsPage, null)),
     );
     check(
-      "paket tanpa fiturnya menjelaskan kanal tagih digital belum termasuk",
-      starter.text.includes("belum memuat kanal tagih digital") &&
+      "paket tanpa fiturnya menjelaskan halaman Pembayaran hanya bisa dibaca",
+      starter.text.includes("tidak termasuk paket Starter") &&
+        starter.text.includes("hanya bisa dibaca") &&
+        starter.text.includes("melunasi") &&
         starter.text.includes("Tagihan tenant ini"),
       starter.text.slice(0, 500),
     );
@@ -8402,8 +8950,9 @@ try {
     withoutSession();
     const starter = await renderTree(providers(React.createElement(SyncPage, null)));
     check(
-      "paket tanpa fiturnya menjelaskan hub real-time belum termasuk",
-      starter.text.includes("belum memuat hub real-time"),
+      "paket tanpa fiturnya menjelaskan halaman Sinkronisasi hanya bisa dibaca",
+      starter.text.includes("tidak termasuk paket Starter") &&
+        starter.text.includes("hanya bisa dibaca"),
       starter.text.slice(0, 500),
     );
   }
@@ -8824,6 +9373,20 @@ try {
       backstage.text.slice(0, 600),
     );
     check(
+      "pengelolaan kategori bisnis juga tersembunyi selama gerbang platform tertutup",
+      !backstage.text.includes("Kategori & subkategori bisnis") &&
+        !backstage.text.includes("Tambah kategori"),
+      backstage.text.slice(0, 600),
+    );
+    check(
+      "pengelolaan akun bisnis juga tersembunyi selama gerbang platform tertutup",
+      !backstage.text.includes("Akun bisnis") &&
+        !backstage.text.includes("Nonaktifkan") &&
+        !backstage.text.includes("Hapus permanen") &&
+        !backstage.text.includes("Tindakan pengelola terakhir"),
+      backstage.text.slice(0, 600),
+    );
+    check(
       "backstage menerangkan jejak auditnya sejak keadaan terkunci",
       backstage.text.includes("jejak audit tenant"),
       backstage.text.slice(0, 600),
@@ -8933,6 +9496,8 @@ try {
         name: product.name,
         // Kategori ikut dipantau: menggantinya harus mengubah kode di SKU.
         category: product.category,
+        // Subkategori juga: ia tersimpan di produk tanpa mengubah SKU.
+        subcategory: product.subcategory,
         stock: product.stock,
         images: (product.images ?? []).map((image) => image.url),
         imageIds: (product.images ?? []).map((image) => image.id),
@@ -9416,15 +9981,22 @@ try {
       const kategoriStore = () => stockFacts.store.categories;
       const cariKategori = (nama) => kategoriStore().find((c) => c.name === nama);
       /**
-       * Teks satu baris tabel kategori. Sel-sel HTML melekat tanpa spasi
-       * (`KopiKOP4aktif…`), jadi barisnya dikenali dari nama **diikuti** kode
-       * SKU-nya, bukan dari spasi yang tidak pernah ada.
+       * Sel-sel satu baris tabel kategori. Barisnya dikenali dari **isi selnya**:
+       * sel pertama memuat nama kategori (sejak subkategori bisa dibuat di bawah
+       * kategori, sel ini juga memuat tombol pengelola subkategorinya), sel kedua
+       * kode SKU-nya. Jadi cek “baris menampilkan kode SKU” tidak bergantung pada
+       * apa pun yang kebetulan berada di sel pertama.
        */
       const barisKategori = (nama) =>
         ui
           .queryAll("tbody tr")
-          .map((row) => (row.textContent ?? "").trim())
-          .find((teks) => teks.startsWith(`${nama}${categorySkuCode(nama)}`));
+          .map((row) =>
+            [...row.querySelectorAll("td")].map((td) => (td.textContent ?? "").trim()),
+          )
+          .find(
+            (cells) =>
+              (cells[0] ?? "").startsWith(nama) && cells[1] === categorySkuCode(nama),
+          );
       const opsiKategoriSekarang = () =>
         [...ui.query('[aria-label="Kategori produk baru"]').querySelectorAll("option")]
           .map((option) => option.value);
@@ -9437,11 +10009,48 @@ try {
           Boolean(ui.query('[aria-label="Nama kategori baru"]')),
         ui.text().slice(0, 300),
       );
+
+      /*
+        4h-bis. Master kategori **bisnis**: kalau workspace belum memilih kategori
+        bisnis, halamannya harus mengatakannya terang-terangan — lengkap dengan
+        jalan keluarnya (halaman Profil) dan alasan kenapa katalognya masih daftar
+        bawaan lama. Sebelum ini yang tampil hanya kalimat kecil abu-abu, dan
+        pemilik menyimpulkan “master kategori bisnis saya hilang”.
+      */
+      const master = ui.query('[data-testid="kategori-master-kurang"]');
       check(
-        "baris kategori menampilkan kode SKU-nya, bukan hanya namanya",
-        (barisKategori("Kopi") ?? "").includes(categorySkuCode("Kopi")),
-        `${barisKategori("Kopi")} (kode ${categorySkuCode("Kopi")})`,
+        "kartu kategori menyebut status master bisnis, bukan hanya tombol",
+        Boolean(master) && master.getAttribute("data-state") === "tanpa-bisnis",
+        master?.getAttribute("data-state") ?? "tanpa elemen",
       );
+      check(
+        "alasannya jelas: pilihan bisnis belum ada dan katalog masih daftar bawaan lama",
+        (master?.textContent ?? "").includes("belum memilih kategori utama bisnis") &&
+          (master?.textContent ?? "").includes("Kopi, Makanan, Snack, Minuman") &&
+          (master?.textContent ?? "").includes("disemai"),
+        (master?.textContent ?? "").slice(0, 260),
+      );
+      check(
+        "jalan keluarnya satu klik: tautan ke halaman Profil",
+        ui.query('[data-testid="kategori-pilih-bisnis"]')?.getAttribute("href") ===
+          "/app/profile",
+        ui.query('[data-testid="kategori-pilih-bisnis"]')?.getAttribute("href") ?? "tanpa tautan",
+      );
+      check(
+        "tombol sinkronisasi tetap mati selama pilihan bisnis belum ada",
+        ui.query('[data-testid="kategori-sinkron-bisnis"]').disabled === true,
+        "status tombol sinkronisasi",
+      );
+      {
+        const barisKopi = barisKategori("Kopi");
+        check(
+          "baris kategori menampilkan kode SKU-nya, bukan hanya namanya",
+          barisKopi !== undefined &&
+            barisKopi[1] === categorySkuCode("Kopi") &&
+            barisKopi[0].startsWith("Kopi"),
+          `${JSON.stringify(barisKopi)} (kode ${categorySkuCode("Kopi")})`,
+        );
+      }
 
       // --- tambah kategori -------------------------------------------------
       await ui.fill('[aria-label="Nama kategori baru"]', "Sanitasi");
@@ -9584,6 +10193,91 @@ try {
         ui.text().slice(0, 400),
       );
 
+      // --- subkategori: dibuat di bawah kategori, dipilih di form produk ---
+      {
+        const subkategoriStore = () => stockFacts.store.subcategories;
+        const cariSub = (nama) => subkategoriStore().find((row) => row.name === nama);
+
+        // Kategori ujinya sudah berganti nama di atas, jadi label tombolnya ikut
+        // memakai nama panjang — sekaligus membuktikan panel ini mengikuti nama
+        // kategori terbaru, bukan nama lama.
+        const INDUK = "Sanitasi & Kebersihan";
+        await clickSelector(`[aria-label="Atur subkategori kategori ${INDUK}"]`);
+        check(
+          "panel subkategori terbuka di bawah kategorinya",
+          ui.text().includes(`Subkategori di bawah ${INDUK}`) &&
+            Boolean(ui.query(`[aria-label="Nama subkategori baru di bawah ${INDUK}"]`)),
+          ui.text().slice(-400),
+        );
+
+        await ui.fill(`[aria-label="Nama subkategori baru di bawah ${INDUK}"]`, "  Sabun   Cair ");
+        await clickSelector(`[aria-label="Simpan subkategori baru di bawah ${INDUK}"]`);
+        await tungguSampai(() => Boolean(cariSub("Sabun Cair")), "subkategori Sabun Cair tersimpan");
+        check(
+          "subkategori tersimpan di bawah kategori induknya (namanya dirapikan)",
+          cariSub("Sabun Cair")?.categoryId === cariKategori(INDUK)?.id &&
+            cariSub("Sabun Cair")?.active === true &&
+            cariSub("Sabun Cair")?.productCount === 0,
+          JSON.stringify(cariSub("Sabun Cair")),
+        );
+
+        // Nama kembar di kategori yang sama ditolak aturan yang sama dengan kategori.
+        await ui.fill(`[aria-label="Nama subkategori baru di bawah ${INDUK}"]`, "sabun cair");
+        await clickSelector(`[aria-label="Simpan subkategori baru di bawah ${INDUK}"]`);
+        check(
+          "subkategori kembar di kategori yang sama ditolak dengan pesannya",
+          ui.text().includes("sudah ada di kategori ini") &&
+            subkategoriStore().filter((row) => row.name === "Sabun Cair").length === 1,
+          ui.text().slice(-260),
+        );
+
+        // Form Produk baru: subkategorinya muncul setelah kategori induknya dipilih.
+        await pilihOpsi('[aria-label="Kategori produk baru"]', INDUK);
+        // Opsi “Tanpa subkategori” bernilai kosong, jadi labelnya yang dibaca.
+        const opsiSub = () =>
+          [...ui.query('[aria-label="Subkategori produk baru"]').querySelectorAll("option")].map(
+            (option) => (option.textContent ?? "").trim(),
+          );
+        await tungguSampai(
+          () => opsiSub().includes("Sabun Cair"),
+          "pilihan subkategori muncul di form produk",
+        );
+        check(
+          "form produk menawarkan subkategori di bawah kategori yang dipilih",
+          opsiSub().some((label) => label.startsWith("Tanpa subkategori")) &&
+            opsiSub().includes("Sabun Cair"),
+          JSON.stringify(opsiSub()),
+        );
+        await pilihOpsi('[aria-label="Kategori produk baru"]', "Makmur");
+        check(
+          "subkategori kategori lain tidak ikut ditawarkan",
+          !opsiSub().includes("Sabun Cair"),
+          JSON.stringify(opsiSub()),
+        );
+
+        await pilihOpsi('[aria-label="Kategori produk baru"]', INDUK);
+        await ui.fill('[aria-label="Nama produk baru"]', "Produk Bersubkategori");
+        await ui.fill('[aria-label="Harga jual produk baru"]', "9000");
+        await pilihOpsi('[aria-label="Subkategori produk baru"]', "Sabun Cair");
+        await ui.click("Simpan produk");
+        await tungguSampai(
+          () => stockFacts.products.some((product) => product.name === "Produk Bersubkategori"),
+          "produk bersubkategori tersimpan",
+        );
+        const produkSub = () =>
+          stockFacts.products.find((product) => product.name === "Produk Bersubkategori");
+        check(
+          "produk menyimpan subkategori di bawah kategorinya",
+          produkSub()?.category === INDUK && produkSub()?.subcategory === "Sabun Cair",
+          JSON.stringify(produkSub()),
+        );
+        check(
+          "jumlah produk per subkategori dihitung dari produk yang memakainya",
+          cariSub("Sabun Cair")?.productCount === 1,
+          JSON.stringify(cariSub("Sabun Cair")),
+        );
+      }
+
       // --- hapus kategori --------------------------------------------------
       await clickSelector('[aria-label="Hapus kategori Makmur"]');
       check(
@@ -9630,6 +10324,122 @@ try {
       );
     }
 
+    await ui.unmount();
+    withoutSession();
+  }
+
+  // 4h-bis. Master kategori produk bisa **disesuaikan dengan kategori bisnis**
+  //         dari halaman ini: tombolnya menyemai preset bisnis itu (kafe → Kopi,
+  //         Non-Kopi, Makanan Ringan, Makanan Utama, Bahan Baku) tanpa mengubah
+  //         kategori yang sudah ada, dan tekanan kedua mengaku katalognya sudah
+  //         sesuai — bukan menambah baris lagi.
+  {
+    const { ProductsPage } = await server.ssrLoadModule("/src/pages/ProductsPage.tsx");
+    const { useStore } = await server.ssrLoadModule("/src/lib/store/context.ts");
+
+    window.localStorage.setItem(
+      "mesinpos.session.v1",
+      JSON.stringify({
+        user: { name: "Pemilik Kafe", email: "kafe@mesinpos.test" },
+        tenant: {
+          name: "Kafe Uji Preset",
+          slug: "kafe-uji-preset",
+          storeName: "Pusat",
+          vertical: "fnb",
+          verticals: ["fnb"],
+          planKey: "professional",
+          role: "owner",
+          createdAt: new Date().toISOString(),
+          trialEndsAt: new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString(),
+          businessCategory: {
+            category: "fnb",
+            categoryLabel: "Makanan & Minuman",
+            subcategory: "kafe",
+            subcategoryLabel: "Kafe & Kedai Kopi",
+            lockedAt: Date.now(),
+            lockedBy: "kafe@mesinpos.test",
+          },
+        },
+      }),
+    );
+
+    const presetFacts = {};
+    function PresetProbe() {
+      presetFacts.store = useStore();
+      presetFacts.categories = presetFacts.store.categories.map((row) => ({ ...row }));
+      presetFacts.subcategories = presetFacts.store.subcategories.map((row) => ({ ...row }));
+      return null;
+    }
+
+    const ui = await renderInteractive(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(ProductsPage, null),
+          React.createElement(PresetProbe, null),
+        ),
+      ),
+    );
+
+    const sebelum = presetFacts.categories.map((row) => row.name);
+    const tombolSinkron = () => ui.query('[data-testid="kategori-sinkron-bisnis"]');
+    check(
+      "kartu kategori menawarkan penyesuaian dengan kategori bisnis (dengan label pilihannya)",
+      Boolean(tombolSinkron()) &&
+        tombolSinkron()?.disabled === false &&
+        ui.text().includes("Makanan & Minuman — Kafe & Kedai Kopi"),
+      ui.text().slice(0, 400),
+    );
+
+    await React.act(async () => {
+      tombolSinkron()?.click();
+    });
+    const sesudah = presetFacts.categories.map((row) => row.name);
+    check(
+      "penyesuaian menyemai kategori preset kafe tanpa menyentuh kategori lama",
+      ["Kopi", "Non-Kopi", "Makanan Ringan", "Makanan Utama", "Bahan Baku"].every((name) =>
+        sesudah.includes(name),
+      ) && sebelum.every((name) => sesudah.includes(name)),
+      JSON.stringify({ sebelum, sesudah }),
+    );
+    check(
+      "subkategori preset ikut lahir (di kategori lama maupun baru)",
+      ["Kopi Susu", "Manual Brew", "Teh"].every((name) =>
+        presetFacts.subcategories.some((row) => row.name === name),
+      ),
+      JSON.stringify(presetFacts.subcategories.map((row) => row.name)),
+    );
+    check(
+      "hasilnya dijelaskan apa adanya, termasuk jumlah & kategori bisnisnya",
+      (ui.query('[data-testid="kategori-sinkron-pesan"]')?.textContent ?? "").includes(
+        "dibuat mengikuti kategori bisnis Makanan & Minuman — Kafe & Kedai Kopi",
+      ),
+      ui.query('[data-testid="kategori-sinkron-pesan"]')?.textContent ?? "(tidak ada pesan)",
+    );
+    check(
+      "kategori tidak digandakan oleh penyesuaian",
+      new Set(sesudah).size === sesudah.length,
+      JSON.stringify(sesudah),
+    );
+
+    await React.act(async () => {
+      tombolSinkron()?.click();
+    });
+    const sesudahKedua = presetFacts.categories.map((row) => row.name);
+    check(
+      "tekanan kedua mengaku katalog sudah sesuai dan tidak menambah baris",
+      sesudahKedua.length === sesudah.length &&
+        (ui.query('[data-testid="kategori-sinkron-pesan"]')?.textContent ?? "").includes(
+          "sudah sesuai",
+        ),
+      ui.query('[data-testid="kategori-sinkron-pesan"]')?.textContent ?? "(tidak ada pesan)",
+    );
+    check(
+      "penyesuaian kategori bisnis tanpa error konsol",
+      ui.newErrors().length === 0,
+      ui.newErrors().join(" | ").slice(0, 200),
+    );
     await ui.unmount();
     withoutSession();
   }

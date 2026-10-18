@@ -28,13 +28,13 @@ import {
   Share2,
   Trash2,
   Usb,
-  UtensilsCrossed,
   Volume2,
   VolumeX,
   X,
   XCircle,
 } from "lucide-react";
 import { QrCodeImage } from "@/components/QrCodeImage";
+import { ErrorNotice } from "@/components/ErrorNotice";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -43,6 +43,12 @@ import {
   hasFeature,
   isFeatureEnabled,
 } from "@/lib/billing";
+/*
+  Apakah bisnis ini memang berlayanan meja — dipakai bersama sidebar supaya
+  denah meja, dapur, dan modifier hanya muncul untuk kafe/restoran (dan pilihan
+  yang tidak bisa dipastikan, lihat catatan di fungsinya).
+*/
+import { businessUsesTableService } from "@/lib/businessCategory";
 import { formatPctPlain, orderTotal } from "@/lib/fnbTax";
 import { tableLabel, tableStates, ticketTableHolders } from "@/lib/fnb";
 import { posCategoryChips } from "@/lib/categories";
@@ -411,7 +417,8 @@ export function PosPage() {
     lineIndex: number | null;
   } | null>(null);
   const [holdNotice, setHoldNotice] = useState<string | null>(null);
-  const [holdError, setHoldError] = useState<string | null>(null);
+  /** Penolakan server saat menahan/melanjutkan transaksi — disimpan utuh. */
+  const [holdError, setHoldError] = useState<unknown>(null);
   /** Transaksi yang ditahan sementara — daftar **Transaksi ditahan**. */
   const [heldCarts, setHeldCarts] = useState<HeldCart[]>([]);
   const [payOpen, setPayOpen] = useState(false);
@@ -424,9 +431,9 @@ export function PosPage() {
   /** Member yang memakai diskonnya (modul UMKM); kosong = tanpa member. */
   const [memberId, setMemberId] = useState<string | undefined>(undefined);
   const [memberQuery, setMemberQuery] = useState("");
-  const [upgradeHint, setUpgradeHint] = useState(false);
   const [paying, setPaying] = useState(false);
-  const [payError, setPayError] = useState<string | null>(null);
+  /** Penolakan server saat membayar/menerbitkan tagihan — disimpan utuh. */
+  const [payError, setPayError] = useState<unknown>(null);
   /** Tagihan QRIS yang diterbitkan dari keranjang ini; `null` = belum ada. */
   const [cartCharge, setCartCharge] = useState<CartCharge | null>(null);
   const [lastReceipt, setLastReceipt] = useState<{
@@ -542,18 +549,37 @@ export function PosPage() {
 
   const planKey = session?.tenant?.planKey ?? "starter";
   const entitlements = useMemo(() => entitlementFor(planKey), [planKey]);
-  // Fitur yang dimiliki modul (denah meja = modul F&B) hanya hidup saat modulnya
-  // benar-benar aktif — paket saja tidak cukup. Aturan yang sama dipakai server.
-  const canUseTables = isFeatureEnabled(
-    entitlements,
-    modules.activeVerticals,
-    "pos.table",
-  );
-  const canSendToKitchen = isFeatureEnabled(
-    entitlements,
-    modules.activeVerticals,
-    "pos.kds",
-  );
+  /*
+    Fitur yang dimiliki modul (denah meja = modul F&B) hanya hidup saat modulnya
+    benar-benar aktif — paket saja tidak cukup. Aturan yang sama dipakai server.
+
+    Modul saja **belum** cukup untuk menampilkan denah meja, antrean dapur, dan
+    modifier: modul boleh dinyalakan pemilik kapan saja (dan paket Enterprise
+    memuat semuanya), sehingga toko bangunan yang menyalakan modul F&B sempat
+    mendapat denah meja di halaman Kasir. Yang menjawab “apakah bisnis ini memang
+    berlayanan meja” adalah kategori utama yang sudah dikunci pemilik; aturannya
+    di `businessUsesTableService` (satu sumber, dipakai juga sidebar).
+  */
+  const tableServiceFitsBusiness = businessUsesTableService({
+    category: session?.tenant?.businessCategory?.category,
+    subcategory: session?.tenant?.businessCategory?.subcategory,
+  });
+  const canUseTables =
+    tableServiceFitsBusiness &&
+    isFeatureEnabled(entitlements, modules.activeVerticals, "pos.table");
+  const canSendToKitchen =
+    tableServiceFitsBusiness &&
+    isFeatureEnabled(entitlements, modules.activeVerticals, "pos.kds");
+  /**
+   * Modifier item termasuk modul F&B (`pos.modifier`). Kasir hanya ditawari
+   * memilih modifier kalau modulnya benar-benar aktif **dan** paketnya memuat
+   * fitur itu — server menolak transaksi bermodifier di luar itu, jadi menampil-
+   * kannya di layar hanya akan mengantar kasir ke penolakan. Produk yang masih
+   * menyimpan grup modifier dari masa modulnya hidup tetap dijual apa adanya.
+   */
+  const canUseModifiers =
+    tableServiceFitsBusiness &&
+    isFeatureEnabled(entitlements, modules.activeVerticals, "pos.modifier");
   const canPrint = hasFeature(entitlements, "peripheral.escpos");
   // Diskon member (`member.discount`) milik modul UMKM. Kasir juga butuh izin
   // `member.view` untuk membaca daftarnya — sama seperti gerbang server.
@@ -906,8 +932,10 @@ export function PosPage() {
     playScanBeep();
 
     // Produk bermodifier selalu lewat dialog: grup wajib tidak boleh terlewat,
-    // dan pilihan topping harus disengaja, bukan diam-diam.
-    if ((product?.modifiers?.length ?? 0) > 0) {
+    // dan pilihan topping harus disengaja, bukan diam-diam. Tanpa modul F&B
+    // yang aktif, produknya masuk keranjang apa adanya — persis yang diterima
+    // server (`pos.modifier` diperiksa saat penjualannya dicatat).
+    if (canUseModifiers && (product?.modifiers?.length ?? 0) > 0) {
       setModifierFor({
         productId,
         name,
@@ -1591,7 +1619,7 @@ export function PosPage() {
         status: "pending",
       });
     } catch (error) {
-      setPayError(error instanceof Error ? error.message : String(error));
+      setPayError(error);
     } finally {
       setPaying(false);
     }
@@ -1686,7 +1714,7 @@ export function PosPage() {
       });
       setCartCharge(null);
     } catch (error) {
-      setPayError(error instanceof Error ? error.message : String(error));
+      setPayError(error);
     } finally {
       setPaying(false);
     }
@@ -1742,7 +1770,7 @@ export function PosPage() {
       */
       openReceiptDialog();
     } catch (error) {
-      setPayError(error instanceof Error ? error.message : String(error));
+      setPayError(error);
     } finally {
       setPaying(false);
     }
@@ -2039,22 +2067,6 @@ export function PosPage() {
           ))}
         </div>
 
-        {upgradeHint && (
-          <div className="mt-4 flex items-center justify-between gap-3 rounded-lg border border-accent/30 bg-accent/10 px-4 py-3 text-sm">
-            <span className="text-muted-foreground">
-              <strong className="text-foreground">Table Management</strong>{" "}
-              tersedia di paket Professional ke atas.
-            </span>
-            <button
-              type="button"
-              onClick={() => setUpgradeHint(false)}
-              className="text-muted-foreground hover:text-foreground"
-            >
-              <X className="size-4" />
-            </button>
-          </div>
-        )}
-
         <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
           {filtered.map((p) => {
             const stockLeft = available.get(p.id) ?? 0;
@@ -2113,7 +2125,7 @@ export function PosPage() {
                 >
                   <span className="text-sm font-medium leading-snug">
                     {p.name}
-                    {(p.modifiers?.length ?? 0) > 0 && (
+                    {canUseModifiers && (p.modifiers?.length ?? 0) > 0 && (
                       <span className="mt-0.5 block text-[11px] font-normal text-primary">
                         {(p.modifiers ?? []).length} grup pilihan
                       </span>
@@ -2141,25 +2153,18 @@ export function PosPage() {
             );
           })}
 
-          {!canUseTables && (
-            <button
-              type="button"
-              onClick={() => setUpgradeHint(true)}
-              className="flex flex-col items-start justify-between rounded-lg border border-dashed border-border bg-secondary/20 p-3 text-left transition-colors hover:border-accent/50"
-            >
-              <span className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
-                <UtensilsCrossed className="size-4" />
-                Table Management
-              </span>
-              <span className="mt-3 inline-flex items-center gap-1 text-[11px] text-accent">
-                <Lock className="size-3" /> Professional
-              </span>
-            </button>
-          )}
         </div>
 
-        {canSendToKitchen && (
+        {/*
+          Bagian meja & dapur muncul **otomatis** dari modul yang aktif (dan
+          paketnya): pilih meja milik `pos.table`, antrean dapur milik `pos.kds`.
+          Tidak ada lagi kartu pengaturan/paket di halaman Kasir — kalau modul
+          F&B belum dinyalakan atau paketnya belum memuat fiturnya, bagian ini
+          memang tidak ada, dan pilihan modulnya ada di halaman Modul.
+        */}
+        {(canUseTables || canSendToKitchen) && (
           <section className="mt-6 grid gap-4 lg:grid-cols-2">
+            {canUseTables && (
             <div>
               <h2 className="text-sm font-semibold">Meja</h2>
               {tableStatesNow.length === 0 ? (
@@ -2239,7 +2244,9 @@ export function PosPage() {
                 </div>
               )}
             </div>
+            )}
 
+            {canSendToKitchen && (
             <div>
               <h2 className="text-sm font-semibold">Pesanan di dapur</h2>
               {kdsTickets.length === 0 ? (
@@ -2281,6 +2288,7 @@ export function PosPage() {
                 </ul>
               )}
             </div>
+            )}
           </section>
         )}
 
@@ -2378,7 +2386,9 @@ export function PosPage() {
           {cartPriced.map(({ line, priced, product, applied }) => {
             const units = product?.units ?? [];
             const baseUnit = product?.unit ?? "PCS";
-            const hasGroups = (product?.modifiers?.length ?? 0) > 0;
+            // Grup modifier hanya berarti kalau modulnya (F&B) memang aktif —
+            // aturan yang sama dengan server saat transaksinya dicatat.
+            const hasGroups = canUseModifiers && (product?.modifiers?.length ?? 0) > 0;
             const foto = product?.images?.[0]?.url;
             return (
             <div key={line.productId} className="flex items-start gap-2">
@@ -2648,18 +2658,19 @@ export function PosPage() {
           )}
         </div>
 
-        {(holdNotice || holdError) && (
-          <p
-            role={holdError ? "alert" : undefined}
-            className={cn(
-              "mx-4 mt-4 rounded-md px-2 py-1.5 text-xs",
-              holdError
-                ? "bg-destructive/10 text-destructive"
-                : "bg-primary/10 text-primary",
-            )}
-          >
-            {holdError ?? holdNotice}
-          </p>
+        {holdError ? (
+          <ErrorNotice
+            error={holdError}
+            testId="pos-hold-galat"
+            title="Transaksi tidak bisa ditahan"
+            className="mx-4 mt-4 gap-2 rounded-md px-3 py-2 text-xs"
+          />
+        ) : (
+          holdNotice && (
+            <p className="mx-4 mt-4 rounded-md bg-primary/10 px-2 py-1.5 text-xs text-primary">
+              {holdNotice}
+            </p>
+          )
         )}
 
         <div className="border-t border-border/70 p-4">
@@ -3037,15 +3048,13 @@ export function PosPage() {
               </div>
             )}
 
-            {(payError || creditBlockedReason) && (
-              <p
-                role="alert"
-                className="mt-4 flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-              >
-                <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-                {payError ?? creditBlockedReason}
-              </p>
-            )}
+            <ErrorNotice
+              error={payError ?? creditBlockedReason}
+              testId="pos-bayar-galat"
+              title="Pembayaran ditolak"
+              hint="Keranjang tetap utuh selama pembayaran gagal; perbaiki sebabnya lalu tekan Bayar lagi."
+              className="mt-4"
+            />
 
             {showDigitalFlow ? (
               <p className="mt-4 text-center text-xs text-muted-foreground">

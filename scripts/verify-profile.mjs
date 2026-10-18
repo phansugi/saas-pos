@@ -400,6 +400,16 @@ try {
           input.dispatchEvent(new window.Event("input", { bubbles: true }));
         });
       },
+      /** Memilih opsi `<select>` seperti pengguna memilihnya. */
+      pilih: async (selector, value) => {
+        const select = container.querySelector(selector);
+        if (!select) throw new Error(`pilihan "${selector}" tidak ada di DOM`);
+        if (select.disabled) throw new Error(`pilihan "${selector}" sedang terkunci`);
+        await React.act(async () => {
+          select.value = value;
+          select.dispatchEvent(new window.Event("change", { bubbles: true }));
+        });
+      },
       klik: async (selector) => {
         const element = container.querySelector(selector);
         if (!element) throw new Error(`elemen "${selector}" tidak ada di DOM`);
@@ -597,13 +607,103 @@ try {
       view.q('[data-testid="profil-usaha-lencana"]')?.textContent.trim() === "Profil lengkap",
       view.q('[data-testid="profil-usaha-lencana"]')?.textContent?.trim(),
     );
+    // ── kategori utama bisnis: dipilih sekali, lalu terkunci di layar ────────
     check(
-      "halaman Profil tanpa error konsol",
-      view.newErrors().length === 0,
-      view.newErrors().join(" | ").slice(0, 200),
+      "kartu kategori utama ada dan menyebut pilihan ini permanen",
+      Boolean(view.q('[data-testid="profil-kategori-utama"]')) &&
+        view.q('[data-testid="profil-kategori-lencana"]')?.textContent.trim() ===
+          "Belum dipilih" &&
+        view.text().includes("tidak bisa diubah atau dikosongkan"),
+      view.text().slice(0, 500),
+    );
+    check(
+      "tombol kunci mati selama kategori & subkategori belum dipilih",
+      view.q('[data-testid="simpan-kategori-utama"]').disabled === true &&
+        view.q('[data-testid="profil-subkategori-pilih"]').disabled === true,
+      "status pemilih kategori",
+    );
+    await view.pilih('[data-testid="profil-kategori-pilih"]', "fnb");
+    check(
+      "subkategori hanya berisi milik kategori yang dipilih",
+      [...view.q('[data-testid="profil-subkategori-pilih"]').options].map((row) => row.value).join(",") ===
+        ",kafe,restoran,warung,bakery,katering",
+      [...view.q('[data-testid="profil-subkategori-pilih"]').options]
+        .map((row) => row.value)
+        .join(","),
+    );
+    await view.pilih('[data-testid="profil-subkategori-pilih"]', "kafe");
+    check(
+      "tombol kunci hidup setelah pasangan kategori + subkategori lengkap",
+      view.q('[data-testid="simpan-kategori-utama"]').disabled === false,
+      "status tombol kunci",
+    );
+    await view.klik('[data-testid="simpan-kategori-utama"]');
+    check(
+      "setelah dikunci, nilai kategori & subkategori benar-benar tersimpan",
+      view.session().tenant.businessCategory?.category === "fnb" &&
+        view.session().tenant.businessCategory?.subcategory === "kafe",
+      JSON.stringify(view.session().tenant.businessCategory),
+    );
+    check(
+      "kartu berubah menjadi terkunci: nilai, tanggal, dan tanpa pemilih lagi",
+      view.q('[data-testid="profil-kategori-lencana"]')?.textContent.trim() ===
+        "Terkunci permanen" &&
+        view.q('[data-testid="profil-kategori-nilai"]')?.textContent.trim() ===
+          "Makanan & Minuman" &&
+        view.q('[data-testid="profil-subkategori-nilai"]')?.textContent.trim() ===
+          "Kafe & Kedai Kopi" &&
+        view.q('[data-testid="profil-kategori-tanggal"]')?.textContent.trim() !== "—" &&
+        view.q('[data-testid="profil-kategori-pilih"]') === null &&
+        view.q('[data-testid="simpan-kategori-utama"]') === null,
+      view.text().slice(-600),
+    );
+    check(
+      "notis menyebut kategori, subkategori, dan janji permanen",
+      view.q('[data-testid="profil-kategori-notis"]')?.textContent.includes(
+        "Makanan & Minuman — Kafe & Kedai Kopi",
+      ) === true &&
+        view.q('[data-testid="profil-kategori-notis"]')?.textContent.includes("permanen") === true,
+      view.q('[data-testid="profil-kategori-notis"]')?.textContent,
+    );
+    check(
+      "notis juga menyebut katalog produk yang ikut menyesuaikan",
+      view.q('[data-testid="profil-kategori-notis"]')?.textContent.includes(
+        "kategori produk",
+      ) === true &&
+        view.q('[data-testid="profil-kategori-notis"]')?.textContent.includes("Kopi") === true,
+      view.q('[data-testid="profil-kategori-notis"]')?.textContent,
     );
 
+    // Muat ulang halaman dengan sesi yang tersimpan: yang tampil harus nilai yang
+    // sama, bukan formulir kosong yang menawarkan pilihan kedua.
+    const sesiTerkunci = view.session();
     await view.close();
+    {
+      const ulang = await openProfil(sesiTerkunci);
+      check(
+        "setelah halaman dimuat ulang, kategori tetap terkunci pada nilai yang sama",
+        ulang.q('[data-testid="profil-kategori-nilai"]')?.textContent.trim() ===
+          "Makanan & Minuman" &&
+          ulang.q('[data-testid="profil-subkategori-nilai"]')?.textContent.trim() ===
+            "Kafe & Kedai Kopi" &&
+          ulang.q('[data-testid="profil-kategori-pilih"]') === null,
+        ulang.text().slice(-500),
+      );
+      check(
+        "halaman dengan kategori terkunci tanpa error konsol",
+        ulang.newErrors().length === 0,
+        ulang.newErrors().join(" | ").slice(0, 200),
+      );
+      await ulang.close();
+    }
+
+    const viewPenutup = await openProfil(sesiTerkunci);
+    check(
+      "halaman Profil tanpa error konsol",
+      viewPenutup.newErrors().length === 0,
+      viewPenutup.newErrors().join(" | ").slice(0, 200),
+    );
+    await viewPenutup.close();
   }
 
   // ═══════════════════════ 3. Kasir: profilnya sendiri boleh, identitas usaha tidak
@@ -656,6 +756,15 @@ try {
       view.q('[data-testid="profil-usaha-baca-saja"]')?.textContent.includes("Mengelola langganan") ===
         true,
       view.q('[data-testid="profil-usaha-baca-saja"]')?.textContent,
+    );
+    check(
+      "kasir hanya membaca kategori utama: tidak ada pemilih atau tombol kunci",
+      view.q('[data-testid="profil-kategori-baca-saja"]')?.textContent.includes(
+        "Hanya pemilik bisnis",
+      ) === true &&
+        view.q('[data-testid="profil-kategori-pilih"]') === null &&
+        view.q('[data-testid="simpan-kategori-utama"]') === null,
+      view.q('[data-testid="profil-kategori-baca-saja"]')?.textContent,
     );
     check(
       "alamat & WA tokonya bisa dibuka dari halaman ini",

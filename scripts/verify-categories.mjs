@@ -28,11 +28,21 @@ import {
   duplicateCategoryCodes,
   isReservedCategoryName,
   MAX_CATEGORIES_PER_TENANT,
+  countProductsInSubcategory,
+  deleteSubcategorySentence,
+  MAX_SUBCATEGORIES_PER_CATEGORY,
   normalizeCategoryName,
+  normalizeSubcategoryName,
   posCategoryChips,
   renamesSkuCode,
   selectableCategoryNames,
+  selectableSubcategoryNames,
+  SUBCATEGORY_NAME_MAX,
+  SUBCATEGORY_NAME_MIN,
+  subcategoryIsActive,
+  subcategoryNameKey,
   validateCategoryName,
+  validateSubcategoryName,
 } from "../src/convex/lib/categories.ts";
 import { PRODUCT_SKU_NO_CATEGORY_LABEL } from "../src/convex/lib/productSku.ts";
 
@@ -104,6 +114,158 @@ check(
   "label terlarang memang label yang dipakai SKU untuk “tanpa kategori”",
   categoryNameKey(CATEGORY_NO_CATEGORY_LABEL) === PRODUCT_SKU_NO_CATEGORY_LABEL,
   `${categoryNameKey(CATEGORY_NO_CATEGORY_LABEL)} vs ${PRODUCT_SKU_NO_CATEGORY_LABEL}`,
+);
+
+// --------------------------------------------------------------- subkategori
+check(
+  "nama subkategori dirapikan dengan aturan spasi yang sama",
+  normalizeSubcategoryName("  Semen   Portland ") === "Semen Portland",
+  JSON.stringify(normalizeSubcategoryName("  Semen   Portland ")),
+);
+check(
+  "subkategori valid diterima apa adanya (tanpa diubah hurufnya)",
+  validateSubcategoryName({ name: " Semen  Portland " }).value?.name === "Semen Portland",
+  JSON.stringify(validateSubcategoryName({ name: " Semen  Portland " })),
+);
+check(
+  "subkategori baru aktif secara default",
+  validateSubcategoryName({ name: "Semen Portland" }).value?.active === true,
+  JSON.stringify(validateSubcategoryName({ name: "Semen Portland" })),
+);
+for (const [label, input, expected] of [
+  ["nama terlalu pendek", { name: "S" }, `${SUBCATEGORY_NAME_MIN}–${SUBCATEGORY_NAME_MAX}`],
+  [
+    "nama terlalu panjang",
+    { name: "S".repeat(SUBCATEGORY_NAME_MAX + 1) },
+    `${SUBCATEGORY_NAME_MIN}–${SUBCATEGORY_NAME_MAX}`,
+  ],
+  ["nama terlarang", { name: "Tanpa kategori" }, "produk tanpa kategori"],
+]) {
+  const result = validateSubcategoryName(input);
+  check(
+    `subkategori ditolak: ${label}`,
+    !result.ok && (result.reason ?? "").includes(expected),
+    result.ok ? "DITERIMA — validasi bocor" : result.reason,
+  );
+}
+check(
+  "subkategori kembar di kategori yang sama ditolak",
+  validateSubcategoryName(
+    { name: "semen portland" },
+    { existingNames: ["Semen Portland", "Semen Putih"] },
+  ).ok === false,
+  JSON.stringify(
+    validateSubcategoryName(
+      { name: "semen portland" },
+      { existingNames: ["Semen Portland", "Semen Putih"] },
+    ),
+  ),
+);
+check(
+  "nama subkategori yang mirip tetapi berbeda tetap diterima",
+  validateSubcategoryName(
+    { name: "Semen Putih" },
+    { existingNames: ["Semen Portland"] },
+  ).ok === true,
+  JSON.stringify(
+    validateSubcategoryName({ name: "Semen Putih" }, { existingNames: ["Semen Portland"] }),
+  ),
+);
+check(
+  `batas ${MAX_SUBCATEGORIES_PER_CATEGORY} subkategori per kategori ditegakkan saat menambah`,
+  validateSubcategoryName(
+    { name: "Semen Putih" },
+    { count: MAX_SUBCATEGORIES_PER_CATEGORY, existingNames: [] },
+  ).ok === false,
+  JSON.stringify(
+    validateSubcategoryName(
+      { name: "Semen Putih" },
+      { count: MAX_SUBCATEGORIES_PER_CATEGORY, existingNames: [] },
+    ),
+  ),
+);
+check(
+  "batas itu tidak menahan perbaikan nama subkategori yang sudah ada",
+  validateSubcategoryName({ name: "Semen Putih" }, { existingNames: [] }).ok === true,
+  JSON.stringify(validateSubcategoryName({ name: "Semen Putih" }, { existingNames: [] })),
+);
+check(
+  "baris subkategori lama tanpa kolom aktif dianggap aktif",
+  subcategoryIsActive({ name: "Semen Putih" }) &&
+    subcategoryIsActive({ name: "Semen Putih", active: undefined }) &&
+    !subcategoryIsActive({ name: "Semen Putih", active: false }),
+  JSON.stringify([
+    subcategoryIsActive({ name: "Semen Putih" }),
+    subcategoryIsActive({ name: "Semen Putih", active: false }),
+  ]),
+);
+check(
+  "kunci pembanding nama subkategori memakai aturan yang sama",
+  subcategoryNameKey("Semen-Portland") === subcategoryNameKey("semen portland"),
+  `${subcategoryNameKey("Semen-Portland")} vs ${subcategoryNameKey("semen portland")}`,
+);
+
+// ------------------------------------ pemilih subkategori (di bawah kategori)
+{
+  const baris = [
+    { name: "Semen Portland", categoryId: "cat-semen", active: true },
+    { name: "Semen Putih", categoryId: "cat-semen", active: false },
+    { name: "Besi Beton", categoryId: "cat-besi", active: true },
+  ];
+  check(
+    "pemilih subkategori hanya menawarkan milik kategori itu yang aktif",
+    JSON.stringify(selectableSubcategoryNames(baris, "cat-semen")) ===
+      JSON.stringify(["Semen Portland"]),
+    JSON.stringify(selectableSubcategoryNames(baris, "cat-semen")),
+  );
+  check(
+    "subkategori kategori lain tidak ikut ditawarkan",
+    !selectableSubcategoryNames(baris, "cat-semen").includes("Besi Beton"),
+    JSON.stringify(selectableSubcategoryNames(baris, "cat-semen")),
+  );
+  check(
+    "subkategori nonaktif yang sedang dipakai produk tetap tersedia",
+    JSON.stringify(selectableSubcategoryNames(baris, "cat-semen", "Semen Putih")) ===
+      JSON.stringify(["Semen Portland", "Semen Putih"]),
+    JSON.stringify(selectableSubcategoryNames(baris, "cat-semen", "Semen Putih")),
+  );
+  check(
+    "produk tanpa kategori tidak menawarkan subkategori apa pun",
+    JSON.stringify(selectableSubcategoryNames(baris, undefined)) === JSON.stringify([]),
+    JSON.stringify(selectableSubcategoryNames(baris, undefined)),
+  );
+  check(
+    "kategori aktif milik produk tidak didaftarkan dua kali",
+    JSON.stringify(selectableSubcategoryNames(baris, "cat-semen", "Semen Portland")) ===
+      JSON.stringify(["Semen Portland"]),
+    JSON.stringify(selectableSubcategoryNames(baris, "cat-semen", "Semen Portland")),
+  );
+}
+check(
+  "jumlah produk per subkategori dihitung dari id yang ditunjuk produk",
+  countProductsInSubcategory("sub-1", [
+    { subcategoryId: "sub-1" },
+    { subcategoryId: "sub-1" },
+    { subcategoryId: "sub-2" },
+  ]) === 2,
+  String(
+    countProductsInSubcategory("sub-1", [
+      { subcategoryId: "sub-1" },
+      { subcategoryId: "sub-1" },
+      { subcategoryId: "sub-2" },
+    ]),
+  ),
+);
+check(
+  "kalimat hapus subkategori kosong menyebut tidak ada produk",
+  deleteSubcategorySentence("Semen Putih", 0).includes("tidak dipakai produk"),
+  deleteSubcategorySentence("Semen Putih", 0),
+);
+check(
+  "kalimat hapus subkategori menyebut jumlah produk & kategorinya tetap",
+  deleteSubcategorySentence("Semen Putih", 4).includes("4 produk") &&
+    deleteSubcategorySentence("Semen Putih", 4).includes("kategorinya tetap"),
+  deleteSubcategorySentence("Semen Putih", 4),
 );
 
 // ------------------------------------------------------------------ duplikat
@@ -281,6 +443,12 @@ check(
   "kalimat hapus kategori kosong menyebut tidak ada produk",
   deleteCategorySentence("Sanitasi", 0).includes("tidak dipakai produk"),
   deleteCategorySentence("Sanitasi", 0),
+);
+check(
+  "kalimat hapus kategori menyebut subkategori yang ikut terhapus",
+  deleteCategorySentence("Semen & Mortar", 0, 2).includes("2 subkategori") &&
+    !deleteCategorySentence("Semen & Mortar", 0, 0).includes("subkategori"),
+  deleteCategorySentence("Semen & Mortar", 0, 2),
 );
 {
   const kalimat = deleteCategorySentence("Kopi", 3);

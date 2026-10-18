@@ -43,6 +43,13 @@ import {
   type Vertical,
 } from "@/lib/billing";
 import { shiftSettingOf, type ShiftSetting } from "@/lib/shift";
+import {
+  activeBusinessCategoryOptions,
+  businessCategoryOf,
+  businessCategorySentence,
+  defaultBusinessCategoryRows,
+  type BusinessCategoryChoice,
+} from "@/lib/businessCategory";
 import { receiptSettingOf, type ReceiptSetting } from "@/lib/struk";
 import { taxSettingOf, type TaxSetting } from "@/lib/tax";
 import {
@@ -63,7 +70,8 @@ import {
   isMembershipSuspended,
   MEMBERSHIP_SUSPENDED_NOTE,
 } from "@/lib/team";
-import { categoryIsActive } from "@/lib/categories";
+import { categoryIsActive, subcategoryIsActive } from "@/lib/categories";
+import { isPlatformRole } from "@/lib/platform";
 import { DEFAULT_WAREHOUSE_ID, defaultWarehouse } from "@/lib/inventory";
 import {
   applyModifiers,
@@ -132,6 +140,7 @@ import {
   type CreateCustomRoleInput,
   type CreateMemberInput,
   type CreateProductInput,
+  type CreateSubcategoryInput,
   type CreateWebhookEndpointInput,
   type ProductDeletionInfo,
   type UpdateProductInput,
@@ -153,9 +162,13 @@ import {
   type ReceiveGoodsInput,
   type PayBatchInput,
   type RenameCategoryInput,
+  type RenameSubcategoryInput,
   type RenamedCategory,
+  type RenamedSubcategory,
   type RemovedCategory,
+  type RemovedSubcategory,
   type StoreCategory,
+  type StoreSubcategory,
   type RecordInvoiceInput,
   type RecordPayablePaymentInput,
   type ResolveMatchInput,
@@ -256,8 +269,10 @@ import {
   type StoreFnbTaxMonthSummary,
   type StoreUserProfile,
   type StoreTenantProfile,
+  type SyncedProductCategories,
   type UpdateUserProfileInput,
   type UpdateTenantProfileInput,
+  type UpdatedBusinessCategory,
   type UpdatedUserProfile,
   type UpdatedTenantProfile,
 } from "./types";
@@ -357,6 +372,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
     setRolePermissions,
     setUserProfile,
     setTenantProfile: setSessionTenantProfile,
+    setBusinessCategory: setSessionBusinessCategory,
   } = useSession();
   const tenant = session?.tenant ?? null;
   const slug = tenant?.slug ?? null;
@@ -394,6 +410,14 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
     yang sama. Sesi tetap dipakai sebagai jembatan sebelum query menjawab.
   */
   const myProfileDoc = useQuery(api.users.get, userId ? { userId } : "skip");
+  /*
+    Akun platform developer dikenali dari barisnya sendiri (`users.platformRole`),
+    bukan dari peran tenant — penanda itu di luar RBAC tenant (lihat
+    `@/lib/platform`). Nilainya dipakai sidebar aplikasi untuk menampilkan jalan
+    masuk ke backstage `/platform`; halaman backstage tetap memeriksa ulang lewat
+    `platform.me`, jadi ini hanya soal keterlihatan menu, bukan gerbang.
+  */
+  const platformDeveloper = isPlatformRole(myProfileDoc?.platformRole ?? "");
 
   /**
    * Keanggotaan yang **aktif** — hanya itu yang boleh dipakai membuka langganan
@@ -554,6 +578,26 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
   const categories = useQuery(
     api.tenants.listCategories,
     tenantId && userId ? { tenantId, actorId: userId } : "skip",
+  );
+  const subcategories = useQuery(
+    api.tenants.listSubcategories,
+    tenantId && userId ? { tenantId, actorId: userId } : "skip",
+  );
+  /*
+    Katalog kategori utama bisnis yang boleh dipilih (diatur pemilik platform di
+    backstage). Sengaja hanya butuh `userId`, **bukan** `tenantId`: onboarding
+    berjalan sebelum workspace ada, dan versi lama yang menuntut keanggotaan
+    membuat halaman itu jatuh ke katalog bawaan kode — kategori/subkategori baru
+    dari backstage tidak pernah muncul di sana. Query-nya reaktif, jadi perubahan
+    backstage sampai ke pemilih yang sedang terbuka tanpa muat ulang.
+
+    Selama jawaban server belum datang, daftar bawaan dipakai supaya pemilih tidak
+    kosong sesaat; server tetap memvalidasi ulang pilihan itu, jadi kategori yang
+    sudah dinonaktifkan tidak bisa lolos.
+  */
+  const businessCategoryOptions = useQuery(
+    api.tenants.listBusinessCategories,
+    userId ? { actorId: userId } : "skip",
   );
   const productDocs = useQuery(
     api.products.listByStore,
@@ -800,6 +844,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
   const setTaxMutation = useMutation(api.tenants.updateTax);
   const updateUserProfileMutation = useMutation(api.users.updateProfile);
   const updateTenantProfileMutation = useMutation(api.tenants.updateProfile);
+  const setBusinessCategoryMutation = useMutation(api.tenants.setBusinessCategory);
   const setFnbTaxMutation = useMutation(api.tenants.updateFnbTax);
   const setReceiptMutation = useMutation(api.tenants.updateReceipt);
   const setShiftMutation = useMutation(api.tenants.updateShift);
@@ -839,8 +884,15 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
   const updateMemberMutation = useMutation(api.loyalty.update);
   const createCategoryMutation = useMutation(api.categories.create);
   const renameCategoryMutation = useMutation(api.categories.rename);
+  const syncProductCategoriesMutation = useMutation(
+    api.categories.syncFromBusinessCategory,
+  );
   const setCategoryActiveMutation = useMutation(api.categories.setActive);
   const removeCategoryMutation = useMutation(api.categories.remove);
+  const createSubcategoryMutation = useMutation(api.subcategories.create);
+  const renameSubcategoryMutation = useMutation(api.subcategories.rename);
+  const setSubcategoryActiveMutation = useMutation(api.subcategories.setActive);
+  const removeSubcategoryMutation = useMutation(api.subcategories.remove);
   const purchasingDocs = useQuery(
     api.purchasing.list,
     tenantId && userId && canViewPurchasing ? { tenantId, actorId: userId } : "skip",
@@ -1001,6 +1053,15 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
           planKey: tenant.planKey,
           storeName: tenant.storeName,
           verticals: tenant.verticals ?? [tenant.vertical],
+          // Kategori utama dari onboarding ikut dikunci saat workspace lahir;
+          // tanpa ini pilihan pemilik hanya hidup di perangkat dan server masih
+          // menawarkannya untuk dipilih kedua kali.
+          businessCategory: tenant.businessCategory
+            ? {
+                category: tenant.businessCategory.category,
+                subcategory: tenant.businessCategory.subcategory,
+              }
+            : undefined,
         });
         // Slug final datang dari server: nama bisnis yang sudah dipakai bisnis lain
         // mendapat slug bebas (`toko-berkah-2`). Sesi diselaraskan supaya halaman
@@ -1055,6 +1116,13 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       address: row.address,
       email: row.email,
       whatsapp: row.phone,
+      // `undefined` untuk workspace lama yang belum pernah memilih; sesi yang sudah
+      // memegang pilihan tidak dikosongkan oleh jawaban server yang belum punya
+      // kolom itu.
+      businessCategory:
+        row.businessCategory === undefined
+          ? undefined
+          : businessCategoryOf(row),
       createdAt: new Date(row.createdAt).toISOString(),
       // Tenant lama (dibuat sebelum kolom jam trial ada) tidak punya nilainya;
       // sesi yang sudah dipegang perangkat ini tetap dipakai untuk kasus itu.
@@ -1086,6 +1154,12 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
     [categories],
   );
 
+  /** Nama subkategori menurut id-nya — produk menunjuk id, bukan nama. */
+  const subcategoryNames = useMemo(
+    () => new Map((subcategories ?? []).map((s) => [s._id as string, s.name])),
+    [subcategories],
+  );
+
   /** Dokumen produk (dari server) → bentuk yang dipakai halaman & kasir. */
   const toStoreProduct = useCallback(
     (p: NonNullable<typeof productDocs>[number]): StoreProduct => ({
@@ -1100,6 +1174,9 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       category: p.categoryId
         ? (categoryNames.get(p.categoryId) ?? "Tanpa kategori")
         : "Tanpa kategori",
+      subcategory: p.subcategoryId
+        ? subcategoryNames.get(p.subcategoryId as string)
+        : undefined,
       stock: p.stock,
       // Konfigurasi grosir & modifier datang dari dokumen produk; kosong
       // berarti modulnya tidak dipakai untuk produk itu.
@@ -1114,7 +1191,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
         url: image.url,
       })),
     }),
-    [categoryNames],
+    [categoryNames, subcategoryNames],
   );
 
   /** Katalog penjualan: hanya produk aktif (yang dijual kasir & KDS). */
@@ -1174,6 +1251,53 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
    * yang bisa basi — dan katalognya sendiri sudah terbatas pada produk aktif
    * (`products.listByStore`).
    */
+  /**
+   * Subkategori seperti yang dibaca halaman: nama + induk + status + jumlah produk.
+   *
+   * `productCount` dihitung dari katalog **lengkap** (termasuk produk nonaktif),
+   * sama seperti kategori — angka ini dipakai untuk dampak hapus.
+   */
+  const subcategoriesForUi: StoreSubcategory[] = useMemo(
+    () =>
+      (subcategories ?? []).map((s) => ({
+        id: s._id as string,
+        categoryId: s.categoryId as string,
+        name: s.name,
+        active: subcategoryIsActive(s),
+        productCount: (catalogDocs ?? productDocs ?? []).filter(
+          (p) => p.subcategoryId === s._id,
+        ).length,
+      })),
+    [subcategories, catalogDocs, productDocs],
+  );
+
+  /**
+   * Nama subkategori → id **di dalam kategori yang dipilih**.
+   *
+   * Subkategori hanya berlaku di bawah kategorinya (ia dibuat di sana), jadi
+   * pencocokannya memakai pasangan kategori + nama, bukan nama saja. Nama yang
+   * tidak ada dianggap kesalahan pemanggil — bukan dibuat diam-diam.
+   */
+  const resolveSubcategoryId = useCallback(
+    (categoryId: string | undefined, name: string | undefined): string | undefined => {
+      const wanted = (name ?? "").trim();
+      if (wanted.length === 0) return undefined;
+      if (!categoryId) {
+        throw new Error("Subkategori hanya bisa dipilih kalau produk punya kategori.");
+      }
+      const found = (subcategories ?? []).find(
+        (row) => (row.categoryId as string) === categoryId && row.name === wanted,
+      );
+      if (!found) {
+        throw new Error(
+          `Subkategori “${wanted}” tidak ada di kategori itu — buat dulu di kartu “Kategori produk”, atau pilih yang lain.`,
+        );
+      }
+      return found._id as string;
+    },
+    [subcategories],
+  );
+
   const categoriesForUi: StoreCategory[] = useMemo(
     () =>
       (categories ?? []).map((c) => ({
@@ -1345,6 +1469,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       const categoryId = categoryName
         ? (categories ?? []).find((c) => c.name === categoryName)?._id
         : undefined;
+      const subcategoryId = resolveSubcategoryId(categoryId, input.subcategory);
 
       const created = await createProductMutation({
         tenantId,
@@ -1356,12 +1481,13 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
         price: input.price,
         cost: input.cost,
         categoryId,
+        subcategoryId: subcategoryId as Id<"subcategories"> | undefined,
         unit: input.unit,
         openingStock: input.openingStock,
       });
       return { id: created.productId as string, sku: created.sku };
     },
-    [tenantId, storeId, userId, categories, createProductMutation],
+    [tenantId, storeId, userId, categories, resolveSubcategoryId, createProductMutation],
   );
 
   /**
@@ -1846,6 +1972,55 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
   );
 
   /**
+   * Kategori utama bisnis dari baris tenant (`tenants.businessCategory`) —
+   * sumber yang sama dengan yang dibaca server, jadi halaman Profil di perangkat
+   * mana pun melihat pilihan yang sudah terkunci. `null` = belum pernah dipilih.
+   */
+  const businessCategory = useMemo(
+    () => businessCategoryOf(workspace?.tenant ?? tenant),
+    [workspace, tenant],
+  );
+
+  /**
+   * Katalog kategori utama yang boleh dipilih; selama jawaban server belum
+   * datang, daftar bawaan dipakai supaya pemilih tidak kosong sesaat. Nilainya
+   * dibuat sekali per jawaban query supaya daftar di deps store stabil.
+   */
+  const businessCategories = useMemo(
+    () =>
+      businessCategoryOptions ??
+      activeBusinessCategoryOptions(defaultBusinessCategoryRows()),
+    [businessCategoryOptions],
+  );
+
+  /**
+   * Mengunci kategori utama lewat `tenants.setBusinessCategory`. Server yang
+   * memutuskan hasilnya (termasuk penolakan pilihan kedua); sesi hanya mengikuti
+   * nilai yang benar-benar tersimpan supaya tampilan tidak mendahului backend.
+   */
+  const setBusinessCategory = useCallback(
+    async (input: BusinessCategoryChoice): Promise<UpdatedBusinessCategory> => {
+      if (!tenantId || !userId) {
+        notReady();
+      }
+      const result = await setBusinessCategoryMutation({
+        tenantId,
+        actorId: userId,
+        category: input.category,
+        subcategory: input.subcategory,
+      });
+      const value = result.businessCategory;
+      setSessionBusinessCategory(value);
+      return {
+        businessCategory: value,
+        changed: result.changed,
+        sentence: result.sentence ?? businessCategorySentence(value),
+      };
+    },
+    [tenantId, userId, setBusinessCategoryMutation, setSessionBusinessCategory],
+  );
+
+  /**
    * Memasang logo toko lewat pola tiga langkah Convex: minta URL unggah, kirim
    * berkasnya langsung ke penyimpanan, lalu tautkan id berkasnya ke tenant. Batas
    * tipe & ukurannya ditegakkan di server, bukan hanya di halaman Pengaturan.
@@ -1999,7 +2174,12 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
   const setCategory = useCallback(
     async (
       input: SetProductCategoryInput,
-    ): Promise<{ sku: string; previousSku: string; category: string | null }> => {
+    ): Promise<{
+      sku: string;
+      previousSku: string;
+      category: string | null;
+      subcategory: string | null;
+    }> => {
       if (!tenantId || !userId) {
         notReady();
       }
@@ -2011,21 +2191,24 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       if (name && !categoryId) {
         throw new Error(`Kategori “${name}” tidak ada di workspace ini.`);
       }
+      const subcategoryId = resolveSubcategoryId(categoryId, input.subcategory);
 
       const result = await setCategoryMutation({
         tenantId,
         actorId: userId,
         productId: input.productId as Id<"products">,
         categoryId,
+        subcategoryId: subcategoryId as Id<"subcategories"> | undefined,
       });
 
       return {
         sku: result.sku,
         previousSku: result.previousSku,
         category: result.category,
+        subcategory: result.subcategory,
       };
     },
-    [tenantId, userId, categories, setCategoryMutation],
+    [tenantId, userId, categories, resolveSubcategoryId, setCategoryMutation],
   );
 
   /**
@@ -2126,6 +2309,27 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
     [tenantId, userId, createCategoryMutation],
   );
 
+  /**
+   * Menyamakan katalog produk dengan kategori bisnis workspace ini (tombol di
+   * halaman Produk & Stok). Server yang memutuskan apa yang masih kurang — hanya
+   * menambah, tidak mengganti/menghapus — dan balikannya menjelaskan hasilnya.
+   */
+  const syncProductCategories = useCallback(async (): Promise<SyncedProductCategories> => {
+    if (!tenantId || !userId) notReady();
+    const result = await syncProductCategoriesMutation({
+      tenantId,
+      actorId: userId,
+    });
+    return {
+      changed: result.changed,
+      businessCategoryLabel: result.businessCategoryLabel,
+      createdCategories: result.createdCategories,
+      createdSubcategories: result.createdSubcategories,
+      skippedCategories: result.skippedCategories,
+      sentence: result.sentence,
+    };
+  }, [tenantId, userId, syncProductCategoriesMutation]);
+
   const renameCategory = useCallback(
     async (input: RenameCategoryInput): Promise<RenamedCategory> => {
       if (!tenantId || !userId) notReady();
@@ -2165,9 +2369,76 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
         actorId: userId,
         categoryId: categoryId as Id<"categories">,
       });
-      return { name: result.name, detachedProducts: result.detachedProducts };
+      return {
+        name: result.name,
+        detachedProducts: result.detachedProducts,
+        removedSubcategories: result.removedSubcategories,
+      };
     },
     [tenantId, userId, removeCategoryMutation],
+  );
+
+  /**
+   * ------------------------------------------------------------- subkategori
+   * Subkategori katalog (`category.manage`): selalu **di bawah** sebuah kategori.
+   *
+   * Empat mutation terpisah dengan akibat yang berbeda dan dijelaskan apa adanya:
+   * ganti nama tidak menyentuh SKU sama sekali (produk menunjuk id), nonaktif
+   * menutupnya untuk produk baru, dan hapus melepas produk yang memakainya tanpa
+   * menghapus produk atau kategorinya.
+   */
+  const createSubcategory = useCallback(
+    async (input: CreateSubcategoryInput): Promise<{ id: string; name: string }> => {
+      if (!tenantId || !userId) notReady();
+      const created = await createSubcategoryMutation({
+        tenantId,
+        actorId: userId,
+        categoryId: input.categoryId as Id<"categories">,
+        name: input.name,
+      });
+      return { id: created.subcategoryId as string, name: created.name };
+    },
+    [tenantId, userId, createSubcategoryMutation],
+  );
+
+  const renameSubcategory = useCallback(
+    async (input: RenameSubcategoryInput): Promise<RenamedSubcategory> => {
+      if (!tenantId || !userId) notReady();
+      const result = await renameSubcategoryMutation({
+        tenantId,
+        actorId: userId,
+        subcategoryId: input.subcategoryId as Id<"subcategories">,
+        name: input.name,
+      });
+      return { name: result.name, previousName: result.previousName };
+    },
+    [tenantId, userId, renameSubcategoryMutation],
+  );
+
+  const setSubcategoryActive = useCallback(
+    async (subcategoryId: string, active: boolean): Promise<void> => {
+      if (!tenantId || !userId) notReady();
+      await setSubcategoryActiveMutation({
+        tenantId,
+        actorId: userId,
+        subcategoryId: subcategoryId as Id<"subcategories">,
+        active,
+      });
+    },
+    [tenantId, userId, setSubcategoryActiveMutation],
+  );
+
+  const removeSubcategory = useCallback(
+    async (subcategoryId: string): Promise<RemovedSubcategory> => {
+      if (!tenantId || !userId) notReady();
+      const result = await removeSubcategoryMutation({
+        tenantId,
+        actorId: userId,
+        subcategoryId: subcategoryId as Id<"subcategories">,
+      });
+      return { name: result.name, detachedProducts: result.detachedProducts };
+    },
+    [tenantId, userId, removeSubcategoryMutation],
   );
 
   // -------------------------------- F&B: denah meja + antrean dapur ---------
@@ -4080,6 +4351,11 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       renameCategory,
       setCategoryActive,
       removeCategory,
+      subcategories: subcategoriesForUi,
+      createSubcategory,
+      renameSubcategory,
+      setSubcategoryActive,
+      removeSubcategory,
       modules,
       setModules,
       tax,
@@ -4105,6 +4381,11 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       setMyProfile,
       tenantProfile,
       setTenantProfile,
+      businessCategory,
+      setBusinessCategory,
+      businessCategories,
+      syncProductCategories,
+      platformDeveloper,
       changePlan,
       createProduct,
       updateProduct,
@@ -4254,6 +4535,11 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       renameCategory,
       setCategoryActive,
       removeCategory,
+      subcategoriesForUi,
+      createSubcategory,
+      renameSubcategory,
+      setSubcategoryActive,
+      removeSubcategory,
       modules,
       setModules,
       tax,
@@ -4279,6 +4565,11 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       setMyProfile,
       tenantProfile,
       setTenantProfile,
+      businessCategory,
+      setBusinessCategory,
+      businessCategories,
+      syncProductCategories,
+      platformDeveloper,
       changePlan,
       createProduct,
       updateProduct,

@@ -65,6 +65,8 @@ import {
   whatsappInviteUrl,
 } from "@/lib/team";
 import { useStore } from "@/lib/store";
+import { FEATURE_LABELS } from "@/lib/billing";
+import { ModuleReadOnly } from "@/components/ModuleReadOnly";
 import { featureUnavailableReason } from "@/lib/store/modules";
 import { useCan } from "@/lib/usePermission";
 import { cn } from "@/lib/utils";
@@ -205,6 +207,16 @@ export function TeamPage() {
    * sidebar, dan jejak audit), yang dipilih hanya izinnya.
    */
   function startEditBuiltin(role: Role) {
+    /*
+      Gerbang fitur diperiksa **sebelum** editornya terbuka: menyunting izin
+      peran bawaan ditolak server tanpa `rbac.custom`, dan editor yang terbuka
+      hanya akan berakhir di galat server (persis keluhan “Fitur Custom role
+      (RBAC) tidak termasuk paket Starter”).
+    */
+    if (gateReason) {
+      setError(gateReason);
+      return;
+    }
     const row = builtinRoles.find((item) => item.role === role);
     if (!row) return;
     setEditingId(null);
@@ -232,6 +244,10 @@ export function TeamPage() {
   );
 
   function submitBuiltin() {
+    if (gateReason) {
+      setError(gateReason);
+      return;
+    }
     if (busy || !editingBuiltin || !builtinPreview) return;
     if (!builtinPreview.ok) {
       setError(builtinPreview.reason);
@@ -677,6 +693,10 @@ export function TeamPage() {
   }
 
   function resetBuiltin(role: Role) {
+    if (gateReason) {
+      setError(gateReason);
+      return;
+    }
     const label = ROLE_LABELS[role];
     run(async () => {
       await resetBuiltinRole(role);
@@ -796,9 +816,12 @@ export function TeamPage() {
 
       {gateReason && (
         <p className="rounded-lg border border-accent/40 bg-accent/10 px-4 py-3 text-sm text-accent">
-          {gateReason} Peran kustom yang sudah ada tetap terlihat dan anggota
-          tetap bisa dikembalikan ke peran bawaannya; yang ditolak adalah membuat
-          peran baru dan menugaskannya.{" "}
+          {gateReason} Bagian <strong className="text-foreground">Peran</strong>{" "}
+          di halaman ini hanya bisa dibaca — abu-abu, tanpa satu pun kontrol yang
+          bisa diisi, diubah, atau diperbarui. Mengelola{" "}
+          <strong className="text-foreground">anggota</strong> (mendaftarkan,
+          mengubah, menonaktifkan) tetap bisa seperti biasa, karena itu bukan
+          fitur modul ini.{" "}
           {can("billing.manage") && (
             <Link to="/app/modules" className="underline">
               Kelola modul &amp; paket
@@ -938,7 +961,15 @@ export function TeamPage() {
                       : "border-border/60",
                   )}
                   value={roleChoiceValue(inviteForm.role, inviteForm.customRoleId)}
-                  disabled={busy || gateReason !== null}
+                  /*
+                    Hanya gerbang **peran tambahan** yang menutup pemilih ini —
+                    bukan seluruhnya. Menugaskan peran bawaan tidak butuh fitur
+                    `rbac.custom` di server (`members.add` menuntutnya hanya saat
+                    `customRoleId` diisi), jadi mengunci pemilihnya berarti tenan
+                    Starter tidak bisa memilih peran sama sekali padahal server
+                    menerimanya.
+                  */
+                  disabled={busy}
                   onChange={(event) => {
                     const parsed = parseRoleChoice(event.target.value);
                     if (!parsed) return;
@@ -956,7 +987,7 @@ export function TeamPage() {
                       </option>
                     ))}
                   </optgroup>
-                  {inviteCustomRoles.length > 0 && (
+                  {gateReason === null && inviteCustomRoles.length > 0 && (
                     <optgroup label="Peran tambahan">
                       {inviteCustomRoles.map((role) => (
                         <option
@@ -973,8 +1004,9 @@ export function TeamPage() {
                   data-testid="member-role-catatan"
                   className="text-xs text-muted-foreground"
                 >
-                  {gateReason ??
-                    (inviteCustomRole
+                  {gateReason
+                    ? `${gateReason} Peran bawaan tetap bisa ditugaskan; yang tidak ditawarkan di sini adalah peran tambahan.`
+                    : (inviteCustomRole
                       ? `${describeCustomRole(inviteCustomRole)} — peran tambahan berdiri sendiri; izin peran bawaan tidak ikut dipakai.`
                       : inviteCustomRoles.length === 0
                         ? "Selain peran bawaan, belum ada peran tambahan yang bisa Anda tugaskan — buat di daftar Peran di bawah."
@@ -1355,6 +1387,19 @@ export function TeamPage() {
         kali. Peran tambahan **berdiri sendiri**: izinnya tidak menumpang peran
         bawaan mana pun.
       */}
+      {/*
+        Bagian **Peran** milik fitur `rbac.custom`. Tanpa fiturnya (paket Starter
+        / Professional) bagian ini hanya bisa dibaca: kartu peran, editor izin,
+        dan tombol-tombolnya dirender abu-abu di dalam `ModuleReadOnly` sehingga
+        tidak ada satu pun yang bisa diklik atau diisi. Mengelola **anggota**
+        (kartu di atas) bukan milik modul ini — paket semua orang memuatnya —
+        jadi ia tetap hidup.
+      */}
+      <ModuleReadOnly
+        locked={gateReason !== null}
+        reason={gateReason}
+        label={FEATURE_LABELS["rbac.custom"]}
+      >
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 text-base">
@@ -1387,6 +1432,8 @@ export function TeamPage() {
                 active: role.active,
                 removed: role.removed,
                 customized: role.customized,
+                // Tombol hanya hidup kalau servernya memang akan menerimanya.
+                editGateReason: gateReason,
                 memberCount: role.memberCount,
                 canManage,
               });
@@ -1443,7 +1490,7 @@ export function TeamPage() {
                     </div>
                     {!isLockedRole(role.role) && (
                       <div className="flex flex-wrap items-center gap-2">
-                        {actions.edit && (
+                        {actions.edit ? (
                           <Button
                             size="sm"
                             variant="outline"
@@ -1453,6 +1500,25 @@ export function TeamPage() {
                           >
                             <Pencil className="size-3" /> Ubah izin
                           </Button>
+                        ) : (
+                          /*
+                            Tanpa fitur `rbac.custom` tombolnya tetap tampil tetapi
+                            mati, dengan sebabnya terbaca (bukan hilang diam-diam,
+                            dan bukan pula hidup lalu ditolak server). Alasannya
+                            datang dari `featureUnavailableReason`, jadi kalimatnya
+                            sama persis dengan kalimat `requireFeature` di server.
+                          */
+                          actions.editReason && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled
+                              title={actions.editReason}
+                              aria-label={`Ubah izin peran ${label} terkunci`}
+                            >
+                              <Lock className="size-3" /> Ubah izin
+                            </Button>
+                          )
                         )}
                         {actions.reset && (
                           <Button
@@ -1830,6 +1896,7 @@ export function TeamPage() {
           </p>
         </CardContent>
       </Card>
+      </ModuleReadOnly>
     </div>
   );
 }

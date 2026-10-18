@@ -132,6 +132,13 @@ export interface ProductUpdatedEventInput {
   price: number;
   unit: string;
   active: boolean;
+  /**
+   * Kategori & subkategori katalog saat ini — `null` kalau tidak ada. Dikirim
+   * bersama setiap perubahan (bukan hanya saat kategorinya berubah) supaya
+   * penerima bisa menyusun katalog dua tingkat tanpa menarik ulang produknya.
+   */
+  category: string | null;
+  subcategory: string | null;
   changed: readonly string[];
   /** SKU lama saat kategori berganti (SKU ikut diganti kode kategorinya). */
   previousSku?: string;
@@ -148,6 +155,8 @@ export function productUpdatedEventData(
     price: input.price,
     unit: input.unit,
     active: input.active,
+    category: input.category ?? null,
+    subcategory: input.subcategory ?? null,
     changed: [...input.changed],
   };
   // Hanya dikirim kalau memang ada: penerima lama tidak perlu membaca `null`

@@ -169,8 +169,9 @@ export function ReceivablesPage() {
 
       {creditUnavailable && (
         <p className="rounded-lg border border-accent/40 bg-accent/10 px-4 py-3 text-sm text-accent">
-          {creditUnavailable} Selama itu penjualan tempo dan limit kredit baru
-          ditolak; nota lama tetap bisa ditagih di halaman ini.{" "}
+          {creditUnavailable} Halaman ini hanya bisa dibaca: nota lama tetap
+          terlihat, tetapi tidak bisa ditagih atau diubah dari sini sampai
+          langganannya memuat modul itu.{" "}
           {can("billing.manage") && (
             <Link to="/app/modules" className="underline">
               Kelola modul &amp; paket

@@ -267,6 +267,8 @@ export const API_DOC_ENDPOINTS: ApiDocEndpoint[] = [
     fields: [
       { name: "sku", type: "string", description: "SKU produk — nilai yang dipakai untuk memesan (`lines[].sku`)." },
       { name: "name", type: "string", description: "Nama produk." },
+      { name: "category", type: "string | null", description: "Nama kategori katalog, atau `null` kalau produk belum dikategorikan." },
+      { name: "subcategory", type: "string | null", description: "Nama subkategori di dalam kategori, atau `null` kalau tidak ada." },
       { name: "price", type: "number", description: "Harga jual satuan dasar (rupiah)." },
       { name: "unit", type: "string", description: "Satuan dasar, mis. `PCS`, `SAK`." },
       { name: "active", type: "boolean", description: "`false` = produk nonaktif dan ditolak saat dipesan." },
@@ -285,6 +287,8 @@ export const API_DOC_ENDPOINTS: ApiDocEndpoint[] = [
       {
         "sku": "PBB-SEM-000001",
         "name": "Semen Portland 40 kg",
+        "category": "Semen & Mortar",
+        "subcategory": "Semen Portland",
         "price": 68000,
         "unit": "SAK",
         "active": true,
@@ -298,6 +302,8 @@ export const API_DOC_ENDPOINTS: ApiDocEndpoint[] = [
 }`,
     notes: [
       "`sellable` hanya menjumlahkan stok lokasi jual (bukan gudang), yaitu angka yang dipakai kasir.",
+      "`category` & `subcategory` dikirim sebagai **nama**, bukan id internal — pakai keduanya untuk menyusun katalog dua tingkat di platform. Keduanya `null` bila produk tidak punya kategori/subkategori.",
+      "Subkategori hanya label katalog: mengubahnya **tidak** mengubah SKU maupun tab kasir, berbeda dengan kategori yang ikut menentukan kode tengah SKU.",
       "Katalog dibaca berurutan menurut SKU dan **berhalaman**: kirim `cursor` dari `nextCursor` sampai bernilai `null`. Tanpa itu, platform hanya menerima halaman pertama.",
       "Perubahan harga yang terjadi setelah salinan awal dikirim lewat webhook `product.updated`, jadi tarikan penuh hanya untuk rekonsiliasi berkala.",
     ],
@@ -533,7 +539,7 @@ export const API_DOC_INTEGRATION_STEPS: { title: string; body: string }[] = [
   {
     title: "2. Tarik katalog untuk platform",
     body:
-      "Tarik `GET /api/v1/products?limit=100` berurutan memakai `cursor` sampai `nextCursor` bernilai `null`, lalu simpan `sku`, `name`, `price`, `unit`, `active`, `trackStock`, dan `sellable` di sisi platform. Sesudah salinan awal, perubahan harga cukup diikuti dari webhook `product.updated`. SKU adalah kunci pemetaan produk — jangan memakai id internal MesinPOS.",
+      "Tarik `GET /api/v1/products?limit=100` berurutan memakai `cursor` sampai `nextCursor` bernilai `null`, lalu simpan `sku`, `name`, `category`, `subcategory`, `price`, `unit`, `active`, `trackStock`, dan `sellable` di sisi platform. Susun katalog dua tingkat dari pasangan kategori/subkategori itu (subkategori boleh `null`). Sesudah salinan awal, perubahan harga maupun katalog cukup diikuti dari webhook `product.updated`. SKU adalah kunci pemetaan produk — jangan memakai id internal MesinPOS.",
   },
   {
     title: "3. Kirim pesanan dari pusatbahanbangunan.com",
@@ -638,11 +644,12 @@ export const SYNC_DOC = {
   ],
   rules: [
     "MesinPOS menang untuk semua data operasional (harga, stok, penjualan, pembelian). Platform tidak mengirim balik perubahan yang berasal dari MesinPOS.",
+    "Katalog dua tingkat dibaca dari `category` & `subcategory` pada `GET /api/v1/products`; keduanya nama, bukan id. Subkategori tidak mengubah SKU.",
     "Webhook adalah pemberitahuan, bukan sumber angka: ambil nominal & stok terbaru dari endpoint tarik setelah menerima event.",
     "Pakai `id` kiriman sebagai kunci idempotensi penerima, dan `refType`/`refId` pada `stock.changed` untuk menolak pergerakan yang sama dua kali.",
     "`since` dijepit ke 366 hari; untuk data lebih lama, tarik per periode dengan `days` maksimum 90 hari.",
     "Kalau dua sistem sempat berbeda, rekonsiliasi mengikuti MesinPOS — jangan menimpa harga/stok dari platform.",
-    "`product.updated` membawa `changed` (termasuk `deleted`), serta `previousSku`/`previousPrice` saat nilainya berubah — pakai itu untuk memetakan ulang produk di platform, bukan menebak dari nama.",
+    "`product.updated` membawa `changed` (termasuk `deleted`), `category`/`subcategory` terkini, serta `previousSku`/`previousPrice` saat nilainya berubah — pakai itu untuk memetakan ulang produk di platform, bukan menebak dari nama.",
   ],
 };
 

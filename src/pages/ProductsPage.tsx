@@ -17,6 +17,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { ErrorNotice } from "@/components/ErrorNotice";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -38,9 +39,14 @@ import {
   categoryNameKey,
   categorySkuCode,
   deleteCategorySentence,
+  deleteSubcategorySentence,
   duplicateCategoryCodes,
   selectableCategoryNames,
+  selectableSubcategoryNames,
+  subcategoryIsActive,
+  subcategoryNameKey,
   validateCategoryName,
+  validateSubcategoryName,
 } from "@/lib/categories";
 import {
   canAddProductImage,
@@ -53,14 +59,19 @@ import {
   remainingProductImageSlots,
   validateProductImage,
 } from "@/lib/productImages";
+import {
+  planProductCatalogSeeding,
+  productCatalogPlanIsEmpty,
+  productCatalogPresetFor,
+} from "@/lib/productCatalogPresets";
 import { PRODUCT_SKU_PREFIX, suggestProductSku } from "@/lib/productSku";
 import { productStatusSentence } from "@/lib/productEdit";
-import type { StoreCategory, StoreProduct } from "@/lib/store";
+import type { StoreCategory, StoreProduct, StoreSubcategory } from "@/lib/store";
 import type { ProductDeletionInfo } from "@/lib/store";
 import { useStore } from "@/lib/store";
 import { useCan } from "@/lib/usePermission";
 import { describeTiers, sortTiers } from "@/lib/wholesale";
-import { formatIDR } from "@/lib/utils";
+import { cn, formatIDR } from "@/lib/utils";
 
 interface Draft {
   /** Nama produk yang tampil di kasir, struk, dan laporan. */
@@ -71,6 +82,8 @@ interface Draft {
   cost: string;
   /** Kategori produk; kosong = tanpa kategori. Mengubahnya ikut mengubah SKU. */
   category: string;
+  /** Label katalog di dalam kategori; kosong = tanpa subkategori. */
+  subcategory: string;
   price: string;
   unit: string;
   units: { code: string; factor: string }[];
@@ -246,6 +259,7 @@ interface NewProductDraft {
   name: string;
   sku: string;
   category: string;
+  subcategory: string;
   price: string;
   cost: string;
   unit: string;
@@ -256,6 +270,7 @@ const EMPTY_PRODUCT: NewProductDraft = {
   name: "",
   sku: "",
   category: "",
+  subcategory: "",
   price: "",
   cost: "",
   unit: "PCS",
@@ -277,6 +292,7 @@ function draftFrom(product: StoreProduct): Draft {
     sku: product.sku,
     cost: String(product.cost ?? 0),
     category: kategoriDraft(product.category),
+    subcategory: product.subcategory ?? "",
     price: String(product.price),
     unit: product.unit ?? "PCS",
     units: (product.units ?? []).map((u) => ({ code: u.code, factor: String(u.factor) })),
@@ -435,6 +451,13 @@ export function ProductsPage() {
     renameCategory,
     setCategoryActive,
     removeCategory,
+    subcategories,
+    createSubcategory,
+    renameSubcategory,
+    setSubcategoryActive,
+    removeSubcategory,
+    syncProductCategories,
+    businessCategory,
     setModifiers,
     createProduct,
     adjustStock,
@@ -446,7 +469,8 @@ export function ProductsPage() {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [editingModifiers, setEditingModifiers] = useState<string | null>(null);
   const [modifierDraft, setModifierDraft] = useState<ModifierDraftGroup[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  /** Galat apa pun (server atau validasi klien) — disimpan utuh agar kalimatnya bisa dibaca. */
+  const [error, setError] = useState<unknown>(null);
   const [saving, setSaving] = useState(false);
   const [savingModifiers, setSavingModifiers] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -499,11 +523,77 @@ export function ProductsPage() {
   const [kategoriBusy, setKategoriBusy] = useState(false);
   const [kategoriUbah, setKategoriUbah] = useState<{ id: string; name: string } | null>(null);
   const [kategoriHapus, setKategoriHapus] = useState<string | null>(null);
+  /**
+   * Pengelolaan subkategori: panel kategori yang sedang dibuka (“di bawah
+   * kategori” inilah tempat subkategori dibuat), draf nama baru, baris yang sedang
+   * diubah namanya, dan baris yang menunggu konfirmasi hapus.
+   */
+  const [subTerbuka, setSubTerbuka] = useState<string | null>(null);
+  const [subBaru, setSubBaru] = useState<{ categoryId: string; name: string } | null>(null);
+  const [subUbah, setSubUbah] = useState<{ id: string; name: string } | null>(null);
+  const [subHapus, setSubHapus] = useState<string | null>(null);
+  /**
+   * Hasil tombol “Sesuaikan dengan kategori bisnis”: penyemaian katalog hanya
+   * menambah, jadi yang perlu dibaca pengguna adalah apa yang **baru dibuat**
+   * (atau bahwa katalognya sudah sesuai) — bukan daftar panjang katalognya.
+   */
+  const [sinkronPesan, setSinkronPesan] = useState<string | null>(null);
+  /** Galat penyelarasan kategori — bentuknya sama dengan galat server lainnya. */
+  const [sinkronError, setSinkronError] = useState<unknown>(null);
 
   const kategoriAktif = useMemo(
     () => categories.filter((c) => c.active).length,
     [categories],
   );
+  /*
+    **Apa yang belum ada dari master bisnis.**
+
+    Kenapa dihitung di halaman: master kategori & subkategori hanya lahir saat
+    pilihan bisnis dikunci atau saat tombolnya ditekan. Workspace lama yang sudah
+    memilih bisnisnya sebelum fitur presets ada karena itu bisa terlihat “tidak
+    punya master”, padahal rencananya tinggal dijalankan. Dengan menghitung
+    rencana yang sama di klien (`planProductCatalogSeeding` — fungsi murni yang
+    juga dipakai server), halaman bisa menyebut **apa** yang kurang dan berapa
+    banyak, bukan hanya menyediakan tombol tanpa keterangan.
+  */
+  const rencanaKatalog = useMemo(() => {
+    if (!businessCategory) return null;
+    const preset = productCatalogPresetFor({
+      category: businessCategory.category,
+      subcategory: businessCategory.subcategory,
+      categoryLabel: businessCategory.categoryLabel,
+      subcategoryLabel: businessCategory.subcategoryLabel,
+    });
+    const namaKategori = new Map(categories.map((c) => [c.id, c.name]));
+    return planProductCatalogSeeding({
+      preset: preset.categories,
+      existingCategoryNames: categories.map((c) => c.name),
+      existingSubcategories: subcategories.map((s) => ({
+        categoryName: namaKategori.get(s.categoryId) ?? "",
+        name: s.name,
+      })),
+    });
+  }, [businessCategory, categories, subcategories]);
+  /** Berapa kategori & subkategori bawaan bisnis yang belum ada di katalog ini. */
+  const kurangKatalog = useMemo(() => {
+    if (!rencanaKatalog) return null;
+    const subkategori =
+      rencanaKatalog.subcategoriesForExistingCategories.reduce(
+        (total, row) => total + row.subcategories.length,
+        0,
+      ) +
+      rencanaKatalog.categories.reduce((total, row) => total + row.subcategories.length, 0);
+    const nama = [
+      ...rencanaKatalog.categories.map((row) => row.name),
+      ...rencanaKatalog.subcategoriesForExistingCategories.map((row) => row.name),
+    ];
+    return {
+      kosong: productCatalogPlanIsEmpty(rencanaKatalog),
+      kategori: rencanaKatalog.categories.length,
+      subkategori,
+      nama,
+    };
+  }, [rencanaKatalog]);
   /** Kode SKU yang dipakai lebih dari satu kategori — cukup diberitahukan. */
   const kodeBentrok = useMemo(() => duplicateCategoryCodes(categories), [categories]);
   /** Nama kategori nonaktif, untuk menandai produk yang masih memakainya. */
@@ -518,7 +608,7 @@ export function ProductsPage() {
   );
 
   function gagalKategori(cause: unknown) {
-    setError(cause instanceof Error ? cause.message : String(cause));
+    setError(cause);
     setNotice(null);
   }
 
@@ -546,6 +636,30 @@ export function ProductsPage() {
       );
     } catch (cause) {
       gagalKategori(cause);
+    } finally {
+      setKategoriBusy(false);
+    }
+  }
+
+  /**
+   * Tombol “Sesuaikan dengan kategori bisnis”: meminta master kategori &
+   * subkategori produk yang relevan ditambahkan kalau belum ada. Servernya hanya
+   * menambah — tidak mengganti nama, menonaktifkan, atau menghapus apa pun — dan
+   * balikannya dipakai apa adanya sebagai pesan (termasuk “tidak ada yang perlu
+   * ditambahkan” saat katalognya sudah sesuai).
+   */
+  async function submitSinkronKategoriBisnis() {
+    if (kategoriBusy) return;
+    setKategoriBusy(true);
+    setError(null);
+    setNotice(null);
+    setSinkronError(null);
+    setSinkronPesan(null);
+    try {
+      const hasil = await syncProductCategories();
+      setSinkronPesan(hasil.sentence);
+    } catch (cause) {
+      setSinkronError(cause);
     } finally {
       setKategoriBusy(false);
     }
@@ -614,10 +728,145 @@ export function ProductsPage() {
     try {
       const hasil = await removeCategory(kategori.id);
       setKategoriHapus(null);
+      if (subTerbuka === kategori.id) setSubTerbuka(null);
+      const subCatatan =
+        hasil.removedSubcategories > 0
+          ? ` ${hasil.removedSubcategories} subkategori di bawahnya ikut terhapus.`
+          : "";
       setNotice(
         hasil.detachedProducts === 0
-          ? `Kategori ${hasil.name} dihapus — tidak ada produk yang memakainya.`
-          : `Kategori ${hasil.name} dihapus; ${hasil.detachedProducts} produk menjadi “Tanpa kategori”. Produknya tetap ada dan SKU-nya tidak diubah.`,
+          ? `Kategori ${hasil.name} dihapus — tidak ada produk yang memakainya.${subCatatan}`
+          : `Kategori ${hasil.name} dihapus; ${hasil.detachedProducts} produk menjadi “Tanpa kategori”. Produknya tetap ada dan SKU-nya tidak diubah.${subCatatan}`,
+      );
+    } catch (cause) {
+      gagalKategori(cause);
+    } finally {
+      setKategoriBusy(false);
+    }
+  }
+
+  /** Subkategori milik satu kategori — urut seperti dibaca store. */
+  function subkategoriDari(categoryId: string): StoreSubcategory[] {
+    return subcategories.filter((row) => row.categoryId === categoryId);
+  }
+
+  /** Id kategori dari namanya (halaman memakai nama; store memakai id). */
+  function kategoriIdDari(nama: string): string | undefined {
+    const wanted = nama.trim();
+    return wanted.length === 0
+      ? undefined
+      : categories.find((row) => row.name === wanted)?.id;
+  }
+
+  /** Benar kalau subkategori ini ada tapi sedang nonaktif — hanya ditandai, tetap terbaca. */
+  function subkategoriNonaktif(categoryId: string | undefined, nama: string): boolean {
+    if (!categoryId) return false;
+    return subcategories.some(
+      (row) =>
+        row.categoryId === categoryId &&
+        !subcategoryIsActive(row) &&
+        subcategoryNameKey(row.name) === subcategoryNameKey(nama),
+    );
+  }
+
+  /**
+   * Subkategori dibuat **di bawah** kategori (`subcategories.create`): panel-nya
+   * dibuka per kategori, dan aturan namanya sama dengan kategori (2–40 karakter,
+   * tanpa kembar di kategori itu, “Tanpa kategori” terlarang).
+   */
+  async function submitSubkategoriBaru(kategori: StoreCategory) {
+    if (kategoriBusy || !subBaru || subBaru.categoryId !== kategori.id) return;
+    const sekategori = subkategoriDari(kategori.id);
+    const keputusan = validateSubcategoryName(
+      { name: subBaru.name },
+      { existingNames: sekategori.map((row) => row.name), count: sekategori.length },
+    );
+    if (!keputusan.ok) {
+      gagalKategori(new Error(keputusan.reason));
+      return;
+    }
+
+    setKategoriBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const dibuat = await createSubcategory({
+        categoryId: kategori.id,
+        name: keputusan.value.name,
+      });
+      setSubBaru(null);
+      setNotice(
+        `Subkategori ${dibuat.name} ditambahkan di bawah kategori ${kategori.name} dan kini bisa dipilih di form produk. SKU produk tidak ikut berubah.`,
+      );
+    } catch (cause) {
+      gagalKategori(cause);
+    } finally {
+      setKategoriBusy(false);
+    }
+  }
+
+  async function submitSubkategoriUbah(sub: StoreSubcategory) {
+    if (kategoriBusy || !subUbah || subUbah.id !== sub.id) return;
+    const sekategori = subkategoriDari(sub.categoryId).filter((row) => row.id !== sub.id);
+    const keputusan = validateSubcategoryName(
+      { name: subUbah.name },
+      { existingNames: sekategori.map((row) => row.name) },
+    );
+    if (!keputusan.ok) {
+      gagalKategori(new Error(keputusan.reason));
+      return;
+    }
+
+    setKategoriBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const hasil = await renameSubcategory({
+        subcategoryId: sub.id,
+        name: keputusan.value.name,
+      });
+      setSubUbah(null);
+      setNotice(
+        `Subkategori ${hasil.previousName} menjadi ${hasil.name}. Produk yang memakainya ikut membaca nama barunya, dan SKU tidak berubah.`,
+      );
+    } catch (cause) {
+      gagalKategori(cause);
+    } finally {
+      setKategoriBusy(false);
+    }
+  }
+
+  async function toggleSubkategoriAktif(sub: StoreSubcategory) {
+    if (kategoriBusy) return;
+    setKategoriBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await setSubcategoryActive(sub.id, !sub.active);
+      setNotice(
+        sub.active
+          ? `Subkategori ${sub.name} dinonaktifkan — tidak bisa dipilih produk baru, tetapi ${sub.productCount} produk yang sudah memakainya tetap menyimpannya.`
+          : `Subkategori ${sub.name} diaktifkan kembali dan bisa dipilih produk baru.`,
+      );
+    } catch (cause) {
+      gagalKategori(cause);
+    } finally {
+      setKategoriBusy(false);
+    }
+  }
+
+  async function submitSubkategoriHapus(sub: StoreSubcategory) {
+    if (kategoriBusy) return;
+    setKategoriBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const hasil = await removeSubcategory(sub.id);
+      setSubHapus(null);
+      setNotice(
+        hasil.detachedProducts === 0
+          ? `Subkategori ${hasil.name} dihapus — tidak ada produk yang memakainya.`
+          : `Subkategori ${hasil.name} dihapus; ${hasil.detachedProducts} produk kehilangan subkategorinya, tetapi tetap di kategorinya dan SKU-nya tidak diubah.`,
       );
     } catch (cause) {
       gagalKategori(cause);
@@ -681,7 +930,7 @@ export function ProductsPage() {
         setError(rejected.join(" | "));
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(cause);
     } finally {
       setPreparingImages(false);
     }
@@ -719,6 +968,7 @@ export function ProductsPage() {
         price: Math.round(Number(newProduct.price) || 0),
         cost: Math.round(Number(newProduct.cost) || 0),
         category: newProduct.category.trim() || undefined,
+        subcategory: newProduct.subcategory.trim() || undefined,
         unit: newProduct.unit.trim() || "PCS",
         openingStock: stock,
       });
@@ -752,7 +1002,7 @@ export function ProductsPage() {
         );
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(cause);
     } finally {
       setCreating(false);
     }
@@ -815,7 +1065,7 @@ export function ProductsPage() {
         setError(rejected.join(" | "));
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(cause);
     } finally {
       setUploadingImage(false);
     }
@@ -831,7 +1081,7 @@ export function ProductsPage() {
       const remaining = (product.images ?? []).filter((image) => image.id !== imageId).length;
       setNotice(`Gambar ${product.name} dihapus — kini ${productImageSlots(remaining)}.`);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(cause);
     } finally {
       setRemovingImage(null);
     }
@@ -863,7 +1113,7 @@ export function ProductsPage() {
       setAdjusting(null);
       setAdjustDraft({ quantity: "", note: "" });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(cause);
     } finally {
       setAdjustingStock(false);
     }
@@ -935,7 +1185,7 @@ export function ProductsPage() {
       await setModifiers({ productId, modifiers: groups });
       closeModifierEditor();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(cause);
     } finally {
       setSavingModifiers(false);
     }
@@ -999,14 +1249,32 @@ export function ProductsPage() {
       // sendiri; SKU sebelum & sesudah datang dari store/server, bukan dihitung
       // ulang di halaman ini.
       const kategoriBaru = draft.category.trim();
-      if (kategoriBaru !== kategoriDraft(product.category)) {
-        const label = kategoriBaru.length > 0 ? `“${kategoriBaru}”` : "Tanpa kategori";
-        const hasil = await setCategory({ productId, category: kategoriBaru });
-        pesan.push(
-          hasil.sku === hasil.previousSku
-            ? `Kategori ${identitas.name} kini ${label}; SKU ${hasil.sku} diketik sendiri, jadi tidak ikut berubah.`
-            : `Kategori ${identitas.name} kini ${label} — SKU ikut menyesuaikan dari ${hasil.previousSku} menjadi ${hasil.sku}.`,
-        );
+      const subkategoriBaru = draft.subcategory.trim();
+      const kategoriBerubah = kategoriBaru !== kategoriDraft(product.category);
+      const subkategoriBerubah = (product.subcategory ?? "") !== subkategoriBaru;
+      if (kategoriBerubah || subkategoriBerubah) {
+        // Satu panggilan untuk penempatan utuh: kategori (yang menentukan SKU) dan
+        // subkategori (label katalog) tidak pernah tersimpan setengah-setengah.
+        const hasil = await setCategory({
+          productId,
+          category: kategoriBaru,
+          subcategory: subkategoriBaru || undefined,
+        });
+        if (kategoriBerubah) {
+          const label = kategoriBaru.length > 0 ? `“${kategoriBaru}”` : "Tanpa kategori";
+          pesan.push(
+            hasil.sku === hasil.previousSku
+              ? `Kategori ${identitas.name} kini ${label}; SKU ${hasil.sku} diketik sendiri, jadi tidak ikut berubah.`
+              : `Kategori ${identitas.name} kini ${label} — SKU ikut menyesuaikan dari ${hasil.previousSku} menjadi ${hasil.sku}.`,
+          );
+        }
+        if (subkategoriBerubah) {
+          pesan.push(
+            hasil.subcategory
+              ? `Subkategori ${identitas.name} kini “${hasil.subcategory}”.`
+              : `Subkategori ${identitas.name} dilepas.`,
+          );
+        }
       }
 
       closeEditor();
@@ -1014,7 +1282,7 @@ export function ProductsPage() {
         setNotice(`${pesan.join(" ")} Perubahan tersimpan.`);
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(cause);
     } finally {
       setSaving(false);
     }
@@ -1039,7 +1307,7 @@ export function ProductsPage() {
       // “Atur harga” produk nonaktif hanya menyesatkan (harga tidak bisa dijual).
       if (!aktifBaru && editing === product.id) closeEditor();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(cause);
     } finally {
       setTogglingStatus(null);
     }
@@ -1060,7 +1328,7 @@ export function ProductsPage() {
       setPagarHapus(await checkProductDeletion(product.id));
     } catch (cause) {
       setHapusProduk(null);
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(cause);
     } finally {
       setMemeriksaHapus(false);
     }
@@ -1087,7 +1355,7 @@ export function ProductsPage() {
         `Produk ${hasil.name} (${hasil.sku}) dihapus — stok nol dan riwayatnya memang kosong, jadi tidak ada data lain yang ikut hilang.`,
       );
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(cause);
     } finally {
       setMenghapusProduk(false);
     }
@@ -1227,6 +1495,9 @@ export function ProductsPage() {
                     setNewProduct((current) => ({
                       ...current,
                       category,
+                      // Subkategori hanya berlaku di dalam kategori; pindah
+                      // kategori mengosongkannya supaya labelnya tidak menggantung.
+                      subcategory: category === current.category ? current.subcategory : "",
                       // SKU dari tombol mengikuti kategori baru; SKU yang diketik
                       // pemilik toko dibiarkan apa adanya.
                       sku: skuAuto ? saranSkuKategori(category) : current.sku,
@@ -1251,6 +1522,44 @@ export function ProductsPage() {
                   {kategoriAktif < categories.length
                     ? `${categories.length - kategoriAktif} kategori nonaktif tidak ditawarkan di sini — aktifkan dulu di kartu “Kategori produk”.`
                     : "Kategori diatur di kartu “Kategori produk” di bawah daftar."}
+                </span>
+              </label>
+              <label className="space-y-1 text-xs text-muted-foreground">
+                Subkategori (opsional)
+                <select
+                  className="w-full rounded border border-border bg-background px-2 py-2 text-sm text-foreground disabled:opacity-60"
+                  value={newProduct.subcategory}
+                  aria-label="Subkategori produk baru"
+                  disabled={newProduct.category.trim().length === 0}
+                  onChange={(e) =>
+                    setNewProduct((current) => ({
+                      ...current,
+                      subcategory: e.target.value,
+                    }))
+                  }
+                >
+                  <option value="">Tanpa subkategori</option>
+                  {/**
+                    Subkategori dipilih dari daftar yang dibuat **di bawah** kategori
+                    itu — bukan teks bebas. Yang sedang terpilih tetap ditampilkan
+                    walau subkategorinya baru dinonaktifkan di tempat lain.
+                  */}
+                  {selectableSubcategoryNames(
+                    subcategories,
+                    kategoriIdDari(newProduct.category),
+                    newProduct.subcategory,
+                  ).map((nama) => (
+                    <option key={nama} value={nama}>
+                      {nama}
+                      {subkategoriNonaktif(kategoriIdDari(newProduct.category), nama)
+                        ? " (nonaktif)"
+                        : ""}
+                    </option>
+                  ))}
+                </select>
+                <span className="block text-[11px] font-normal text-muted-foreground">
+                  Dibuat di bawah kategorinya di kartu “Kategori produk”. Ikut dikirim ke API
+                  &amp; webhook, tetapi tidak mengubah SKU maupun tab kasir.
                 </span>
               </label>
               <label className="space-y-1 text-xs text-muted-foreground">
@@ -1364,16 +1673,116 @@ export function ProductsPage() {
               </CardTitle>
               <CardDescription className="mt-1">
                 {canManageCategories
-                  ? `Kategori menentukan kode di tengah SKU (${PRODUCT_SKU_PREFIX}-<kategori>-<nomor>) dan susunan tab di kasir. Kategori nonaktif tidak bisa dipakai produk baru, tetapi produk yang sudah memakainya tetap dijual.`
+                  ? `Kategori menentukan kode di tengah SKU (${PRODUCT_SKU_PREFIX}-<kategori>-<nomor>) dan susunan tab di kasir. Subkategori dibuat di bawah kategorinya (tombol “atur” di baris kategori) dan ikut dikirim ke API & webhook tanpa mengubah SKU. Kategori nonaktif tidak bisa dipakai produk baru, tetapi produk yang sudah memakainya tetap dijual.`
                   : "Kategori menentukan kode SKU dan susunan tab di kasir. Menambah, mengubah, menonaktifkan, atau menghapusnya butuh peran manajer/pemilik."}
               </CardDescription>
             </div>
             <Badge variant="outline" className="shrink-0">
-              {categories.length} kategori · {kategoriAktif} aktif
+              {categories.length} kategori · {kategoriAktif} aktif · {subcategories.length}{" "}
+              subkategori
             </Badge>
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
+          {/*
+            Master kategori & subkategori produk mengikuti kategori bisnis yang
+            dipilih pemilik (mis. Kafe → Kopi, Non-Kopi, Makanan Ringan, Bahan
+            Baku). Untuk workspace yang sudah berdiri sebelum presets ada — atau
+            yang katalognya sempat dirapikan lalu ingin melengkapinya lagi —
+            jalannya adalah tombol ini; sifatnya hanya **menambah**.
+          */}
+          {canManageCategories && (
+            <div
+              data-testid="kategori-master-kurang"
+              data-state={
+                !businessCategory ? "tanpa-bisnis" : kurangKatalog?.kosong ? "sesuai" : "kurang"
+              }
+              className={cn(
+                "flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2",
+                !businessCategory || !kurangKatalog?.kosong
+                  ? "border-accent/40 bg-accent/10"
+                  : "border-border/60 bg-secondary/30",
+              )}
+            >
+              <div className="max-w-xl space-y-1">
+                {businessCategory ? (
+                  <p className="text-xs text-foreground">
+                    Master katalog bisnis{" "}
+                    <strong>
+                      {businessCategory.categoryLabel} — {businessCategory.subcategoryLabel}
+                    </strong>
+                    {kurangKatalog && !kurangKatalog.kosong ? (
+                      <>
+                        {`: ${kurangKatalog.kategori} kategori`}
+                        {kurangKatalog.subkategori > 0
+                          ? ` & ${kurangKatalog.subkategori} subkategori`
+                          : ""}
+                        {" belum ada di workspace ini"}
+                        {kurangKatalog.nama.length > 0
+                          ? ` (${kurangKatalog.nama.slice(0, 6).join(", ")}${
+                              kurangKatalog.nama.length > 6 ? ", …" : ""
+                            })`
+                          : ""}
+                        {". Tambahkan dengan tombol di samping — kategori yang sudah ada tidak diubah atau dihapus."}
+                      </>
+                    ) : (
+                      ": seluruh kategori & subkategori bawaannya sudah ada di katalog ini. Menekan tombolnya tetap aman (hanya menambah), dan berguna kalau ada yang terhapus."
+                    )}
+                  </p>
+                ) : (
+                  <>
+                    <p className="text-xs font-medium text-foreground">
+                      Master kategori & subkategori bisnis belum bisa disemai
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Workspace ini <strong>belum memilih kategori utama bisnis</strong>, jadi
+                      katalognya masih memakai daftar bawaan lama
+                      {" ("}
+                      <em>Kopi, Makanan, Snack, Minuman</em>
+                      {") "}
+                      dan bukan master yang sesuai bisnis Anda. Pilih dulu di halaman Profil —
+                      pilihannya dikunci permanen dan katalog produknya ikut disemai saat itu.
+                    </p>
+                  </>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {!businessCategory && (
+                  <Button asChild size="sm" variant="accent">
+                    <Link to="/app/profile" data-testid="kategori-pilih-bisnis">
+                      Pilih kategori bisnis
+                    </Link>
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  variant={businessCategory ? "accent" : "outline"}
+                  disabled={kategoriBusy || !businessCategory}
+                  data-testid="kategori-sinkron-bisnis"
+                  onClick={() => void submitSinkronKategoriBisnis()}
+                >
+                  <Sparkles className="size-4" />
+                  {kurangKatalog && !kurangKatalog.kosong
+                    ? "Tambahkan master kategori"
+                    : "Sesuaikan dengan kategori bisnis"}
+                </Button>
+              </div>
+            </div>
+          )}
+          {sinkronPesan && (
+            <p
+              data-testid="kategori-sinkron-pesan"
+              className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-foreground"
+            >
+              {sinkronPesan}
+            </p>
+          )}
+          <ErrorNotice
+            error={sinkronError}
+            testId="kategori-sinkron-galat"
+            title="Penyelarasan kategori ditolak"
+          />
+
           {kodeBentrok.length > 0 && (
             <p className="rounded-lg border border-accent/40 bg-accent/10 px-3 py-2 text-xs text-accent">
               {kodeBentrok
@@ -1404,8 +1813,11 @@ export function ProductsPage() {
                   {categories.map((c) => {
                     const sedangUbah = kategoriUbah?.id === c.id;
                     const sedangHapus = kategoriHapus === c.id;
+                    const subkategori = subkategoriDari(c.id);
+                    const subTerbukaIni = subTerbuka === c.id;
                     return (
-                      <tr key={c.id} className="border-t border-border/60">
+                      <Fragment key={c.id}>
+                      <tr className="border-t border-border/60">
                         <td className="px-2 py-2">
                           {sedangUbah ? (
                             <Input
@@ -1415,7 +1827,31 @@ export function ProductsPage() {
                               onChange={(e) => setKategoriUbah({ id: c.id, name: e.target.value })}
                             />
                           ) : (
-                            c.name
+                            <div className="space-y-0.5">
+                              <div>{c.name}</div>
+                              {canManageCategories && (
+                                /**
+                                  Subkategori dibuat **di bawah** kategori, jadi
+                                  pengelolanya ada di sini — bukan di form produk.
+                                */
+                                <button
+                                  type="button"
+                                  className="text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
+                                  aria-label={`Atur subkategori kategori ${c.name}`}
+                                  aria-expanded={subTerbukaIni}
+                                  onClick={() => {
+                                    setSubTerbuka(subTerbukaIni ? null : c.id);
+                                    setSubBaru(null);
+                                    setSubUbah(null);
+                                    setSubHapus(null);
+                                  }}
+                                >
+                                  {subkategori.length === 0
+                                    ? "Belum ada subkategori · atur"
+                                    : `${subkategori.length} subkategori · atur`}
+                                </button>
+                              )}
+                            </div>
                           )}
                         </td>
                         <td className="px-2 py-2 font-mono text-xs text-muted-foreground">
@@ -1432,7 +1868,11 @@ export function ProductsPage() {
                             {sedangHapus ? (
                               <div className="ml-auto flex max-w-md flex-col items-end gap-2">
                                 <span className="text-xs text-muted-foreground">
-                                  {deleteCategorySentence(c.name, c.productCount)}
+                                  {deleteCategorySentence(
+                                    c.name,
+                                    c.productCount,
+                                    subkategori.length,
+                                  )}
                                 </span>
                                 <div className="flex items-center gap-2">
                                   <Button
@@ -1526,6 +1966,199 @@ export function ProductsPage() {
                           </td>
                         )}
                       </tr>
+                      {canManageCategories && subTerbukaIni && (
+                        <tr className="border-t border-border/60 bg-secondary/20">
+                          <td colSpan={5} className="px-2 py-3">
+                            <div className="space-y-2">
+                              <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
+                                <Layers className="size-3.5 text-primary" />
+                                Subkategori di bawah {c.name}
+                                <span className="font-normal text-muted-foreground">
+                                  — ikut dikirim ke API &amp; webhook; SKU dan tab kasir tidak
+                                  berubah.
+                                </span>
+                              </div>
+
+                              {subkategori.length === 0 ? (
+                                <p className="text-xs text-muted-foreground">
+                                  Belum ada subkategori. Subkategori selalu dibuat di bawah
+                                  sebuah kategori — inilah tempatnya.
+                                </p>
+                              ) : (
+                                <ul className="space-y-1">
+                                  {subkategori.map((sub) => {
+                                    const sedangUbahSub = subUbah?.id === sub.id;
+                                    const sedangHapusSub = subHapus === sub.id;
+                                    return (
+                                      <li
+                                        key={sub.id}
+                                        className="flex flex-wrap items-center gap-2 rounded border border-border/60 bg-background px-2 py-1.5 text-xs"
+                                      >
+                                        {sedangUbahSub ? (
+                                          <Input
+                                            className="h-7 w-48"
+                                            value={subUbah.name}
+                                            aria-label={`Nama baru subkategori ${sub.name}`}
+                                            onChange={(e) =>
+                                              setSubUbah({ id: sub.id, name: e.target.value })
+                                            }
+                                          />
+                                        ) : (
+                                          <span className="font-medium">{sub.name}</span>
+                                        )}
+                                        <Badge variant={sub.active ? "default" : "outline"}>
+                                          {sub.active ? "aktif" : "nonaktif"}
+                                        </Badge>
+                                        <span className="text-muted-foreground">
+                                          {sub.productCount} produk
+                                        </span>
+                                        <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
+                                          {sedangHapusSub ? (
+                                            <>
+                                              <span className="text-muted-foreground">
+                                                {deleteSubcategorySentence(
+                                                  sub.name,
+                                                  sub.productCount,
+                                                )}
+                                              </span>
+                                              <Button
+                                                type="button"
+                                                size="sm"
+                                                variant="outline"
+                                                className="border-destructive/50 text-destructive hover:bg-destructive/10"
+                                                disabled={kategoriBusy}
+                                                aria-label={`Konfirmasi hapus subkategori ${sub.name}`}
+                                                onClick={() => void submitSubkategoriHapus(sub)}
+                                              >
+                                                <Trash2 className="size-3.5" /> Ya, hapus
+                                              </Button>
+                                              <Button
+                                                type="button"
+                                                size="sm"
+                                                variant="ghost"
+                                                disabled={kategoriBusy}
+                                                aria-label={`Batal hapus subkategori ${sub.name}`}
+                                                onClick={() => setSubHapus(null)}
+                                              >
+                                                Batal
+                                              </Button>
+                                            </>
+                                          ) : sedangUbahSub ? (
+                                            <>
+                                              <Button
+                                                type="button"
+                                                size="sm"
+                                                disabled={
+                                                  kategoriBusy ||
+                                                  subUbah.name.trim().length < 2 ||
+                                                  subUbah.name.trim() === sub.name
+                                                }
+                                                aria-label={`Simpan nama subkategori ${sub.name}`}
+                                                onClick={() => void submitSubkategoriUbah(sub)}
+                                              >
+                                                <Save className="size-3.5" /> Simpan
+                                              </Button>
+                                              <Button
+                                                type="button"
+                                                size="sm"
+                                                variant="ghost"
+                                                disabled={kategoriBusy}
+                                                aria-label={`Batal ubah subkategori ${sub.name}`}
+                                                onClick={() => setSubUbah(null)}
+                                              >
+                                                <X className="size-3.5" />
+                                              </Button>
+                                            </>
+                                          ) : (
+                                            <>
+                                              <Button
+                                                type="button"
+                                                size="sm"
+                                                variant="ghost"
+                                                disabled={kategoriBusy}
+                                                aria-label={`Ubah nama subkategori ${sub.name}`}
+                                                onClick={() => {
+                                                  setSubUbah({ id: sub.id, name: sub.name });
+                                                  setSubHapus(null);
+                                                }}
+                                              >
+                                                Ubah nama
+                                              </Button>
+                                              <Button
+                                                type="button"
+                                                size="sm"
+                                                variant="ghost"
+                                                disabled={kategoriBusy}
+                                                aria-label={
+                                                  sub.active
+                                                    ? `Nonaktifkan subkategori ${sub.name}`
+                                                    : `Aktifkan subkategori ${sub.name}`
+                                                }
+                                                onClick={() => void toggleSubkategoriAktif(sub)}
+                                              >
+                                                {sub.active ? "Nonaktifkan" : "Aktifkan"}
+                                              </Button>
+                                              <Button
+                                                type="button"
+                                                size="sm"
+                                                variant="ghost"
+                                                className="text-destructive hover:text-destructive"
+                                                disabled={kategoriBusy}
+                                                aria-label={`Hapus subkategori ${sub.name}`}
+                                                onClick={() => {
+                                                  setSubHapus(sub.id);
+                                                  setSubUbah(null);
+                                                }}
+                                              >
+                                                Hapus
+                                              </Button>
+                                            </>
+                                          )}
+                                        </div>
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              )}
+
+                              <div className="flex flex-wrap items-end gap-2 rounded-lg border border-border/60 bg-background p-2">
+                                <label className="text-xs text-muted-foreground">
+                                  Tambah subkategori di bawah {c.name}
+                                  <Input
+                                    className="mt-1 w-56"
+                                    value={subBaru?.categoryId === c.id ? subBaru.name : ""}
+                                    placeholder="Semen Portland"
+                                    aria-label={`Nama subkategori baru di bawah ${c.name}`}
+                                    onChange={(e) =>
+                                      setSubBaru({ categoryId: c.id, name: e.target.value })
+                                    }
+                                  />
+                                </label>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  className="ml-auto"
+                                  disabled={
+                                    kategoriBusy ||
+                                    subBaru?.categoryId !== c.id ||
+                                    (subBaru?.name.trim().length ?? 0) < 2
+                                  }
+                                  aria-label={`Simpan subkategori baru di bawah ${c.name}`}
+                                  onClick={() => void submitSubkategoriBaru(c)}
+                                >
+                                  <Plus className="size-4" /> Simpan subkategori
+                                </Button>
+                              </div>
+                              <p className="text-[11px] text-muted-foreground">
+                                Nama “Tanpa kategori” tidak bisa dipakai. Subkategori nonaktif
+                                tidak ditawarkan ke produk baru, tetapi produk yang sudah
+                                memakainya tetap menyimpannya.
+                              </p>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
                     );
                   })}
                 </tbody>
@@ -1605,14 +2238,11 @@ export function ProductsPage() {
         </Card>
       )}
 
-      {error && (
-        <p
-          role="alert"
-          className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive"
-        >
-          {error}
-        </p>
-      )}
+      <ErrorNotice
+        error={error}
+        testId="produk-galat"
+        hint="Produk tidak berubah selama permintaan ditolak; perbaiki sebabnya lalu simpan lagi."
+      />
       {notice && (
         <p className="rounded-lg border border-primary/30 bg-primary/5 px-4 py-3 text-sm text-primary">
           {notice}
@@ -1664,6 +2294,7 @@ export function ProductsPage() {
                         {p.name}
                         <div className="text-xs font-normal text-muted-foreground">
                           {p.category}
+                          {p.subcategory ? ` › ${p.subcategory}` : ""}
                           {/** Produk di kategori nonaktif tetap dijual; tandanya cuma di sini. */}
                           {kategoriNonaktif.has(categoryNameKey(p.category)) && (
                             <Badge variant="outline" className="ml-2 align-middle text-[10px]">
@@ -2015,6 +2646,36 @@ export function ProductsPage() {
                                   <option key={nama} value={nama}>
                                     {nama}
                                     {kategoriNonaktif.has(categoryNameKey(nama))
+                                      ? " (nonaktif)"
+                                      : ""}
+                                  </option>
+                                ))}
+                              </select>
+                              <Label htmlFor={`subcategory-${p.id}`}>Subkategori (opsional)</Label>
+                              <select
+                                id={`subcategory-${p.id}`}
+                                className="w-full rounded border border-border bg-background px-2 py-2 text-sm text-foreground disabled:opacity-60"
+                                value={draft.subcategory}
+                                disabled={draft.category.trim().length === 0}
+                                onChange={(e) =>
+                                  setDraft({ ...draft, subcategory: e.target.value })
+                                }
+                              >
+                                <option value="">Tanpa subkategori</option>
+                                {/**
+                                  Hanya subkategori **di bawah kategori ini** yang
+                                  ditawarkan; yang sedang dipakai produk tetap tampil
+                                  walau sudah nonaktif — kalau tidak, membuka panel
+                                  ini akan tampak seperti memindahkan produknya.
+                                */}
+                                {selectableSubcategoryNames(
+                                  subcategories,
+                                  kategoriIdDari(draft.category),
+                                  draft.subcategory,
+                                ).map((nama) => (
+                                  <option key={nama} value={nama}>
+                                    {nama}
+                                    {subkategoriNonaktif(kategoriIdDari(draft.category), nama)
                                       ? " (nonaktif)"
                                       : ""}
                                   </option>

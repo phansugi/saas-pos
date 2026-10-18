@@ -46,6 +46,7 @@ import { getPlan, VERTICAL_LABELS, type FeatureKey } from "@/lib/billing";
 import { useSession } from "@/lib/session";
 import { useStore } from "@/lib/store";
 import { moduleFeatureEnabled } from "@/lib/store/modules";
+import { businessUsesTableService } from "@/lib/businessCategory";
 import { useCan } from "@/lib/usePermission";
 
 interface NavItem {
@@ -72,6 +73,14 @@ interface NavItem {
    * dirapikan). Server mengizinkan keduanya, jadi menunya tidak boleh hilang.
    */
   showWithPendingData?: "receivables" | "members";
+  /**
+   * Menu ini hanya masuk akal untuk bisnis berlayanan meja (denah meja, antrean
+   * dapur). Modul F&B boleh dinyalakan siapa saja — dan paket Enterprise memuat
+   * semuanya — jadi kategorinya yang menentukan: toko bangunan tidak perlu
+   * menu “Dapur & Meja”. Aturannya `businessUsesTableService`, sama dengan
+   * gerbang di halaman Kasir.
+   */
+  requiresTableService?: boolean;
 }
 
 const nav: NavItem[] = [
@@ -86,6 +95,7 @@ const nav: NavItem[] = [
     end: false,
     permission: "kds.manage",
     feature: "pos.kds",
+    requiresTableService: true,
   },
   {
     // Shift & kas (`shift.manage`) juga berdiri sendiri. Perlu diketahui
@@ -235,7 +245,8 @@ export function AppLayout() {
   // `error` adalah kegagalan menyambungkan workspace ke server. Ia ditampilkan
   // di sini, bukan di satu halaman saja: tanpa itu setiap aksi di semua halaman
   // hanya menjawab “Tenant belum siap” tanpa pernah menyebut sebabnya.
-  const { source, modules, arSummary, members, error, logo } = useStore();
+  const { source, modules, arSummary, members, error, logo, platformDeveloper } =
+    useStore();
   const navigate = useNavigate();
   const can = useCan();
   const tenant = session?.tenant ?? null;
@@ -244,12 +255,22 @@ export function AppLayout() {
   // showing a cashier a menu they cannot open is worse UX than hiding it. Menu
   // modul (Dapur & Meja) hanya muncul saat modul pemiliknya benar-benar hidup.
   const planKey = session?.tenant?.planKey ?? "starter";
+  /*
+    Kategori utama yang sudah dikunci pemilik ikut menyaring menu modul F&B:
+    modul yang dinyalakan sendiri (atau ikut paket Enterprise) tidak boleh
+    memunculkan menu dapur/meja ke toko yang jelas bukan layanan meja.
+  */
+  const tableServiceFitsBusiness = businessUsesTableService({
+    category: tenant?.businessCategory?.category,
+    subcategory: tenant?.businessCategory?.subcategory,
+  });
   const visibleNav = useMemo(
     () =>
       nav.filter((item) => {
         // Menu tanpa izin (Profil) tampil untuk semua anggota; sisanya mengikuti
         // izin peran — halaman yang dibuka tetap memeriksa hal yang sama.
         if (item.permission && !can(item.permission)) return false;
+        if (item.requiresTableService && !tableServiceFitsBusiness) return false;
         if (!item.feature) return true;
         if (moduleFeatureEnabled(planKey, modules.activeVerticals, item.feature)) {
           return true;
@@ -259,7 +280,7 @@ export function AppLayout() {
           ? arSummary.openCount > 0
           : members.length > 0;
       }),
-    [can, modules.activeVerticals, planKey, arSummary.openCount, members.length],
+    [can, modules.activeVerticals, planKey, arSummary.openCount, members.length, tableServiceFitsBusiness],
   );
 
   const trialDaysLeft = useMemo(() => {
@@ -410,6 +431,34 @@ export function AppLayout() {
               {item.label}
             </NavLink>
           ))}
+
+          {/*
+            Jalan masuk backstage hanya untuk **akun platform developer** —
+            pemilik `/platform`, di luar RBAC tenant. Tanpa tautan ini halaman itu
+            tidak punya pintu sama sekali (harus diketik manual), dan itulah yang
+            membuatnya “tidak ketemu”. Nilai `platformDeveloper` datang dari baris
+            pengguna di server; halaman tujuannya tetap memeriksa identitas & peran
+            sendiri, jadi ini menu, bukan gerbang.
+          */}
+          {platformDeveloper && (
+            <NavLink
+              to="/platform"
+              onClick={closeMenu}
+              data-testid="sidebar-backstage"
+              title="Backstage pengembang platform: kategori bisnis, pendampingan tenant, dan jejak audit."
+              className={({ isActive }) =>
+                cn(
+                  "relative mt-2 flex items-center gap-3 rounded-md border border-sidebar-border/70 px-3 py-2 text-sm font-medium transition-colors",
+                  isActive
+                    ? "bg-sidebar-active/15 text-sidebar-active"
+                    : "text-sidebar-muted hover:bg-sidebar-active/10 hover:text-sidebar-foreground",
+                )
+              }
+            >
+              <ShieldCheck className="size-4" />
+              Backstage platform
+            </NavLink>
+          )}
         </nav>
 
         <div className="mt-auto rounded-lg border border-sidebar-border bg-sidebar-deep/70 p-3">

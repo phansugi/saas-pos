@@ -66,6 +66,11 @@ import type {
 } from "@/lib/shift";
 import type { ReceiptSetting } from "@/lib/struk";
 import type { TaxSetting } from "@/lib/tax";
+import type {
+  BusinessCategoryChoice,
+  BusinessCategoryOption,
+  LockedBusinessCategory,
+} from "@/lib/businessCategory";
 import type { StoreModules } from "./modules";
 
 export type PaymentLabel = "Tunai" | "QRIS" | "Kartu" | "Transfer";
@@ -192,6 +197,43 @@ export interface UpdatedTenantProfile extends StoreTenantProfile {
 }
 
 /**
+ * Hasil penyimpanan kategori utama bisnis. `businessCategory` adalah nilai yang
+ * **tersimpan** (bukan draft): di mode demo hasil aturan murni, di mode Convex
+ * balikan `tenants.setBusinessCategory`. `changed: false` berarti pilihan yang
+ * sama dikirim ulang dan tidak ada yang ditulis.
+ */
+export interface UpdatedBusinessCategory {
+  businessCategory: LockedBusinessCategory;
+  changed: boolean;
+  sentence: string;
+  /**
+   * Apa yang ikut berubah di **katalog produk** saat pilihan itu dikunci —
+   * master kategori & subkategori produk yang dibuat mengikuti kategori bisnisnya
+   * (mis. Kafe → Kopi, Non-Kopi, Makanan Ringan, Bahan Baku beserta subkategori).
+   * Tidak diisi di mode demo lama/balikan yang belum memuatnya.
+   */
+  productCatalogSentence?: string;
+}
+
+/**
+ * Hasil penyamaan katalog produk dengan kategori bisnis workspace
+ * (`syncProductCategories`). Hanya **menambah**: kategori yang sudah ada tidak
+ * diganti namanya, dinonaktifkan, atau dihapus, dan produk tidak tersentuh.
+ */
+export interface SyncedProductCategories {
+  /** `false` = tidak ada yang perlu ditambahkan (katalog sudah sesuai). */
+  changed: boolean;
+  businessCategoryLabel: string;
+  /** Nama kategori produk yang baru dibuat, urut sesuai preset. */
+  createdCategories: string[];
+  /** Jumlah subkategori yang baru dibuat, termasuk di kategori yang sudah ada. */
+  createdSubcategories: number;
+  /** Preset kategori yang dilewati karena batas jumlah kategori workspace. */
+  skippedCategories: string[];
+  sentence: string;
+}
+
+/**
  * Kategori produk (`category.manage`) — struktur katalog.
  *
  * Kategorinya sendiri hidup **terpisah** dari produk (beda dengan mode demo lama
@@ -228,8 +270,54 @@ export interface RenamedCategory {
   skuCodeChanged: boolean;
 }
 
-/** Balikan hapus kategori: berapa produk yang dilepas menjadi “Tanpa kategori”. */
+/**
+ * Balikan hapus kategori: berapa produk yang dilepas menjadi “Tanpa kategori”
+ * beserta berapa subkategori di bawahnya yang ikut terhapus.
+ */
 export interface RemovedCategory {
+  name: string;
+  detachedProducts: number;
+  removedSubcategories: number;
+}
+
+/**
+ * Subkategori katalog — dibuat **di bawah** sebuah kategori, bukan berdiri sendiri.
+ *
+ * Kategori menentukan kode SKU & tab POS; subkategori tidak menyentuh keduanya,
+ * ia bagian katalog yang ikut dikirim ke platform (API & webhook). Produk menunjuk
+ * **id** subkategorinya, jadi ganti nama subkategori tidak menulis ulang produk
+ * mana pun.
+ */
+export interface StoreSubcategory {
+  id: string;
+  /** Kategori induknya — subkategori tidak pernah lepas dari kategorinya. */
+  categoryId: string;
+  name: string;
+  /** `false` = tidak bisa dipilih produk baru; produk lama tetap memakainya. */
+  active: boolean;
+  /** Jumlah produk yang sekarang memakai subkategori ini. */
+  productCount: number;
+}
+
+export interface CreateSubcategoryInput {
+  /** Kategori induk tempat subkategori ini dibuat. */
+  categoryId: string;
+  name: string;
+}
+
+export interface RenameSubcategoryInput {
+  subcategoryId: string;
+  name: string;
+}
+
+/** Balikan ganti nama subkategori; tidak ada SKU yang ikut berubah. */
+export interface RenamedSubcategory {
+  name: string;
+  previousName: string;
+}
+
+/** Balikan hapus subkategori: berapa produk yang kehilangan subkategorinya. */
+export interface RemovedSubcategory {
   name: string;
   detachedProducts: number;
 }
@@ -248,6 +336,13 @@ export interface StoreProduct {
   /** Harga beli terakhir (rupiah); dipakai sebagai saran harga di PO. */
   cost: number;
   category: string;
+  /**
+   * Nama subkategori katalog, kosong bila produk tidak punya. Subkategorinya
+   * dibuat **di bawah** kategori produk ini di halaman Produk & Stok; berbeda
+   * dengan `category`, ia tidak menentukan SKU maupun tab POS — ia ikut dikirim di
+   * API & webhook supaya platform mitra bisa menyusun katalog dua tingkat.
+   */
+  subcategory?: string;
   stock: number;
   /** Satuan dasar stok & harga (default "PCS"). */
   unit?: string;
@@ -884,13 +979,19 @@ export interface SetModifiersInput {
 }
 
 /**
- * Memindahkan produk ke kategori lain; kosongkan `category` untuk melepas
- * kategorinya. SKU yang **dibuat sistem** (`PBB-<KATEGORI>-<nomor urut>`) ikut
- * berganti kodenya, sedangkan SKU yang diketik pemilik toko tidak disentuh.
+ * Mengatur penempatan katalog produk: kategori dan subkategorinya.
+ *
+ * Kosongkan `category` untuk melepas kategorinya (subkategori otomatis ikut
+ * dilepas — label tanpa induk tidak boleh ada). SKU yang **dibuat sistem**
+ * (`PBB-<KATEGORI>-<nomor urut>`) ikut berganti kodenya saat kategorinya berganti,
+ * sedangkan SKU yang diketik pemilik toko tidak disentuh. Subkategori sendiri
+ * tidak pernah mengubah SKU.
  */
 export interface SetProductCategoryInput {
   productId: string;
   category?: string;
+  /** Subkategori di bawah kategori itu; kosong = tanpa subkategori. */
+  subcategory?: string;
 }
 
 /**
@@ -913,6 +1014,8 @@ export interface CreateProductInput {
   cost?: number;
   /** Nama kategori (bukan id) — dicocokkan dengan kategori tenant. */
   category?: string;
+  /** Nama subkategori di bawah kategori itu (opsional); butuh `category`. */
+  subcategory?: string;
   /** Satuan dasar (default PCS). */
   unit?: string;
   openingStock?: number;
@@ -2116,14 +2219,42 @@ export interface StoreApi {
    * karena kategori bawaan dibuat bersama workspace-nya.
    */
   categories: StoreCategory[];
+  /**
+   * Subkategori katalog tenant, terurut seperti yang diatur — tiap barisnya
+   * terikat pada satu `categoryId`. Dipakai pemilih subkategori di form produk dan
+   * pengelolaan “di bawah kategori” di halaman Produk & Stok.
+   */
+  subcategories: StoreSubcategory[];
   /** Menambah kategori; namanya divalidasi aturan yang sama dengan server. */
   createCategory(input: CreateCategoryInput): Promise<{ id: string; name: string }>;
   /** Ganti nama kategori; SKU yang sudah ada tidak ikut ditulis ulang. */
   renameCategory(input: RenameCategoryInput): Promise<RenamedCategory>;
   /** Mengaktifkan/menonaktifkan kategori; kategori nonaktif tidak dipakai produk baru. */
   setCategoryActive(categoryId: string, active: boolean): Promise<void>;
-  /** Menghapus kategori; produknya menjadi “Tanpa kategori”, tidak ikut terhapus. */
+  /**
+   * Menghapus kategori; produknya menjadi “Tanpa kategori” dan subkategori di
+   * bawahnya ikut terhapus — tidak ada produk yang ikut terhapus.
+   */
   removeCategory(categoryId: string): Promise<RemovedCategory>;
+  /**
+   * Menyamakan katalog produk dengan **kategori bisnis** workspace ini: master
+   * kategori & subkategori produk yang relevan ditambahkan kalau belum ada.
+   *
+   * Dipakai tombol di halaman Produk & Stok, terutama untuk workspace yang sudah
+   * berdiri sebelum presets-nya ada. Sifatnya sama dengan penyemaian saat
+   * onboarding — **hanya menambah** dan idempoten — dan workspace yang belum
+   * memilih kategori bisnis akan ditolak server dengan alasan yang menyebut jalan
+   * keluarnya (pilih dulu di halaman Profil).
+   */
+  syncProductCategories(): Promise<SyncedProductCategories>;
+  /** Menambah subkategori **di bawah** `categoryId`; namanya dijaga seperti kategori. */
+  createSubcategory(input: CreateSubcategoryInput): Promise<{ id: string; name: string }>;
+  /** Ganti nama subkategori; tidak ada SKU yang ikut berubah. */
+  renameSubcategory(input: RenameSubcategoryInput): Promise<RenamedSubcategory>;
+  /** Mengaktifkan/menonaktifkan subkategori; yang nonaktif tidak dipakai produk baru. */
+  setSubcategoryActive(subcategoryId: string, active: boolean): Promise<void>;
+  /** Menghapus subkategori; produknya kehilangan subkategorinya, tidak ikut terhapus. */
+  removeSubcategory(subcategoryId: string): Promise<RemovedSubcategory>;
   /**
    * Modul plug-in (Phase 2): apa yang aktif, apa yang masih bisa dinyalakan,
    * dan fitur mana yang menunggu modulnya. Dihitung dari aturan yang sama
@@ -2260,6 +2391,37 @@ export interface StoreApi {
    * dipaksakan dari luar halaman.
    */
   setTenantProfile(input: UpdateTenantProfileInput): Promise<UpdatedTenantProfile>;
+  /**
+   * Kategori utama bisnis yang dipilih pemilik — **terkunci permanen** setelah
+   * tersimpan. `null` = workspace lama yang belum pernah memilih; halaman Profil
+   * menawarkan pilihan itu sekali kepada pemiliknya.
+   */
+  businessCategory: LockedBusinessCategory | null;
+  /**
+   * Katalog kategori utama yang **boleh dipilih** (hanya yang aktif, diatur
+   * pemilik platform di backstage) — dipakai pemilih di onboarding & halaman
+   * Profil. Kategori/subkategori yang dinonaktifkan atau dihapus tidak muncul di
+   * sini, dan server menolaknya walau dipaksa dari luar halaman.
+   */
+  businessCategories: BusinessCategoryOption[];
+  /**
+   * Apakah pengguna aktif adalah **akun platform developer** (`users.platformRole`),
+   * yaitu pemilik backstage — bukan peran tenant mana pun.
+   *
+   * Dipakai hanya untuk menampilkan jalan masuk ke `/platform` di sidebar & halaman
+   * onboarding. Backstage tetap memeriksa ulang identitas dan perannya di server
+   * (`platform.me`), jadi nilai ini tidak pernah menjadi gerbang. Mode demo selalu
+   * `false`: penanda itu hidup di baris pengguna server, dan backstage menolak
+   * berjalan dengan data demo.
+   */
+  platformDeveloper: boolean;
+  /**
+   * Memilih kategori utama + subkategori untuk pertama kalinya lewat
+   * `tenants.setBusinessCategory`. Hanya pemilik yang berhak (server memeriksa
+   * peran, bukan hanya izin); pilihan berikutnya dengan pasangan berbeda ditolak
+   * selamanya, dan pasangan yang sama tidak menulis apa pun.
+   */
+  setBusinessCategory(input: BusinessCategoryChoice): Promise<UpdatedBusinessCategory>;
   /**
    * Omzet tercatat per bulan (semua toko workspace ini), **tertua dulu**, 12
    * bulan terakhir termasuk bulan berjalan.
@@ -2439,7 +2601,12 @@ export interface StoreApi {
    */
   setCategory(
     input: SetProductCategoryInput,
-  ): Promise<{ sku: string; previousSku: string; category: string | null }>;
+  ): Promise<{
+    sku: string;
+    previousSku: string;
+    category: string | null;
+    subcategory: string | null;
+  }>;
   /**
    * Menyimpan modifier item sebuah produk (level pedas, topping). Kosongkan
    * daftarnya untuk menghapus; butuh modul F&B aktif saat diisi.

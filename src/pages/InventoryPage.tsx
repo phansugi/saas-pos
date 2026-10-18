@@ -18,6 +18,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { ModuleReadOnly } from "@/components/ModuleReadOnly";
+import { FEATURE_LABELS } from "@/lib/billing";
 import { DEFAULT_WAREHOUSE_ID, describeWarehouse, suggestWarehouseCode } from "@/lib/inventory";
 import { useSession } from "@/lib/session";
 import { useStore } from "@/lib/store";
@@ -165,8 +167,9 @@ export function InventoryPage() {
 
       {gateReason && (
         <p className="rounded-lg border border-accent/40 bg-accent/10 px-4 py-3 text-sm text-accent">
-          {gateReason} Stok yang sudah ada tetap bisa dilihat dan dipindahkan —
-          hanya menambah gudang baru yang memerlukannya.{" "}
+          {gateReason} Daftar lokasi dan pemindahan stok di bawah hanya bisa
+          dibaca — menambah gudang, menonaktifkannya, dan memindahkan stok tidak
+          bisa dari sini sampai langganannya memuat modul itu.{" "}
           {can("billing.manage") && (
             <Link to="/app/subscription" className="underline">
               Kelola langganan
@@ -218,6 +221,17 @@ export function InventoryPage() {
         ))}
       </section>
 
+      {/*
+        Dua kartu di bawah ini adalah **permukaan modul** `inventory.multiwarehouse`:
+        menambah/menonaktifkan gudang dan memindahkan stok antar lokasi. Tanpa
+        fiturnya keduanya hanya bisa dibaca (abu-abu), sedangkan daftar stok per
+        lokasi dan riwayat di bawahnya tetap terlihat seperti biasa.
+      */}
+      <ModuleReadOnly
+        locked={gateReason !== null}
+        reason={gateReason}
+        label={FEATURE_LABELS["inventory.multiwarehouse"]}
+      >
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">Lokasi stok</CardTitle>
@@ -464,6 +478,7 @@ export function InventoryPage() {
           )}
         </CardContent>
       </Card>
+      </ModuleReadOnly>
 
       {/* ----------------------------- stok per lokasi --------------------- */}
       <Card>

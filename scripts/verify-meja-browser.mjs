@@ -1077,6 +1077,69 @@ try {
     consoleErrors.length === 0,
     consoleErrors.slice(0, 3).join(" | "),
   );
+
+  /*
+    -------------------------------------------------- kategori bisnis di layar
+
+    Alur F&B di atas berjalan untuk workspace berkategori kafe. Sisi sebaliknya
+    diuji di browser juga: workspace yang **bukan** layanan meja — toko bangunan
+    — tetapi modul F&B-nya menyala dan paketnya Enterprise. Modul saja dulu
+    cukup untuk memunculkan denah meja, antrean dapur, dan modifier; sekarang
+    kategorinya ikut menentukan, jadi yang diperiksa adalah layar yang benar-
+    benar dilihat pemilik toko seperti itu.
+  */
+  const retailSession = {
+    ...session,
+    tenant: {
+      ...session.tenant,
+      name: "Toko Bangunan Uji",
+      slug: "toko-bangunan-uji-browser",
+      vertical: "umkm",
+      verticals: ["umkm", "fnb"],
+      businessCategory: {
+        category: "retail",
+        categoryLabel: "Perdagangan Eceran",
+        subcategory: "bangunan",
+        subcategoryLabel: "Toko Bangunan & Material",
+        lockedAt: Date.now(),
+        lockedBy: "meja-browser@mesinpos.test",
+      },
+    },
+  };
+  await page.evaluate((value) => {
+    window.localStorage.setItem("mesinpos.session.v1", value);
+  }, JSON.stringify(retailSession));
+  await page.goto(`${BASE}/app/pos`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector('[data-testid="pos-bayar"]', { timeout: 15000 });
+  const posBangunan = await page.locator("body").innerText();
+  check(
+    "kasir toko bangunan di browser tidak menawarkan meja, dapur, maupun modifier",
+    !posBangunan.includes("Tanpa meja") &&
+      !posBangunan.includes("Pesanan di dapur") &&
+      !posBangunan.includes("grup pilihan"),
+    posBangunan.slice(0, 300),
+  );
+  // Sidebar-nya dicari lewat test id-nya: halaman kasir punya kartu keranjang
+  // yang juga memakai elemen `<aside>`, jadi pemilih “aside” bisa mengenai dua.
+  const sidebarTeks = await page.locator('[data-testid="app-sidebar"]').innerText();
+  check(
+    "sidebar toko bangunan di browser tidak memuat menu Dapur & Meja",
+    !sidebarTeks.includes("Dapur & Meja"),
+    sidebarTeks.slice(0, 200),
+  );
+
+  // Tautan lama `/app/kds` tetap bisa dibuka, tetapi menjelaskan sebabnya dan
+  // tidak menampilkan pengaturan mejanya.
+  await gotoSpa("/app/kds");
+  await page.waitForTimeout(250);
+  const kdsBangunan = await page.locator("body").innerText();
+  check(
+    "halaman dapur toko bangunan di browser menyebut kategorinya, bukan menyalahkan modul",
+    kdsBangunan.includes("Toko Bangunan & Material") &&
+      kdsBangunan.includes("Bukan layanan meja") &&
+      !kdsBangunan.includes("Tambah meja"),
+    kdsBangunan.slice(0, 300),
+  );
 } catch (error) {
   await page.screenshot({ path: `${SHOTS}/meja-browser-gagal.png`, fullPage: true });
   results.push({ name: "alur berhenti karena galat", ok: false });

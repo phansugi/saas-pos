@@ -46,6 +46,7 @@ import {
   formatWhatsapp,
   whatsappHref,
 } from "@/lib/profile";
+import { BusinessCategoryCard } from "@/components/BusinessCategoryCard";
 import { useSession } from "@/lib/session";
 import { useStore } from "@/lib/store";
 import { useCan } from "@/lib/usePermission";
@@ -54,6 +55,7 @@ import { useCan } from "@/lib/usePermission";
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
 
 export function ProfilePage() {
   const { session, signOut } = useSession();
@@ -480,7 +482,10 @@ export function ProfilePage() {
         </CardContent>
       </Card>
 
-      {/* ── Kartu 3: keluar ────────────────────────────────────────────────── */}
+      {/* ── Kartu 3: kategori utama bisnis (sekali pilih, terkunci) ────────── */}
+      <BusinessCategoryCard />
+
+      {/* ── Kartu 4: keluar ────────────────────────────────────────────────── */}
       <Card data-testid="profil-keluar-kartu">
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">

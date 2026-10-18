@@ -945,6 +945,12 @@ export const readResource = internalQuery({
       // Katalog dibaca berurutan menurut SKU dan bisa dilanjutkan lewat
       // `cursor`. Tanpa itu, platform yang punya lebih dari `limit` produk hanya
       // pernah menerima halaman pertama saat menyamakan katalognya.
+      //
+      // Kategori & subkategori ikut dikirim sebagai **nama**, bukan id internal:
+      // platform memakainya untuk menyusun katalog dua tingkat dan tidak perlu
+      // mengenal id MesinPOS (sama seperti SKU sebagai kunci produk). Subkategori
+      // dibuat di bawah kategorinya (lihat `subcategories.create`), jadi pasangan
+      // `category`/`subcategory` di sini selalu konsisten.
       const cursor = (args.cursor ?? "").trim();
       const rows = await ctx.db
         .query("products")
@@ -964,6 +970,26 @@ export const readResource = internalQuery({
             )
             .collect()
         : [];
+      // Nama kategori & subkategori dibaca sekali untuk seluruh halaman, bukan per
+      // produk — keduanya menunjuk id, jadi nama barunya tidak perlu ditulis ulang
+      // di produk.
+      const [categoryRows, subcategoryRows] = await Promise.all([
+        ctx.db
+          .query("categories")
+          .withIndex("by_tenant", (q) => q.eq("tenantId", args.tenantId))
+          .collect(),
+        ctx.db
+          .query("subcategories")
+          .withIndex("by_tenant", (q) => q.eq("tenantId", args.tenantId))
+          .collect(),
+      ]);
+      const categoryName = new Map(
+        categoryRows.map((row) => [row._id as string, row.name]),
+      );
+      const subcategoryName = new Map(
+        subcategoryRows.map((row) => [row._id as string, row.name]),
+      );
+
       // Hanya stok lokasi jual (`warehouseId` kosong) — angka yang dipakai kasir.
       const sellable = new Map<string, number>();
       for (const level of levels) {
@@ -975,6 +1001,12 @@ export const readResource = internalQuery({
         products: page.map((product) => ({
           sku: product.sku,
           name: product.name,
+          category: product.categoryId
+            ? categoryName.get(product.categoryId as string) ?? null
+            : null,
+          subcategory: product.subcategoryId
+            ? subcategoryName.get(product.subcategoryId as string) ?? null
+            : null,
           price: product.price,
           unit: product.unit ?? "PCS",
           active: product.active,

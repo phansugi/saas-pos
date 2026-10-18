@@ -14,6 +14,7 @@ import {
   Truck,
   X,
 } from "lucide-react";
+import { ErrorNotice } from "@/components/ErrorNotice";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -127,7 +128,8 @@ export function PurchasingPage() {
     [products],
   );
 
-  const [error, setError] = useState<string | null>(null);
+  /** Galat apa pun (server atau validasi klien) — disimpan utuh agar kalimatnya bisa dibaca. */
+  const [error, setError] = useState<unknown>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -266,9 +268,7 @@ export function PurchasingPage() {
     setNotice(null);
     action()
       .then(() => setNotice(message))
-      .catch((cause) =>
-        setError(cause instanceof Error ? cause.message : String(cause)),
-      )
+      .catch((cause) => setError(cause))
       .finally(() => setBusy(false));
   }
 
@@ -574,9 +574,9 @@ export function PurchasingPage() {
 
       {gateReason && (
         <p className="rounded-lg border border-accent/40 bg-accent/10 px-4 py-3 text-sm text-accent">
-          {gateReason} Dokumen lama tetap bisa dilihat, dan{" "}
-          <strong>penerimaan barang tetap bisa dicatat</strong> supaya pesanan yang
-          sudah jalan tidak menggantung.{" "}
+          {gateReason} Halaman ini hanya bisa dibaca: dokumen lama tetap terlihat,
+          tetapi pengajuan, persetujuan, dan <strong>penerimaan barang</strong>{" "}
+          tidak bisa dicatat dari sini sampai langganannya memuat modul itu.{" "}
           {can("billing.manage") && (
             <Link to="/app/subscription" className="underline">
               Kelola langganan
@@ -585,15 +585,11 @@ export function PurchasingPage() {
         </p>
       )}
 
-      {error && (
-        <p
-          role="alert"
-          className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive"
-        >
-          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-          {error}
-        </p>
-      )}
+      <ErrorNotice
+        error={error}
+        testId="beli-galat"
+        hint="Dokumen pembelian tidak berubah selama permintaan ditolak; perbaiki sebabnya lalu ulangi."
+      />
       {notice && (
         <p className="rounded-lg border border-primary/30 bg-primary/5 px-4 py-3 text-sm text-primary">
           {notice}

@@ -27,6 +27,1295 @@ Aturan penulisan yang dipakai di berkas ini:
 
 ## Riwayat
 
+## 2026-10-18 — “Master kategori hilang”: ternyata workspace belum memilih bisnis, kini halaman yang bilang
+
+**Ruang lingkup:** pertanyaan pemilik repo: “master kategori & subkategori yg sesuai bisnis tenant kenapa
+tidak muncul atau tidak ada di halaman Produk & Stok ya?”. Yang dikerjakan: menelusuri datanya,
+menyemai yang tertinggal, dan membuat halaman mengatakannya sendiri — bukan menyisakan pemilik menebak.
+
+**Temuan (dari data deployment, bukan dugaan):**
+
+- **Pusat Bahan Bangunan** (`retail › bangunan`) — masternya **ada**: `tenants:listCategories` → 5 kategori
+  (Semen & Mortar, Besi & Logam, Cat & Finishing, Pipa & Sanitasi, Alat Listrik) dan
+  `tenants:listSubcategories` → **14 subkategori**, semua aktif.
+- **Toko Sumber Bangunan** — `tenants.businessCategory` **kosong**, jadi katalognya masih daftar bawaan
+  lama (Kopi, Makanan, Snack, Minuman) tanpa satu pun subkategori. Inilah “master tidak ada”: master
+  per bisnis memang tidak bisa lahir sebelum kategori bisnisnya dipilih (dikunci permanen di Profil),
+  dan tombol sinkronisasi sengaja mati selama itu — tetapi halamannya dulu hanya memberi kalimat kecil
+  abu-abu, mudah terlewat.
+- **Toko Buah Segar** (`retail › buah-sayur`) — pilihannya terkunci sebelum penyemaian, jadi masternya
+  tertinggal.
+
+**Yang dikerjakan:**
+
+- **Penyapuan admin dijalankan**: `bun convex run categories:backfillFromBusinessCategory '{}'` → 3 workspace
+  dibaca, **1 disemai** (Toko Buah Segar: 4 kategori — Sembako, Minuman, Makanan Ringan, Kebutuhan Rumah
+  — + 12 subkategori), 1 sudah sesuai, 1 tanpa kategori bisnis.
+- **Kartu “Kategori produk” di Produk & Stok kini menyebut keadaannya**, dengan `data-state`
+  (`tanpa-bisnis` / `kurang` / `sesuai`): kalau bisnisnya belum dipilih, kartunya menyebut bahwa katalog
+  masih daftar bawaan lama **dan** menyediakan tautan satu klik ke Profil; kalau bisnisnya sudah terkunci
+  tetapi sebagian master belum ada, kartunya menyebut **jumlah & nama** yang belum ada
+  (dihitung di klien dengan `planProductCatalogSeeding` — fungsi murni yang sama dengan server, lewat
+  re-export baru `src/lib/productCatalogPresets.ts`) dan tombolnya berubah menjadi “Tambahkan master
+  kategori”.
+
+**Berkas:** baru: `src/lib/productCatalogPresets.ts` · diubah: `src/pages/ProductsPage.tsx`,
+`scripts/verify-render.mjs`, `scripts/verify-product-presets.mjs`, `worklog.md`.
+
+**Verifikasi:**
+
+- `bun tsc -b --noEmit` → **exit 0**.
+- Data: `bun convex run tenants:listCategories`/`listSubcategories` (identitas pemilik) → 5 kategori / 14
+  subkategori untuk Pusat Bahan Bangunan; `bun convex run tenants:listBusinessCategories` → katalog bisnis
+  utuh (tidak ada yang nonaktif).
+- `bun convex run categories:backfillFromBusinessCategory '{}'` → `workspaceDisemai: 1`,
+  `workspaceSudahSesuai: 1`, `workspaceTanpaKategoriBisnis: 1`, exit 0.
+- `bun scripts/verify-render.mjs` → **1037/1037** (4 cek baru: status `tanpa-bisnis`, alasan “daftar bawaan
+  lama” + “disemai”, tautan `kategori-pilih-bisnis` → `/app/profile`, tombol sinkronisasi mati).
+- `bun scripts/verify-product-presets.mjs` → **21/21** (2 cek baru: workspace bergaya toko bangunan yang
+  masih memakai daftar bawaan lama mendapat seluruh 5 kategori + 14 subkategori preset, dan rencananya
+  bukan rencana kosong — jadi halaman memang harus bilang “belum ada”).
+- Regresi: `verify-profile.mjs` **70/70** · `verify-business-category.mjs` **73/73** · `verify-menus.mjs`
+  **427/427** — semuanya exit 0.
+
+**Catatan / blocker:** workspace yang belum memilih kategori bisnis **tidak** disemai otomatis — pilihan
+bisnis itu terkunci permanen dan hanya pemilik yang boleh menentukannya, jadi halaman hanya menunjuk
+jalan keluarnya. Kartu “Kurang” (bisnis terkunci tetapi master belum lengkap) belum diuji lewat DOM karena
+store demo selalu berangkat tanpa kategori bisnis; yang diuji adalah perhitungan rencananya (murni) dan
+jalur `tanpa-bisnis` di DOM.
+
+## 2026-10-18 — Akun uji bersih sendiri (dan dibersihkan setiap sesudah uji)
+
+**Ruang lingkup:** permintaan pemilik repo: “selalu bersihkan akun yg tidak diperlukan, termasuk
+akun² test dan akun sampah saat setelah kamu melakukan test dan uji coba, agar jangan jadi penuh
+data² yg tidak berguna”. Yang dikerjakan: (1) membersihkan sisa uji hari ini, (2) membuat
+pembersihannya **berjalan sendiri** supaya tidak bergantung pada ingatan manusia, dan (3) menulis
+kewajiban itu di `AGENTS.md` sebagai aturan repo.
+
+**Bukti masalahnya nyata:** `platform:purgeFixtureTenants` `dryRun` sebelum dibersihkan → `scanned: 16`,
+`skipped: 3`, **`targets: 13`** akun uji baru dari beberapa kali `verify-backend.mjs` hari ini
+(`verify-kabar-…`, `kopi-senja-…`, `dev-…`, dst.). Sesudah uji terakhir di entri ini: `scanned: 37`,
+`purged: 29`, `skipped: 8`.
+
+**Yang dibuat:**
+
+- **`platform:purgeFixtureUsers`** (internalMutation) — menghapus **baris `users` uji yang sudah yatim**:
+  bukan akun platform sungguhan, tidak memiliki tenant (termasuk yang sedang dihapus), dan tidak
+  tercatat sebagai anggota workspace mana pun. Sesi, token, akun auth, dan kode OTP-nya ikut dihapus
+  (urutan: refresh token → sesi → akun auth → `emailOtps` → baris `users`), 100 akun per panggilan lalu
+  menjadwalkan dirinya lagi selama masih ada kandidat. Akun pengembang **uji** boleh ikut disapu,
+  **kecuali** kalau ia satu-satunya pengembang yang tersisa — jalan masuk backstage tidak boleh hilang
+  gara-gara pembersihan.
+- **`platform:purgeFixtureTenantsAuto`** (internalMutation) + mode `actorless` di `purgeFixtureTenants`:
+  cron tidak punya aktor manusia, jadi jalur ini memilih pengembang **beremail non-uji** sebagai aktor
+  audit (developer uji hanya cadangan) dan melindungi “workspace pengelola” — bukan “milik aktor”.
+  Tanpa perbedaan itu, workspace `dev-*` buatan harness justru tersisa karena pemiliknya (developer
+  uji) dianggap “pengelola sendiri”.
+- **Dua jadwal cron** (`crons.ts`): 19:00 UTC akun bisnis uji, 19:30 UTC baris pengguna yatim — jeda 30
+  menit karena penghapusan tenant berjalan bertahap, jadi baris pengguna baru terlihat yatim setelah
+  tenant-nya benar-benar hilang.
+- **`bun run bersih:uji`** (script `package.json`) = jalur resmi sesudah uji: kedua mutation di atas
+  berurutan.
+- **Aturan `AGENTS.md` baru:** setiap uji yang menulis ke deployment **wajib** diikuti
+  `bun run bersih:uji`, hasilnya ditulis di entri worklog, dan cron hanya jaring pengaman.
+- Aturan murninya `decideFixtureUserPurge` ditambahkan di `lib/platformTenants.ts` bersama
+  `USER_PURGE_BATCH` (100) / `USER_PURGE_SCAN` (1000).
+
+**Berkas:** diubah: `src/convex/platform.ts`, `src/convex/lib/platformTenants.ts`, `src/convex/crons.ts`,
+`package.json`, `AGENTS.md`, `README.md`, `scripts/verify-platform-tenants.mjs`, `worklog.md`.
+
+**Verifikasi:**
+
+- `bun tsc -b --noEmit` → **exit 0**; `bun convex dev --once` → `Convex functions ready!`, exit 0.
+- `bun convex run platform:purgeFixtureTenants '{"actorId":"…","dryRun":true}'` → 13 kandidat, lalu
+  tanpa `dryRun` → **`purged: 13`**, `skipped: 3` (tiga akun nyata).
+- `bun convex run platform:purgeFixtureUsers '{"dryRun":true}'` → `targets: 100` (batas batch) dari
+  `scanned: 1000`; dijalankan berulang → **`purged: 100` lima kali**, lalu `purged: 0`,
+  `scanned: 8`, `skipped: 8`.
+- Sesudah pagar “pengembang terakhir” ditambahkan, tiga akun developer uji (`platform-…@mesinpos.id`)
+  ikut dibersihkan → `purged: 3`, sisa `scanned: 5`, `skipped: 5`, `targets: 0`.
+- **Uji nyata alur kerja baru:** `bun scripts/verify-backend.mjs` → **959/959** exit 0 (menciptakan
+  fixture), lalu `bun run bersih:uji` → `actorEmail: phansugisoft@gmail.com`, `purged: 29` akun bisnis,
+  `skipped: 8`; sesudahnya `purgeFixtureUsers` → `purged: 0`.
+- **Keadaan akhir deployment dev:** `platform:tenantAccounts` → `total: 3` (*Toko Buah Segar*,
+  *Toko Sumber Bangunan*, *Pusat Bahan Bangunan*) dan `bun convex data users` → **5 baris**: empat
+  pengguna nyata + `phansugisoft@gmail.com` (developer). Tidak ada akun berdomain uji yang tersisa.
+- `bun scripts/verify-platform-tenants.mjs` → **131/131** (naik dari 116; 15 cek baru: keputusan
+  pembersihan pengguna, pagar pemilik tenant/anggota/pengembang terakhir, jalur hapus sesi-token-OTP,
+  dan jadwal cron-nya) · `verify-platform-edit-ui.mjs` **31/31** · `verify-impersonation.mjs` **52/52**
+  · `verify-authz.mjs` **105/105** · `verify-error-notice.mjs` **23/23** — semuanya exit 0.
+
+**Catatan / blocker:** baris `authRateLimits` (penghitung batas kirim OTP per alamat) dan
+`platformAuditLogs` sengaja **tidak** ikut dihapus: yang pertama kecil dan tanpa identitas pemilik,
+yang kedua justru bukti siapa menghapus apa — menghapusnya akan menghilangkan jejak pembersihan itu
+sendiri. Cron baru berjalan pada pukul 19:00/19:30 UTC berikutnya; jadwalnya belum pernah terpicu
+sendiri di deployment ini (baru diuji manual dengan argumen yang sama).
+
+## 2026-10-18 — Kotak galat yang sama di kasir, produk, dan pembelian
+
+**Ruang lingkup:** permintaan pemilik repo: “terapkan kotak galat yang sama ke halaman tenant
+(kasir, produk, pembelian) supaya semua penolakan server tampil seragam”. Entri sebelumnya baru
+memasang kotak itu di backstage dan mencatat halaman tenant sebagai pekerjaan yang belum dikerjakan;
+entri ini menutupnya.
+
+**Koreksi penamaan (menggantikan nama di entri sebelumnya):** modul aturan dan komponennya tidak lagi
+berbau backstage, karena kini dipakai dua permukaan:
+
+- `src/convex/lib/platformErrors.ts` → **`src/convex/lib/errors.ts`** (re-export klien:
+  `src/lib/platformErrors.ts` → **`src/lib/errors.ts`**); konstanta `PLATFORM_ERROR_*` → `ERROR_*`.
+- `src/components/PlatformErrorNotice.tsx` → **`src/components/ErrorNotice.tsx`** (`ErrorNotice`),
+  dengan `testId` opsional dan `className` supaya bisa diletakkan di dialog sempit (kasir) tanpa
+  gaya baru.
+
+**Yang berubah di halaman tenant:**
+
+- **Kasir (`/app/pos`)** — `payError` dan `holdError` disimpan utuh (`unknown`, bukan dipotong jadi
+  `error.message`) lalu dirender `ErrorNotice` sebagai `pos-bayar-galat` (“Pembayaran ditolak”) dan
+  `pos-hold-galat` (“Transaksi tidak bisa ditahan”). Gerbang shift, notis printer, dan galat struk
+  sengaja tetap bentuk lamanya: itu bukan penolakan server atas aksi jual, dan jatah ruangnya memang
+  sempit.
+- **Produk (`/app/products`)** — galat halaman (`produk-galat`) dan galat penyelarasan kategori
+  (`kategori-sinkron-galat`) memakai kotak yang sama; semua `catch` yang dulu memotong pesan jadi
+  `cause.message` kini menyimpan galatnya utuh, sehingga `error.data` dari `ConvexError` terbaca.
+- **Pembelian (`/app/purchasing`)** — satu kotak `beli-galat` untuk pengajuan, persetujuan,
+  penerimaan, tagihan, sengketa, dan pembayaran; pesan validasi klien tetap tampil apa adanya karena
+  `readableErrorMessage` mengembalikan string tanpa diubah.
+
+**Berkas:** baru: `src/convex/lib/errors.ts`, `src/lib/errors.ts`, `src/components/ErrorNotice.tsx`,
+`scripts/verify-error-notice.mjs` · diubah: `src/pages/PosPage.tsx`, `src/pages/ProductsPage.tsx`,
+`src/pages/PurchasingPage.tsx`, `src/pages/PlatformPage.tsx`,
+`src/components/PlatformTenantAccountsCard.tsx`, `src/components/PlatformBusinessCategoriesCard.tsx`,
+`README.md`, `worklog.md` · dihapus: `src/convex/lib/platformErrors.ts`, `src/lib/platformErrors.ts`,
+`src/components/PlatformErrorNotice.tsx`.
+
+**Verifikasi:**
+
+- `bun tsc -b --noEmit` → **exit 0** (sekaligus membuktikan tidak ada impor lama yang tertinggal).
+- `bun convex dev --once` → `Convex functions ready! (4.1s)`, exit 0 — `_generated/api.d.ts` ikut
+  berhenti menunjuk `lib/platformErrors`.
+- `bun scripts/verify-error-notice.mjs` → **23/23** (harness baru): `ConvexError` menang atas bungkusannya,
+  `Error` terbungkus dibersihkan dari `Request ID`/`at handler`/`Called by client`, string validasi
+  tampil apa adanya **tanpa** “Detail teknis” palsu, galat tanpa isi memakai kalimat pengganti,
+  `<details>` tertutup sejak awal, `error: null` tidak merender apa pun, dan cek sumber bahwa ketiga
+  halaman memakai `ErrorNotice` serta tidak lagi menyusun kotak galat destruktif sendiri.
+- Harness yang merender halaman terkait: `verify-render.mjs` **1033/1033** · `verify-menus.mjs`
+  **427/427** · `verify-shift-pos.mjs` **20/20** · `verify-product-sku.mjs` **39/39** ·
+  `verify-payables.mjs` **44/44** · `verify-modules.mjs` **34/34** · `verify-business-category.mjs`
+  **73/73** · `verify-platform-edit-ui.mjs` **31/31** — semuanya exit 0.
+
+**Catatan / blocker:** kotaknya diuji di DOM tiruan dan lewat render halaman, belum dengan klik manual
+di browser sungguhan pada alur bayar/penerimaan barang. Halaman tenant lain (mis. Tim, Pengaturan,
+Langganan) belum memakai komponen ini; di sana pesan `ConvexError` sudah sampai utuh, tetapi bentuk
+kotaknya masih gaya masing-masing halaman.
+
+## 2026-10-18 — Galat backstage jadi kalimat, bukan bungkusan `[CONVEX …]`
+
+**Ruang lingkup:** permintaan pemilik repo: “buat error internal menjadi pesan error cantik”.
+Pemicunya nyata dari deployment: menekan **Hapus** pada workspace sendiri menjawab
+
+```
+[CONVEX M(platform:deleteTenant)] [Request ID: 3393af0945f63028] Server Error Uncaught Error:
+Ini workspace Anda sendiri. Menghapusnya akan menghapus akun yang sedang Anda pakai — …
+at handler (../src/convex/platform.ts:1295:27) Called by client
+```
+
+Kalimat terlarangnya sudah ada; yang salah adalah pembungkusnya — id permintaan, nama fungsi,
+berkas + nomor baris, dan “Called by client” ikut tampil, sementara di deployment produksi
+pesan `Error` biasa justru disensor jadi “Server Error”. Karena itu ditangani dua arah:
+
+- **Server** melempar `ConvexError` untuk penolakan yang memang ditulis untuk dibaca
+  (`platform.ts` — penolakan hapus/ubah/nonaktifkan/impersonasi, `platformCategories.ts`, dan
+gerbang akses di `lib/access.ts`: keanggotaan, `requirePlatformDeveloper`, izin, fitur paket,
+blokir transaksi, stok kurang). `error.data` tidak disensor Convex, jadi alasannya sampai utuh.
+- **Klien** memakai satu aturan murni `src/convex/lib/platformErrors.ts` (dipakai ulang lewat
+  `src/lib/platformErrors.ts`): `readableErrorMessage` mengambil `data` lebih dulu, kalau tidak
+  ada memilih baris manusia di dalam bungkusan teknis, dan kalau tetap tidak terbaca memakai
+  kalimat pengganti — tidak pernah string kosong atau “Server Error”. `errorTechnicalNote`
+  menyimpan bungkusan aslinya untuk dibuka saat melapor.
+- **Tampilan**: komponen baru `PlatformErrorNotice` (ikon, judul, kalimat, dan
+  `<details>` “Detail teknis” + tombol “Salin detail”). Dipakai kartu *2. Akun bisnis*
+  (termasuk pembatas galat kartunya) dan kartu kategori bisnis; `PlatformPage` memakai
+  pembaca pesan yang sama untuk notis/penolakan identitas.
+
+**Berkas:** baru: `src/convex/lib/platformErrors.ts`, `src/lib/platformErrors.ts`,
+`src/components/PlatformErrorNotice.tsx` · diubah: `src/convex/platform.ts`,
+`src/convex/platformCategories.ts`, `src/convex/lib/access.ts`,
+`src/components/PlatformTenantAccountsCard.tsx`, `src/components/PlatformBusinessCategoriesCard.tsx`,
+`src/pages/PlatformPage.tsx`, `scripts/verify-platform-edit-ui.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bun convex dev --once` → `Convex functions ready! (4.56s)`, exit 0 (fungsi baru ter-push ke
+  deployment dev `mellow-narwhal-477`).
+- `bun scripts/verify-platform-edit-ui.mjs` → **31/31 checks passed** (sebelumnya 25; 6 cek baru
+  menekan **Hapus** dengan galat tiruan berbentuk `ConvexError` + `data` dan galat `Error` biasa):
+  kalimat utama sama persis dengan kalimat server, tidak memuat `[`, `Request ID`, `at handler`,
+  `Called by client`, atau `Uncaught`; `<details>` “Detail teknis” tetap memuat
+  `Request ID: 3393af0945f63028`; galat tanpa `data` pun dibersihkan dari jejak teknis; tidak ada
+  error konsol.
+- Regresi: `bun scripts/verify-platform-tenants.mjs` → **116/116** exit 0,
+  `bun scripts/verify-authz.mjs` → **105/105** exit 0,
+  `bun scripts/verify-backend.mjs` → **959/959** exit 0 (terhadap deployment dev),
+  `bun scripts/verify-platform-sync.mjs` → **42/42**, `verify-impersonation.mjs` → **52/52**,
+  `verify-rbac.mjs` → **48/48**, `verify-store-gate.mjs` → **17/17**.
+
+**Catatan / blocker:** tampilan hanya diuji di DOM tiruan (happy-dom) dan type-check, tidak diklik
+manual di browser karena backstage menuntut identitas terverifikasi lewat kode email. Halaman tenant
+biasa belum dimigrasikan ke `PlatformErrorNotice`: di sana pesan `ConvexError` kini sampai utuh,
+tetapi bentuk tampilannya masih gaya masing-masing halaman.
+
+## 2026-10-18 — Bersih-bersih akun uji: 1096 akun sampah dihapus, 3 akun nyata disisakan utuh
+
+**Ruang lingkup:** permintaan pemilik repo: “bersihkan akun yg tidak diperlukan, termasuk akun² test dan
+akun sampah”. Yang dikerjakan: (1) backup data lebih dulu, (2) alat pembersihan massal yang **berbasis
+aturan**, bukan daftar id — akun uji dikenali dari domain pemiliknya, (3) menjalankannya sampai tuntas,
+(4) membuktikan akun nyata tidak tersentuh dan tidak ada baris yatim yang tertinggal.
+
+**Hasil:** dari **1099** akun bisnis → tinggal **3** (semuanya pendaftar nyata): *Toko Buah Segar*
+(`otnaigus753@gmail.com`), *Toko Sumber Bangunan* (`starter`), dan *Pusat Bahan Bangunan* (`enterprise`) —
+dua terakhir workspace pengelola sendiri. **1096 akun uji dihapus** (990+ pemilik `@mesinpos.test` dari
+harness + akun uji `@mesinpos.id`), semuanya berjejak di `platformAuditLogs` (jumlah baris catatan
+“bersih-bersih akun uji” = **1096**, sama dengan jumlah akun yang hilang).
+
+**Yang dibuat/diubah:**
+
+- **`platform.purgeFixtureTenants`** (`internalMutation`, hanya lewat akses deployment): memilih akun dari
+  **domain pemilik** (`FIXTURE_OWNER_DOMAINS` = `mesinpos.test`, `mesinpos.id`), didahului aturan murni
+  `decideFixturePurge` + `isFixtureOwnerEmail`: akun yang sudah ditandai hapus dilewati, **workspace
+  pengelola sendiri tidak pernah ikut**, dan yang belum jelas (email kosong, domain lain, subdomain)
+  **disisakan**. `dryRun: true` melaporkan kandidat tanpa menandai apa pun. Tiap gelombang menandai 200
+  akun lalu menjadwalkan dirinya lagi hanya kalau masih ada kandidat.
+- **`platform.deleteTenantChunk` dipercepat**: satu panggilan **melompati tabel kosong** dan hanya tabel
+  berisi yang menuntut langkah terjadwal tambahan (total baris per panggilan tetap dibatasi
+  `TENANT_DELETE_BATCH` = 200). Ini yang menyelamatkan pembersihan: 1096 akun × 38 tabel = ~41 ribu
+  pekerjaan kalau setiap tabel kosong menuntut satu langkah.
+- Jeda antar-gelombang pembersihan **60 detik** (bukan 2 detik) setelah percobaan pertama gagal
+  `OptimisticConcurrencyControlFailure`: pekerja penghapusan menulis ke baris `tenants` yang sedang dibaca
+  mutation pembersih, dan Convex memakai kendali konkurensi optimistik.
+
+**Berkas:** diubah: `src/convex/lib/platformTenants.ts`, `src/convex/platform.ts`, `README.md`,
+`scripts/verify-platform-tenants.mjs`, `worklog.md` · bukti di luar repo: `backups/convex-2026-10-18-0948.zip`
+(diabaikan git).
+
+**Verifikasi:**
+
+- **Backup lebih dulu:** `bun run backup:data` → exit 0, `backups/convex-2026-10-18-0948.zip` **8.4 MB**.
+- **Uji kering:** `platform:purgeFixtureTenants dryRun` → `scanned: 1099`, `targets: 1096`, `skipped: 3`
+  (tiga akun nyata), contoh nama yang akan dihapus semuanya fixture (`verify-*`, `kopi-senja-*`, `dev-*`).
+- **Pembersihan:** gelombang-gelombang berjalan (200/gelombang), total turun 1099 → 899 → 699 → **3**.
+  Optimasi lompat-tabel terlihat langsung: sisa 411 akun turun jadi 3 dalam ~1 menit sesudah fungsi baru
+  ter-push (sebelum itu antrean berjalan ~110 pekerja/menit).
+- **Akun tersisa tepat seperti yang diinginkan:** `platform:tenantAccounts` (identitas
+  `phansugisoft@gmail.com`) → **3 baris**: Toko Buah Segar (trialing, 1 anggota/1 toko),
+  Toko Sumber Bangunan, Pusat Bahan Bangunan (**3 anggota, 1 toko, 2 produk** — datanya utuh).
+- **Tidak ada baris yatim:** 23 tabel milik tenant diperiksa nilainya satu per satu (memberships,
+  products, sales, saleItems, customers, stores, apiKeys, webhookEndpoints, shiftAlerts, receivables,
+  payables, digitalCharges, syncChanges, auditLogs, subscriptionInvoices, impersonationSessions,
+  counters, tables, mejaOrders, opnameSessions, stockLevels, stockMovements, shifts) → **0 baris** milik
+  tenant di luar 3 akun nyata. Contoh: memberships 2210 → **5**, products 2370 → **2**, sales 3861 → **38**.
+- **Uji aturan & regresi:** `bun scripts/verify-platform-tenants.mjs` → **116/116** exit 0 (naik dari 95;
+  menambah uji domain uji vs pendaftar nyata, workspace pengelola sendiri, dry-run, dan bentuk jalur
+  pembersihan) · `bun scripts/verify-render.mjs` → **1033/1033** exit 0 ·
+  `bun scripts/verify-backend.mjs` → **959/959** exit 0 · `bun tsc -b --noEmit` exit 0 ·
+  `bun tsc -p tsconfig.convex.json --noEmit` exit 0 · `bun convex dev --once` exit 0.
+- `freebuff-deploy check` → `deployable: true`, `problems: []`.
+
+**Catatan / blocker:**
+
+- **Baris login akun uji belum dihapus.** Yang dibersihkan adalah **akun bisnis** (yang tampil di backstage).
+  Baris `users` untuk email uji masih ada (~2400 baris) dan tidak mengganggu tampilan; menghapusnya butuh
+  jalur baru (ikut memutus `authAccounts`/`authSessions`/keanggotaan) dan sengaja tidak dicampur ke
+  pembersihan ini supaya tidak ada identitas login yang terhapus tanpa ditinjau.
+- **1 akun bukan milik pengelola disisakan** (`otnaigus753@gmail.com` → *Toko Buah Segar*): walau namanya
+  mirip akun uji, domainnya bukan domain uji, jadi aturannya menahannya.
+- Pembersihan dijalankan di deployment yang **sama** dengan produksi, atas permintaan pemilik repo; backup
+  sudah dibuat sebelum tindakan. Tabel **Status Phase 1–6** dan daftar **Blocker** diperiksa: tidak ada
+  butir yang berubah status.
+- **Harness awan membuat fixture baru setiap kali dijalankan** — jalannya `verify-backend.mjs` sesudah
+  pembersihan membuat **13** akun uji baru (total 16), dan semuanya dibersihkan lagi dengan satu panggilan
+  `platform:purgeFixtureTenants` (ditandai 13, tanpa lanjutan) sampai kembali **3 akun / 0 kandidat**.
+  Artinya alat ini memang untuk dipakai berulang: tiap selesai menjalankan harness awan, jalankan sekali
+  lagi. Antrean pekerja terjadwal diperiksa setelahnya: 1500 baris terakhir semuanya `success`, tidak ada
+  yang `pending`/`failed`.
+
+## 2026-10-18 — Pencarian akun bisnis buta di 100 baris: “Toko Buah Segar” tidak ketemu walau ada
+
+**Ruang lingkup:** laporan pemilik repo beserta tangkapan layarnya: mengetik “Toko Buah Segar” di kolom
+**Cari akun bisnis** (`/platform`) dijawab “Tidak ada akun yang cocok dengan pencarian itu”, padahal akunnya
+ada (audit sebelumnya menemukannya: `toko-buah-segar`, pemilik `otnaigus753@gmail.com`, status `trialing`).
+Sebabnya bukan data, melainkan **cakupan pencarian**: `platform.tenantAccounts` membaca `limit` akun terbaru
+(bawaan 100 dari **1086** akun) lalu menyaringnya di memori — jadi pencarian hanya bisa menemukan akun yang
+kebetulan sudah tampil, dan bisnis ke-1000 selalu dijawab “tidak ada”. Kalimat bantuan di bawah daftar
+(“cari dengan nama atau slug untuk menemukan yang lain”) justru menjanjikan yang tidak bisa dilakukan kode.
+
+Yang diperbaiki:
+
+- `platform.tenantAccounts`: begitu ada kata kunci, sapuannya **tidak lagi sebatas baris yang tampil** —
+  daftar dibaca sampai `TENANT_SEARCH_SCAN` (2000) akun terbaru, dan hanya akun yang cocok yang dibangun
+  barisnya (hitung anggota/toko/produk hanya untuk hasilnya). Hasil balikannya menambah `search`, `scanned`,
+  `scanCapped`; `truncated` kini berarti “hasil penuh / sapuan terbatas, masih ada yang lain”.
+- Aturan pencocokan jadi satu fungsi murni `tenantAccountMatches` (nama, slug, paket, email pemilik) +
+  `normaliseTenantSearch`, dipakai server dan harness; `filterTenantAccounts` (penyaring atas baris yang
+  sudah dibaca) dihapus supaya tidak ada dua arti “pencarian”.
+- Halaman: baris **cakupan** di bawah kolom cari (“Diperiksa N akun (seluruh deployment), M di antaranya
+  cocok.” / “…masih ada akun lain di luar batas 2000…”), kalimat kosong yang mengaku berapa akun yang sudah
+  diperiksa, keterangan pemotongan daftar yang tidak lagi menjanjikan pencarian ajaib, dan **jeda 300 ms**
+  sebelum kata kunci dikirim ke server (sekali pencarian = ribuan baris dibaca).
+
+**Berkas:** diubah: `src/convex/lib/platformTenants.ts`, `src/convex/platform.ts`,
+`src/components/PlatformTenantAccountsCard.tsx`, `scripts/verify-platform-tenants.mjs`,
+`scripts/verify-platform-edit-ui.mjs`, `scripts/happy-dom-convex-stub.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+
+- `bun tsc -b --noEmit` → exit 0 · `bun tsc -p tsconfig.convex.json --noEmit` → exit 0 ·
+  `bun convex dev --once` → exit 0 (fungsi ter-push).
+- Percobaan pertama **gagal apa adanya** dan itu yang mengubah rancangan: sapuan berhalaman (`paginate()`
+  dalam loop) ditolak deployment — “This query or mutation function ran multiple paginated queries. Convex
+  only supports a single paginated query in each function.” — jadi sapuannya dibuat **satu kali baca**
+  berbatas (`.order("desc").take(scanCap)`). Harness mengunci bentuk itu (tidak boleh ada `paginate(` di
+  jalur ini) supaya tidak dikembalikan tanpa sadar.
+- Ke deployment (identitas `phansugisoft@gmail.com`): `platform:tenantAccounts search:"Toko Buah Segar"` →
+  **1 hasil**, `scanned: 1086`, `scanCapped: false` (dulu 0 hasil); `"pusat-bahan"` → Pusat Bahan Bangunan;
+  `"zzzz"` → 0 hasil tetapi `scanned: 1086`; tanpa kata kunci → 100 baris terbaru `truncated: true`.
+- Waktu (CLI, termasuk ~1,15–1,38 s boot `bunx convex run`): daftar tanpa kata kunci ~1,70 s · pencarian
+  penuh yang menyapu 1086 akun ~2,02 s — jadi tambahan kerja di server sekitar 0,3–0,6 s per pencarian,
+  dibayar sekali per ketikan yang berhenti (jeda 300 ms).
+- `bun scripts/verify-platform-tenants.mjs` → **95/95** exit 0 (naik dari 84: pencocokan kata kunci
+  + bentuk sapuan satu kali baca + `scanCapped`/`scanned` di sumbernya).
+- `bun scripts/verify-platform-edit-ui.mjs` → **25/25** exit 0 (naik dari 17: kata kunci baru dikirim
+  setelah ketikan berhenti, hasil di luar 100 baris pertama tetap tampil, dan kalimat “diperiksa seluruh
+  1086 akun”/“kena batas 2000” diperiksa dari DOM).
+- `bun scripts/verify-render.mjs` → **1033/1033** exit 0 · `bun scripts/verify-backend.mjs` → **959/959**
+  exit 0 (deployment awan).
+
+**Catatan / blocker:** batas penyapuan 2000 akun sengaja ada; kalau deployment melewatinya, halaman
+mengatakannya (`scanCapped`) alih-alih menjawab “tidak ada”. Pencarian di halaman masih milik pemilik akun
+platform, jadi klik-ujinya di peramban sungguhan tetap menunggu kode email di `/platform`. Tabel
+**Status Phase 1–6** dan daftar **Blocker** diperiksa: tidak ada butir yang berubah status.
+
+## 2026-10-18 — Audit daftar akun bisnis: yang tampil semua masih **trial**, dan isi deployment 1086 akun
+
+**Ruang lingkup:** pertanyaan pemilik repo sebelum menghapus apa pun: (1) apakah yang tampil di kartu **Akun
+bisnis** itu akun yang sudah mendaftar **dan aktif berlangganannya**; (2) apakah akun yang **sedang trial**
+tidak muncul; (3) apakah bermasalah kalau semua akun itu dihapus. Ini pekerjaan **baca-saja** — tidak ada kode,
+skema, maupun data yang diubah.
+
+Temuan (angka apa adanya dari deployment `mellow-narwhal-477`, 100 baris teratas + seluruh tabel):
+
+- `platform:tenantAccounts` (limit 100): **100 baris**, `truncated: true` — jadi daftar di halaman memang
+  dipotong di 100 akun terbaru, bukan seluruh deployment. Seluruh 100 baris ber-`status: "trialing"` dan
+  `accountStatus: "aktif"`; paket: professional 40 · starter 38 · enterprise 22; pemilik: **92**
+  `@mesinpos.test` + **8** `@mesinpos.id`.
+- Seluruh deployment (`bunx convex data tenants --limit 4000` → 1086 baris): **1086 tenant, semuanya
+  `trialing`**, tidak ada satu pun yang `platformSuspended` atau bertanda `deletion`. Pemilik: 990
+  `@mesinpos.test` (fixture harness), 93 `@mesinpos.id` (akun uji platform), **3 `@gmail.com`**.
+- Tiga akun nyata itu: **Toko Buah Segar** (`toko-buah-segar`, professional, pemilik
+  `otnaigus753@gmail.com`) dan **dua workspace milik pengembang sendiri** — Toko Sumber Bangunan (`starter`)
+  dan Pusat Bahan Bangunan (`enterprise`), keduanya `phansugisoft@gmail.com`.
+- Tenant tertua dibuat 2026-10-11, terbaru 2026-10-18; masa trial 14 hari masih berjalan (mis. `trialEndsAt`
+  Toko Buah Segar 2026-10-31). **Itulah sebab tidak ada baris `active`**: bukan karena akun aktif disembunyikan,
+  melainkan karena belum ada trial yang lewat — querynya sendiri tidak menyaring status langganan.
+- Isi data yang akan ikut terhapus kalau dibersihkan: `products` 2370 · `sales` 3861 · `saleItems` 4054 ·
+  `memberships` 2210 · `customers` 319 baris.
+
+**Berkas:** diubah: `worklog.md` (catatan audit; tidak ada berkas kode/skema/data yang disentuh).
+
+**Verifikasi:**
+
+- `bunx convex run --identity '{…phansugisoft@gmail.com}' platform:tenantAccounts '{"actorId":"…","limit":100}'`
+  → exit 0; diurai: 100 baris, `truncated:true`, `status` = `{trialing: 100}`, `accountStatus` = `{aktif: 100}`,
+  domain pemilik `{mesinpos.test: 92, mesinpos.id: 8}`.
+- `bunx convex data tenants --limit 4000` → 1086 baris dokumen; dihitung: `status` = `{trialing: 1086}`,
+  `grep -c platformSuspended` → **0**, `grep -c '"deletion"'` → **0**; domain pemilik
+  `{mesinpos.test: 990, mesinpos.id: 93, gmail.com: 3}`.
+- `bunx convex data users --limit 4000` → dipakai memetakan `ownerId` → email (0 pemilik tak ditemukan).
+- `bunx convex data products|sales|memberships|saleItems|customers --limit 6000` → 2370 · 3861 · 2210 · 4054 · 319 baris.
+- **Tidak ada** penghapusan/penonaktifan yang dijalankan pada audit ini.
+
+**Catatan / blocker:** keputusan pembersihan menunggu pemilik repo. Dua dari 1086 akun **tidak bisa** dihapus
+lewat backstage — keduanya workspace pengembang sendiri, dan server memang menolaknya; satu akun lagi
+(`otnaigus753@gmail.com`) milik orang lain, jadi menghapusnya berarti menghapus data pendaftar nyata tanpa
+kemungkinan diurungkan. Tabel **Status Phase 1–6** dan daftar **Blocker** diperiksa: tidak ada butir yang
+berubah status oleh entri baca-saja ini.
+
+## 2026-10-18 — Backstage: akun bisnis bisa **diubah** (nama & paket), bukan hanya dinonaktifkan/dihapus
+
+**Ruang lingkup:** permintaan pemilik repo sebagai pengembang platform (`phansugisoft@gmail.com`): selain
+melihat daftar akun bisnis yang terdaftar, akun-akun itu harus bisa **diedit**, diaktifkan/nonaktifkan, dan
+dihapus dari sistem. Menonaktifkan/mengaktifkan/menghapus sudah ada; yang belum ada adalah **mengubah**.
+Ditambahkan jalur ubah yang sengaja sempit — hanya **nama bisnis** dan **paket langganan**:
+
+- Aturan murni baru `decideTenantUpdate` (`src/convex/lib/platformTenants.ts`): tenant harus ada, bukan yang
+  sedang dihapus, minimal satu kolom dikirim, nama dirapikan spasinya lalu dibatasi
+  `PROFILE_NAME_MIN`/`PROFILE_NAME_MAX` (impor dari `lib/profile.ts`, bukan salinan kedua), dan paket harus
+  paket katalog (`PLAN_LIST`). Tindakan `update` masuk ke tipe & label (`"Diubah"`) dan validator skema.
+- Mutation baru `platform.updateTenant` (`src/convex/platform.ts`): tetap lewat `requirePlatformDeveloper`,
+mengubah nama, dan saat paket berganti memakai `trimVerticalsForPlan` yang sama dengan
+`billing.changePlan` (modul di luar paket baru mati) sambil menyetel `planVersion`. Slug, `status`
+langganan, dan isi operasional **tidak** disentuh; panggilan tanpa perubahan dijawab `changed: false`.
+Jejaknya ditulis dua arah: `platformAuditLogs` (dengan kolom baru `detail` berisi “nama \"A\" → \"B\";
+paket starter → professional”) dan `auditLogs` milik tenant (`platform.tenantUpdate`).
+- Halaman: tombol **Edit** di tiap baris membuka formulir (nama, pemilih paket dari katalog, catatan),
+tombol simpan mati selama nama < 2 karakter, dan riwayat tindakan kini menampilkan `detail` perubahan.
+
+**Berkas:** baru: `scripts/verify-platform-edit-ui.mjs`, `scripts/happy-dom-convex-stub.mjs` ·
+diubah: `src/convex/lib/platformTenants.ts`, `src/convex/platform.ts`, `src/convex/schema.ts`,
+`src/components/PlatformTenantAccountsCard.tsx`, `scripts/verify-platform-tenants.mjs`, `README.md`,
+`worklog.md`.
+
+**Verifikasi:**
+
+- `bun convex dev --once` → exit 0 (fungsi ter-push; `ok 4.54s`), lalu `bun tsc -b --noEmit` → exit 0.
+- `bun scripts/verify-platform-tenants.mjs` → **84/84** exit 0 (sebelumnya 50 cek; 34 cek baru untuk ubah
+  nama/paket, batas nama, paket asing, akun yang sedang dihapus, `trimVerticalsForPlan`, label `Diubah`, dan
+  pemeriksaan bahwa halaman benar-benar memanggil `platform.updateTenant`).
+- `bun scripts/verify-platform-edit-ui.mjs` → **17/17** exit 0: kartu Akun bisnis dirender di DOM tiruan,
+  Edit membuka formulir terisi, tiga pilihan paket dari katalog, simpan mati saat nama “a”, lalu submit
+  mengirim tepat satu `platform:updateTenant` dengan `{actorId, tenantId, name:"  Toko   Uji Baru ",
+  planKey:"professional", note:"uji kartu"}`, formulir tertutup, notis “diubah: nama …”, konsol bersih.
+- Jalur server sungguhan (deployment `mellow-narwhal-477`, akun `phansugisoft@gmail.com`, tenant uji milik
+  akun `.test`): `platform:updateTenant` tanpa perubahan → `changed:false`; nama `"  Toko   Uji Edit Baru "`
+  → **dirapikan** dan paket `starter → professional` (`changed:true`); nama `"a"` → ditolak “Nama bisnis
+  minimal 2 karakter.”; tanpa kolom → ditolak “Tidak ada yang diubah…”; `platform:tenantAccounts` kemudian
+  membaca nama/paket barunya; `platform:platformActions` menampilkan `action:"update"`, `actionLabel:"Diubah"`,
+  `detail:"nama \"Toko Uji Edit Platform\" → \"Toko Uji Edit Baru\"; paket starter → professional"`.
+  Tanpa `--identity` panggilan itu ditolak (“akun platform menuntut identitas login yang terverifikasi”) —
+  gerbangnya tetap seperti sebelumnya.
+- Bersih-bersih: kedua tenant uji dihapus lewat `platform:deleteTenant`, lalu daftar `search`-nya kosong dan
+  `bunx convex data tenants` tidak lagi memuat slug-nya (0 baris); peran platform akun uji dicabut
+  (`platform:revoke` → `revoked:true`).
+- `bun scripts/verify-render.mjs` → **1033/1033** exit 0 · `bun scripts/verify-backend.mjs` → **959/959**
+  exit 0 terhadap deployment awan.
+- Perbaikan kecil sesudahnya (panel konfirmasi menutup formulir Edit, dan sebaliknya, supaya dua panel tidak
+  terbuka di satu baris) diikuti jalankan ulang: `bun tsc -b --noEmit` → exit 0 ·
+  `verify-platform-edit-ui.mjs` → **17/17** · `verify-platform-tenants.mjs` → **84/84**.
+- Browser Chromium pada preview: `/platform` tetap merender baris status `todo` dan kartu identitas tanpa galat
+  konsol. **Tidak bisa** melewati verifikasi OTP di Chromium: kode uji `428913` hanya berlaku untuk email
+  `.test` lewat jalur OTP aplikasi, sedangkan identitas backstage wajib lewat Convex Auth (percobaan memakai
+  akun `.test` dijawab `Could not verify code`). Karena itu formulir Edit diuji di DOM tiruan (harness di
+  atas), bukan di peramban dengan sesi pengembang sungguhan.
+
+**Catatan / blocker:** langkah terakhir tetap milik pemilik akun: buka `/platform`, **Kirim kode**,
+masukkan kode dari kotak surat `phansugisoft@gmail.com`, **Verifikasi kode** — kartu **2. Akun bisnis** muncul
+dengan tombol **Edit** per baris. Situs `mesinpos.freebuff.app` masih build sebelum perubahan ini; deploy
+produksi belum dijalankan (menunggu perintah pemilik repo). Tabel **Status Phase 1–6** dan daftar **Blocker**
+diperiksa: tidak ada butir yang berubah status oleh entri ini (butir 1 tetap terbuka, karena langkah kode
+email di browser sungguhan masih milik pemilik akun; butir deploy produksi juga tidak berubah).
+
+## 2026-10-18 — Backstage: baris status menjawab “kenapa daftar akunnya belum muncul”
+
+**Ruang lingkup:** pertanyaan lanjutan pemilik repo: “kenapa akun-akun yang sudah terdaftar di sistem POS
+ini tidak bisa terlihat di daftar akun lewat akun developer (phansugisoft@gmail.com) yang sedang login?”
+Jawabannya bukan data yang kosong: deployment yang dipakai situs produksi **sama** dengan yang dipakai
+workspace (`https://mellow-narwhal-477.convex.cloud` — dibaca dari bundel produksi
+`assets/index-HYE-pW5u.js`), akun itu memang **pengembang platform** di sana, dan
+`platform:tenantAccounts` mengembalikan 100 baris akun bisnis. Yang menahan tampilannya: **masuk ke
+aplikasi belum cukup** — daftar akun bisnis sengaja hanya diberikan kepada identitas yang terverifikasi,
+dan langkah verifikasi itu adalah masuk lewat **kode email** di halaman backstage. Selama langkah itu
+belum dilewati, permukaan backstage memang kosong.
+
+Karena penjelasan itu tersembunyi di dalam kartu teknis, halaman sekarang membuka dengan **baris status**
+(`data-testid="platform-status"`, atribut `data-status`) yang selalu menyebut keadaan sebenarnya:
+
+- `todo` — “Satu langkah lagi untuk melihat daftar akun bisnis”, lengkap dengan alamat pengembang yang
+  harus diverifikasi dan caranya (kirim kode → masukkan kode → kartunya muncul sendiri).
+- `ok` — “Daftar akun bisnis terbuka”, menyebut label akun platform yang dikenali server.
+- `warn` — “Backstage ditolak server” beserta kalimat penolakannya.
+
+**Berkas:** diubah: `src/pages/PlatformPage.tsx`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+
+- `bun tsc -b --noEmit` → exit 0.
+- Chromium pada preview (`/platform`, sesi aplikasi `phansugisoft@gmail.com`): `data-status="todo"` dengan
+  bunyi “Satu langkah lagi untuk melihat daftar akun bisnis … kode email ke alamat pengembang
+  (phansugisoft@gmail.com) … Kirim kode di kartu di bawah …”, konsol bersih.
+- `bun scripts/verify-render.mjs` → **1033/1033** exit 0 · `bun scripts/verify-menus.mjs` → **427/427**
+  exit 0 (keduanya merender rute backstage yang berubah).
+- Bukti data ada: `bunx convex run platform:tenantAccounts` (dengan identitas akun itu) → 100 baris,
+  `truncated: true`; `platform:me` → `roleLabel: "Pengembang platform"`.
+
+**Catatan / blocker:** langkah verifikasi kode tetap milik pemilik akun (kodenya masuk ke inbox), jadi
+“daftar muncul di layar setelah verifikasi” belum pernah dijalankan otomatis; yang sudah terbukti adalah
+jalur servernya (CLI) dan seluruh keadaan halaman sebelum verifikasi (peramban). Situs produksi juga
+belum memuat perubahan-perubahan terbaru — perlu satu kali **Deploy** dari pemilik repo.
+
+## 2026-10-18 — Backstage: aktor ditentukan identitas login (bukan email sesi perangkat)
+
+**Ruang lingkup:** lanjutan keluhan “kog masih belum muncul daftar bisnis (workspace) yg sudah
+bergabung”. Setelah mode demo diperbaiki di entri di bawah, situs produksi (`mesinpos.freebuff.app`)
+sudah jalan di mode Convex dan kartu identitas tampil — pemeriksaan Chromium membuktikannya. Sisa
+sebabnya ada di **cara aktornya ditentukan**: halaman mengambil id aktor dari email **sesi aplikasi**
+(`localStorage` per perangkat), lalu server mencocokkannya dengan identitas login. Kalau perangkat itu
+masih memegang sesi akun lain daripada akun platform yang diverifikasi, gerbangnya menolak
+(“Identitas login tidak cocok dengan aktor yang disebutkan”) — dan yang terlihat hanya backstage tanpa
+daun, persis keluhan itu.
+
+- **Aktor sekarang datang dari identitas.** Helper baru `resolveIdentityActor` (`src/convex/lib/auth.ts`)
+  memetakan token login ke baris `users` (lewat `sub` lalu email), dan query baru
+  `platform.meByIdentity` (tanpa argumen) mengembalikan profil platform beserta `actorId`-nya. Halaman
+  mencoba jalur ini **lebih dulu**; jalur lama (resolve lewat email sesi) tinggal sebagai cadangan
+  untuk deployment tanpa provider identitas, dan penolakan aslinya tetap terbaca di sana.
+- **Kolom email identitas dikunci ke akun sesi.** Selama perangkat ini punya sesi aplikasi, kolomnya
+  `readOnly` + petunjuk: identitas harus akun yang sama; kalau akun platformnya berbeda, yang diganti
+  adalah sesi aplikasinya. Email yang berbeda dari aktor memang selalu ditolak server, jadi mengetiknya
+  hanya mengantar ke penolakan.
+- **Panel penolakan menyebut dua hal yang benar-benar perlu diperiksa** (akun yang sama dengan sesi, dan
+  email yang terdaftar sebagai pengembang) — sebelumnya hanya memuat kalimat server apa adanya.
+
+**Berkas:** diubah: `src/convex/lib/auth.ts`, `src/convex/platform.ts`, `src/pages/PlatformPage.tsx`,
+`worklog.md`.
+
+**Verifikasi:**
+
+- `bun convex dev --once` → `✔ 08:25:20 Convex functions ready! (4.67s)` exit 0 ·
+  `bun tsc -p tsconfig.convex.json --noEmit` → exit 0 · `bun tsc -b --noEmit` → exit 0.
+- `bunx convex run platform:meByIdentity '{}'` **tanpa** identitas → `null` (kosong) · dengan
+  `--identity '{"email":"phansugisoft@gmail.com"}'` → `actorId` + `roleLabel: "Pengembang platform"` ·
+  dengan identitas akun non-platform (`uji-platform-terhapus@mesinpos.test`) → `null` (halaman lalu
+  menampilkan penolakan server yang sebenarnya).
+- Chromium pada preview: kolom email `readOnly` (+ `aria-readonly=true`) dengan petunjuk tersimpan
+  (“Identitas yang diverifikasi harus akun yang sama dengan sesi aplikasi di perangkat ini
+  (phansugisoft@gmail.com)…”), testid `platform-workspace, platform-identity, platform-access,
+  platform-belum-dibuka`, konsol bersih.
+- `freebuff-deploy check` → `deployable: true`, `problems: []`.
+
+**Catatan / blocker:** situs produksi masih memakai build **sebelum** perubahan ini — perlu satu kali
+Deploy dari tombol pemilik repo supaya perbaikan aktor-identitas ini ikut ke `mesinpos.freebuff.app`.
+Sementara itu, cara yang sudah bisa dipakai tanpa deploy: keluar dari aplikasi lalu masuk dengan akun
+platform itu sendiri (satu akun untuk sesi **dan** identitas) — dengan begitu pencocokan lama pun lolos.
+
+## 2026-10-18 — “Backstage tidak ada daftar akun bisnis”: workspace jalan di data demo + gerbang identitas
+
+**Ruang lingkup:** laporan pemilik repo “kog di Backstage platform tidak muncul pengaturan untuk list akun
+pemilik owner bisnis/tenant”. Dua sebab ditemukan, keduanya nyata:
+
+1. **Aplikasi di preview berjalan pada data demo.** Halaman `/platform` memang menampilkan keadaan
+   terkunci (`platform-locked`, “Backstage butuh Convex dan identitas terverifikasi”) — jadi **tidak ada
+   satu pun** kartu pengelolaan, bukan hanya daftar akun. `freebuff-preview restart` tidak menolong
+   karena penyebabnya nilai env, bukan proses basi; nilainya diperbaiki dengan menulis
+   `VITE_DATA_SOURCE=convex` ke `.env.local` (konfigurasi aplikasi, bukan rahasia — dan itu memang
+   maksud repo ini, lihat `src/lib/store/config.ts`), lalu preview direstart. Setelah itu backstage
+   hidup di mode Convex: kartu identitas tampil (`platform-identity`, `platform-access`), tanpa error
+   konsol.
+2. **Kartu-kartu memang baru muncul setelah identitas platform diperiksa** (gerbang server
+   `requirePlatformDeveloper`). Itu disengaja, tetapi halaman tidak menjelaskan apa yang akan muncul —
+   jadi terasa seperti fiturnya tidak ada. Kartu “belum dibuka” sekarang menyebut keempat kartu yang
+   akan muncul (Akun bisnis, Kategori bisnis, Buka sesi pendampingan, riwayat) dan **penyebab yang
+   paling sering**: perangkat ini belum melewati langkah *Identitas login terverifikasi* di atasnya
+   (`data-testid="platform-belum-dibuka"`).
+
+Perbaikan ketahanan yang ikut dikerjakan: kartu akun bisnis dibungkus **pembatas error tingkat kartu**
+(`CardBoundary` di `PlatformTenantAccountsCard`). Sebelumnya, satu query yang ditolak (mis. identitas
+platform dicabut saat halaman terbuka) melempar dari `useQuery` dan melepas seluruh pohon backstage —
+yang terlihat hanya halaman tanpa kartu, persis keluhan yang sama. Sekarang penolakannya tampil sebagai
+kalimat di tempat kartunya (dan menyebut langkah yang bisa diulang: kirim ulang kode).
+
+Ikutan penting: setelah workspace dijalankan di mode Convex, **harness DOM tiruan ikut berpindah mode**
+dan `bun scripts/verify-render.mjs` **GAGAL** (`GAGAL: ProductsPage memuat penanda "Atur harga"`) karena
+harness membaca `import.meta.env` yang sama. Karena itu `scripts/happy-dom-setup.mjs` (dipakai tujuh
+harness) dan `scripts/diag-render.mjs` sekarang menetapkan `process.env.VITE_DATA_SOURCE = "demo"`:
+hasil harness tidak lagi bergantung pada setelan `.env.local` mesin pengembang, sementara preview bisa
+tetap hidup di mode Convex.
+
+**Berkas:** diubah: `src/pages/PlatformPage.tsx`, `src/components/PlatformTenantAccountsCard.tsx`,
+`scripts/happy-dom-setup.mjs`, `scripts/diag-render.mjs`, `README.md`, `worklog.md` · env workspace:
+`.env.local` (`VITE_DATA_SOURCE=convex`).
+
+**Verifikasi:**
+
+- `freebuff-env set --file .env.local '{"VITE_DATA_SOURCE":"convex"}' --restart` →
+  `Updated 1 environment variable in .env.local` + `Preview is ready`.
+- Peramban Chromium (`/tmp/pw`, skrip diagnostik di luar repo) terhadap `http://localhost:5173/platform`:
+  **sebelum** → teks “Backstage butuh Convex dan identitas terverifikasi” + testid
+  `platform-workspace, platform-locked`; **sesudah** → kartu “Identitas login terverifikasi” +
+  testid `platform-workspace, platform-identity, platform-access` dan konsol bersih.
+- Asap rute lain di mode Convex: `/`, `/app`, `/platform`, `/dokumentasi-api` → tanpa satu pun error
+  konsol; `/app` & `/platform` mengarah ke `/auth?returnTo=…` saat belum ada sesi.
+- `bun tsc -b --noEmit` → exit 0.
+- `bun scripts/verify-render.mjs` → **GAGAL** dulu (lihat di atas), lalu setelah harness dikunci ke data
+  demo → **1033/1033** exit 0. Lainnya lolos: `verify-menus` **427/427** · `verify-profile` **70/70** ·
+  `verify-pwa` **1527/1527** · `verify-shift-pos` **20/20** · `verify-theme` **50/50** · `verify-version`
+  **44/44** — semuanya exit 0.
+
+**Catatan / blocker:** jalur “identitas platform diperiksa” belum diuji end-to-end di peramban sungguhan
+karena langkah terakhirnya menuntut kode OTP dari kotak masuk manusia; jalur server-nya sudah dibuktikan
+lewat `bunx convex run … --identity` di entri di bawah. Kode demo di layar tidak berlaku untuk Convex
+Auth, jadi halaman itu memang harus dilalui dengan email sungguhan.
+
+## 2026-10-18 — Backstage: kelola akun bisnis (lihat · nonaktifkan/aktifkan · hapus)
+
+**Ruang lingkup:** permintaan pemilik repo: pengaturan untuk admin developer agar bisa melihat akun
+bisnis, mengaktifkan/menonaktifkannya, serta menghapusnya. Sebelumnya backstage hanya bisa
+**mendampingi** tenant (sesi baca berjejak) dan mengelola taksonomi kategori; tindakan atas akun
+bisnisnya sendiri tidak ada. Yang ditambahkan sekarang: daftar akun bisnis beserta pemilik & isinya,
+penonaktifan yang bisa diurungkan, dan penghapusan permanen — semuanya di halaman `/platform`.
+
+- Aturan murninya satu modul baru, **`src/convex/lib/platformTenants.ts`**: keputusan
+  nonaktif/aktifkan (`decideTenantSuspension`) dan hapus (`decideTenantDeletion`), konfirmasi slug,
+  penyaring & rekap daftar, label status akun, dan **daftar 38 tabel milik tenant** yang disapu saat
+  penghapusan.
+- Penonaktifan **tidak** menimpa `status` langganan: kolom sendiri `tenants.platformSuspended`, dan
+  `accessForTenant` menjawab `blocked` (transaksi baru berhenti, pelunasan tagihan tetap boleh) selama
+  kolom itu terisi — jadi mengaktifkan kembali tidak menebak keadaan billing yang lama.
+- Penghapusan **bertahap**: `platform.deleteTenant` menandai `tenants.deletion`, menutup sesi
+  pendampingan yang masih hidup, mencatat tindakannya, lalu pekerja
+  `platform.deleteTenantChunk` menyapu tabel milik tenant per batch 200 baris sampai baris tenant &
+  berkas logonya hilang paling akhir. `drainTenantTable` ditulis sebagai `switch` eksplisit supaya nama
+  tabel & indeksnya type-checked. **Akun pengguna tidak ikut dihapus** — hanya keanggotaannya.
+- Tindakan pengelola dicatat di tabel platform baru **`platformAuditLogs`** (siapa, bisnis mana,
+  kapan, catatan), bukan di `auditLogs` tenant — baris audit tenant ikut terhapus bersama tenantnya,
+  padahal justru penghapusan yang paling perlu bisa ditelusuri.
+- Dua pagar penting, diperiksa di server **dan** klien: workspace milik pengelola sendiri tidak bisa
+  dinonaktifkan/dihapus (ia akan kehilangan satu-satunya dashboard-nya), dan menghapus menuntut slug
+  bisnis itu **diketik** lebih dulu. Tenant yang sedang dihapus juga tidak bisa lagi didampingi
+  (`platform.impersonate` menolaknya).
+- Halaman: kartu baru **`PlatformTenantAccountsCard`** (cari akun, status aktif/nonaktif, jumlah
+  anggota/toko/produk, tombol Nonaktifkan/Aktifkan + Hapus dengan konfirmasi berslug, dan daftar
+  tindakan terakhir). Kartu kategori bisnis bergeser jadi “3.”, sesi pendampingan “4.”, ringkasan
+  bantuan “5.”, riwayat sesi “6.”.
+
+**Berkas:** baru: `src/convex/lib/platformTenants.ts`, `src/components/PlatformTenantAccountsCard.tsx`,
+`scripts/verify-platform-tenants.mjs` · diubah: `src/convex/schema.ts` (kolom `platformSuspended` &
+`deletion`, tabel `platformAuditLogs`, validator tindakannya), `src/convex/platform.ts`,
+`src/convex/lib/access.ts`, `src/pages/PlatformPage.tsx`,
+`src/components/PlatformBusinessCategoriesCard.tsx`, `scripts/verify-render.mjs`, `README.md`,
+`worklog.md`.
+
+**Verifikasi:**
+
+- `bun convex dev --once` → `✔ 07:44:18 Convex functions ready! (4.43s)` exit 0, termasuk
+  `[+] platformAuditLogs.by_at`.
+- `bun tsc -p tsconfig.convex.json --noEmit` → exit 0 · `bun tsc -b --noEmit` → exit 0.
+- `bun scripts/verify-platform-tenants.mjs` → **50/50** exit 0 (keputusan, catatan, konfirmasi slug,
+  penyaring & rekap, efek penonaktifan pada `accessForTenant`, plus cek meta: daftar sapuan cocok
+  dengan `schema.ts` — setiap tabel ber-`tenantId` tersapu, tiap indeksnya benar-benar terpasang — dan
+  `switch` sapuan punya 38 cabang).
+- `bun scripts/verify-render.mjs` → **1033/1033** exit 0 (1032 cek lama + 1 cek baru: kartu “Akun
+  bisnis”, tombol Nonaktifkan, dan daftar tindakan pengelola tetap **tersembunyi** selama gerbang
+  platform tertutup di mode demo).
+- `verify-impersonation` **52/52** · `verify-authz` **105/105** · `verify-menus` **427/427** ·
+  `verify-rbac` **48/48** · `verify-store-gate` **17/17** · `verify-panduan` **14/14** ·
+  `verify-role-coverage` **61/61** · `verify-product-presets` **19/19** — semuanya exit 0.
+- `bun scripts/verify-backend.mjs` → **959/959** exit 0 terhadap deployment awan
+  `https://mellow-narwhal-477.convex.cloud`.
+- **Uji end-to-end di deployment dev** (dijalankan apa adanya lewat `bunx convex run … --identity`):
+  membuat akun uji + workspace `uji-hapus-platform` → `platform:tenantAccounts` menampilkan barisnya
+  (`accountStatus: aktif`, pemilik, 1 anggota, 1 toko) · `platform:setTenantSuspended` →
+  `"Bisnis Uji Hapus dinonaktifkan."`, daftar berubah jadi `nonaktif` + `suspendLabel "sejak 18/10/2026"`
+  + catatannya, dan `platform:platformActions` mencatat tindakan itu ·
+  `deleteTenant` dengan slug **salah** ditolak (“Ketik nama singkat bisnisnya (uji-hapus-platform) …”) ·
+  `setTenantSuspended false` → `"… diaktifkan kembali."` · `deleteTenant` dengan slug benar →
+  `tables: 38`, lalu barisnya **hilang dari daftar** pada pembacaan berikutnya · sisa baris tenant itu
+  di-enumerasi lewat `bunx convex data` (`memberships`, `stores`, `sales`, `auditLogs`, `counters`,
+  `impersonationSessions`) → **0 baris**, sementara akun penggunanya **masih ada** (1 baris `users`).
+
+**Catatan / blocker:** kartu baru belum bisa diuji lewat harness DOM (happy-dom) karena backstage
+menuntut Convex + identitas terverifikasi; yang terverifikasi di sana hanya **keadaan terkunci** di
+mode demo (verify-render) dan aturan murninya, sedangkan jalur “diterima” dibuktikan langsung ke
+backend seperti di atas. Penolakan “workspace sendiri tidak bisa dinonaktifkan/dihapus” baru terbukti
+sebagai aturan murni (harness) — tidak diuji end-to-end karena tenant milik akun platform itu tidak
+ada di 100 baris terbaru deployment dev. Status Phase 1 dan daftar Blocker tidak berubah oleh entri ini.
+
+## 2026-10-18 — Lingkup langganan: halaman tanpa fiturnya hanya bisa dibaca, tanpa kecuali
+
+**Ruang lingkup:** permintaan pemilik repo “Lingkup: Read-only itu adanya, tanpa kecuali”. Sebelumnya
+gerbang paket hanya **menyembunyikan tombol satu per satu** (atau mengganti seluruh halaman dengan
+kartu ajakan naik paket): kontrol yang lupa diberi gerbang tetap hidup, lalu pengguna baru ditolak
+server setelah menekan Simpan. Sekarang permukaan milik fitur yang tidak dibeli **tetap terlihat dan
+terbaca, tetapi tidak satu pun kontrolnya bisa diisi, diklik, atau disimpan** — dan gerbangnya
+dipasang di satu tempat, bukan di tiap tombol.
+
+- Komponen baru **`src/components/ModuleReadOnly.tsx`**: `ModuleReadOnly` membungkus isi halaman dan
+  memberi `inert` pada sub-pohonnya (klik, fokus keyboard, dan penyuntingan dimatikan peramban untuk
+  apa pun di dalamnya, termasuk kontrol yang ditambahkan nanti), plus `aria-disabled`, abu-abu +
+  `grayscale` + `pointer-events-none` sebagai penanda yang terlihat, spanduk “Halaman ini hanya bisa
+  dibaca” yang menyebut **kalimat penolakan server apa adanya** (`featureUnavailableReason` — sumber
+  yang sama dengan gerbang backend) dan tautan ke Langganan/Modul bagi pemegang `billing.manage`.
+  `ModuleRoute` memasangnya sekali di `App.tsx` untuk halaman yang seluruh isinya milik satu fitur.
+- Rute yang dikunci di `App.tsx`: `/app/kds` (`pos.kds`), `/app/receivables` (`ar.creditlimit`),
+  `/app/members` (`member.discount`), `/app/opname` (`inventory.opname`), `/app/purchasing`
+  (`purchasing.basic`), `/app/api` (`api.access`), `/app/support` (`support.dedicated`),
+  `/app/payments` (`payment.digital`), `/app/sync` (`sync.realtime`).
+- Halaman yang hanya **sebagian** milik modul memakai komponennya langsung, jadi bagian yang dibayar
+  semua paket tetap hidup: Gudang & Stok (kartu “Lokasi stok” + “Pindah stok” —
+  `inventory.multiwarehouse`; tabel stok per lokasi tetap terbaca & bisa dipakai) dan Tim & Peran
+  (daftar peran, editor izin, dan peran tambahan — `rbac.custom`; kartu keanggotaan & formulir
+  undangan anggota di atasnya tidak ikut terkunci).
+- Batas yang disengaja, bukan pengecualian diam-diam: di **Kasir** pemilih meja, antrean dapur, dan
+  modifier tetap tidak ditampilkan saat paketnya tidak memuat fiturnya — itu **masukan penjualan**
+  yang pasti ditolak `pos.createSale`, jadi menampilkannya (apalagi read-only) hanya mengantar kasir
+  ke jalan buntu. Setelan struk di **Pengaturan** tetap bisa diubah & tersimpan walau
+  `peripheral.escpos` belum ada, karena setelannya dipakai begitu fiturnya aktif.
+- Harness ikut mengunci aturan ini: `verify-render.mjs` membuka **tiap rute** di atas dengan sesi
+  Starter dan memeriksa `data-readonly`, `inert`, `aria-disabled`, kelas abu-abu, alasan yang terbaca,
+  serta isi halaman yang tetap terlihat; ditambah dua halaman parsial (Gudang & Stok, Tim & Peran)
+  yang harus punya bagian **di luar** `inert`; sesi Enterprise jadi pembanding (tidak terkunci), dan
+  Kasir/Produk tidak boleh ikut terkunci di Starter. `verify-menus.mjs` kini membaca kalimat read-only
+  di halaman Dapur untuk sesi Starter, dan `verify-team-peran-browser.mjs` membuktikan di **Chromium
+  sungguhan** bahwa tombol di dalam wadah itu benar-benar ditolak peramban (bukan sekadar abu-abu)
+  sementara kolom undangan anggota tetap bisa diisi.
+
+**Berkas:** baru: `src/components/ModuleReadOnly.tsx` · diubah: `src/App.tsx`,
+`src/pages/InventoryPage.tsx`, `src/pages/TeamPage.tsx`, `scripts/verify-render.mjs`,
+`scripts/verify-menus.mjs`, `scripts/verify-team-peran-browser.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+
+- `bun tsc -b --noEmit` → exit 0.
+- `bun scripts/verify-render.mjs` → **1032/1032** exit 0 (+32 dari rangkaian read-only:
+  9 rute modul × 3 cek = 27, 2 halaman dasar, 3 rute pembanding Enterprise, dan **+8 cek halaman
+  parsial** yang ditambahkan di entri ini; sebelum 8 cek itu harness melaporkan 1024/1024).
+- `bun scripts/verify-menus.mjs` **427/427** · `verify-role-settings` **66/66** · `verify-team`
+  **61/61** · `verify-rbac` **48/48** · `verify-authz` **105/105** · `verify-modules` **34/34** ·
+  `verify-store-gate` **17/17** — semuanya exit 0.
+- Harness domain yang permukaannya kini dikunci: `verify-inventory` **42/42**, `verify-opname`
+  **48/48**, `verify-ar` **54/54**, `verify-members` **30/30**, `verify-payments` **72/72**,
+  `verify-support` **61/61**, `verify-api` **226/226**, `verify-scale` **42/42** — exit 0.
+- `bun scripts/verify-backend.mjs` → **959/959** exit 0 terhadap deployment awan
+  `https://mellow-narwhal-477.convex.cloud` (gerbang server tidak diubah oleh entri ini).
+- `PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-team-peran-browser.mjs` → **27/27** exit 0 di Chromium
+  sungguhan (19 cek lama + 8 cek sesi Starter: wadah `data-readonly`, alasan menyebut “Custom role
+  (RBAC)” & “Starter”, isi `inert`, **klik “Ubah izin” ditolak peramban**, editor izin tidak terbuka,
+  kolom undangan anggota tetap bisa diisi dan tidak berada di dalam `[inert]`, konsol bersih).
+
+**Catatan / blocker:** tidak ada perubahan di `src/convex/`, jadi `bun convex dev --once` tidak
+dijalankan untuk entri ini (tipe Convex tidak berubah). Read-only ini lapisan **tampilan**: gerbang
+server tetap yang menolak penulisan, dan harness backend di atas membuktikannya masih utuh. Uji
+peramban dijalankan terhadap dev server lokal (`http://localhost:5173`), bukan build produksi.
+Status Phase 1 dan daftar Blocker tidak berubah oleh entri ini.
+
+## 2026-10-18 — Tombol “Ubah izin” peran bawaan mati bila paketnya tidak memuat fitur RBAC
+
+**Ruang lingkup:** laporan pemilik repo berupa galat server dari halaman Tim & Peran:
+`[CONVEX M(roles:setBuiltin)] Uncaught Error: Fitur Custom role (RBAC) tidak termasuk paket starter.`
+Sebabnya bukan backend (gerbangnya memang disengaja: menyunting izin peran bawaan **membuka akses baru**,
+jadi `roles.setBuiltin` menuntut `rbac.custom` — paket Enterprise), melainkan halaman yang menawarkan
+tombolnya sebagai aksi hidup di paket Starter/Professional. Pengguna menyunting izin, menekan Simpan,
+baru ditolak server — persis keluhan yang dikirimkan.
+
+- Aturan tombolnya diperluas: `roleActions` (`src/convex/lib/roleSettings.ts`) menerima
+  `editGateReason` (dari `featureUnavailableReason`, jadi kalimatnya sama dengan server) dan mengembalikan
+  `edit`/`reset` **mati** ketika fiturnya tidak ada, plus `editReason` supaya tombol mati itu punya sebab
+  yang terbaca. “Kembalikan izin bawaan” ikut mati karena izin bawaan juga bisa menambah akses (server
+  pun menuntut fitur yang sama).
+- Halaman Tim & Peran: tombol **Ubah izin** kini tampil tetapi mati (ikon kunci, alasan di `title`) di
+  paket tanpa fitur, spanduknya menyebut **izin peran bawaan** termasuk yang ditolak paket, dan
+  `startEditBuiltin`/`submitBuiltin`/`resetBuiltin` menolak lebih dulu dengan kalimat yang sama sehingga
+  tidak ada request yang pasti ditolak dikirim ke server.
+- Sisi sebaliknya ikut diperbaiki di halaman yang sama: pemilih peran di formulir undangan dulu ikut
+  terkunci total saat fiturnya tidak ada, padahal server hanya menuntut `rbac.custom` untuk peran
+  **tambahan** (`members.add` memeriksanya hanya saat `customRoleId` diisi). Sekarang pemilihnya tetap
+  bisa dipakai untuk peran bawaan; yang hilang hanya kelompok “Peran tambahan”.
+- Server tidak diubah: gerbang `requireFeature` di `roles.setBuiltin`/`resetBuiltin` tetap berdiri
+  (perubahan percobaan pada kalimat penolakan di `lib/access.ts` **dibatalkan** karena membuat cek
+  backend yang sudah mengunci kalimatnya gagal — lihat Verifikasi).
+
+**Berkas:** diubah: `src/convex/lib/roleSettings.ts`, `src/pages/TeamPage.tsx`,
+`scripts/verify-role-settings.mjs`, `scripts/verify-render.mjs`, `README.md`.
+
+**Verifikasi:**
+
+- `bun tsc -b --noEmit` → exit 0 · `bun tsc -p tsconfig.convex.json --noEmit` → exit 0 ·
+  `bun convex dev --once` → `Convex functions ready!` exit 0.
+- `bun scripts/verify-role-settings.mjs` → **66/66** exit 0 (62 cek lama + 4 baru: tanpa fitur tombol
+  Ubah izin & Kembalikan izin bawaan mati beserta `editReason`, sementara nonaktifkan/hapus tetap boleh;
+  dengan fitur keduanya hidup lagi).
+- `bun scripts/verify-render.mjs` → **992/992** exit 0 (984 cek lama + 8 baru; 6 di antaranya
+  sesi **Starter** di halaman Tim & Peran: tombol “Ubah izin” tampil tetapi `disabled`, `title`-nya
+  menyebut “tidak termasuk paket Starter”, editor tidak terbuka, catatan halaman menyebut izin peran
+  bawaan, nonaktifkan/hapus tetap hidup, pemilih peran undangan tetap bisa dipakai untuk peran bawaan
+  tanpa kelompok peran tambahan, halaman tanpa error konsol).
+- `bun scripts/verify-team.mjs` **61/61** · `verify-rbac` **48/48** · `verify-authz` **105/105** ·
+  `verify-menus` **427/427** · `verify-backend` **959/959** — semuanya exit 0.
+- Percobaan pertama `bun scripts/verify-backend.mjs` setelah mengubah kalimat `requireFeature` di
+  `lib/access.ts` → **GAGAL exit 1** (“tenant professional tidak bisa memasang endpoint penerima kabar”:
+  kalimatnya jadi “paket Professional”, sedangkan cek harness mengunci “paket professional”). Perubahan
+  itu dibatalkan, fungsi dipush ulang, dan harness kembali **959/959** exit 0 — kalimat server sengaja
+  tetap memakai kunci paket, sementara kalimat yang dibaca pengguna disusun `featureUnavailableReason`.
+
+**Catatan / blocker:** yang diperbaiki adalah **penawaran** aksinya, bukan gerbangnya — pemilik di paket
+Starter/Professional tetap tidak bisa menyunting izin peran bawaan sampai naik paket (jalur naik paket
+sudah ada di spanduk halaman). Uji ini dijalankan di DOM tiruan (happy-dom) dan backend deployment;
+klik-nya belum diuji di peramban sungguhan pada mode Convex.
+
+## 2026-10-18 — Pengaturan meja, dapur, dan modifier di Kasir mengikuti kategori bisnis
+
+**Ruang lingkup:** permintaan pemilik repo: pengaturan meja, dapur, dan menu modifier **tidak boleh muncul di
+halaman Kasir (POS)** hanya karena modulnya menyala — tampilannya harus menyesuaikan kategori & subkategori
+bisnis pemilik **dan** modul yang diaktifkan. Sebab nyatanya: gerbang lama hanya “fitur paket + modul aktif”
+saja, jadi workspace `pusat-bahan-bangunan` (kategori Perdagangan Eceran · Toko Bangunan & Material, modul
+`umkm`+`fnb`+`wholesale`, paket Enterprise) tetap mendapat pemilih meja, antrean dapur, dan tombol modifier.
+
+- Aturan baru **satu fungsi murni** `businessUsesTableService` di `src/convex/lib/businessCategory.ts`:
+  bisnis berlayanan meja = kategori **Makanan & Minuman**, **Lainnya**, kategori backstage yang belum
+  dikenal, dan workspace yang belum memilih kategori (di situ modul tetap penentu). Yang **mati**: eceran,
+grosir, jasa, dan produksi. Jadi aturannya tidak menebak — hanya mematikan yang jelas bukan layanan meja.
+- Dipakai di **empat tempat**: halaman Kasir (pemilih meja, antrean dapur, dan modifier produk),
+  **sidebar** (menu “Dapur & Meja” hilang), halaman **Dapur & Meja** (`/app/kds`: denah, form tambah meja,
+  dan impor tidak dirender; lencananya berbunyi “Bukan layanan meja” dan kalimatnya menyebut kategorinya —
+  bukan menyuruh menyalakan modul yang sudah menyala), dan harness.
+- Sisi server tidak diubah: `pos.table` / `pos.modifier` / `pos.kdsTickets` tetap menolak seperti semula
+  saat fitur atau izinnya tidak ada; yang baru disaring adalah apa yang **ditawarkan** ke layar.
+
+**Berkas:** diubah: `src/convex/lib/businessCategory.ts`, `src/pages/PosPage.tsx`, `src/pages/KdsPage.tsx`,
+`src/layouts/AppLayout.tsx`, `scripts/verify-render.mjs`, `scripts/verify-meja-browser.mjs`,
+`scripts/verify-business-category.mjs`, `README.md`.
+
+**Verifikasi:**
+
+- `bun tsc -b --noEmit` → exit 0 · `bun tsc -p tsconfig.convex.json --noEmit` → exit 0.
+- `bun scripts/verify-business-category.mjs` → **73/73** exit 0 (62 cek lama + 11 cek batas alur meja per
+  kategori, termasuk kategori tak dikenal & workspace tanpa kategori tetap `true`).
+- `bun scripts/verify-render.mjs` → **984/984** exit 0 (960 cek lama + 24 cek baru). Dua cek baru yang
+  penting: sesi **toko bangunan** (slug kafe, produk bermodifier, meja contoh “A1”, modul F&B menyala,
+  paket Enterprise — hanya kategorinya beda) tidak lagi menawarkan pemilih meja, antrean dapur, modifier,
+  maupun menu sidebar; dan sesi **kafe** dengan modul yang sama tetap mendapat ketiganya.
+- `PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-meja-browser.mjs` → **96/96** exit 0 di Chromium sungguhan
+  (93 cek lama + 3 baru): di halaman `/app/pos` toko bangunan tidak ada “Tanpa meja”, “Pesanan di dapur”,
+  atau “grup pilihan”, sidebar-nya tidak memuat “Dapur & Meja”, dan `/app/kds` menyebut kategori &
+  “Bukan layanan meja”.
+- Harness lain yang menyentuh halaman ini dijalankan ulang: `verify-fnb` **124/124**, `verify-meja`
+  **72/72**, `verify-modules` **34/34**, `verify-menus` **427/427**, `verify-modifiers` **46/46**,
+  `verify-shift-pos` **20/20**, `verify-profile` **70/70**, `verify-rbac` **48/48**, `verify-authz`
+  **105/105**, `verify-backend` **959/959** — semuanya exit 0 (sesi uji harness lama tidak memilih
+  kategori bisnis, jadi perilakunya memang tidak berubah).
+
+**Catatan / blocker:** batas yang disengaja — tombol **Modifier** di halaman Produk & Stok **tidak** ikut
+dihilangkan: halaman itu tempat mengatur produk (dan sudah menjelaskan sendiri saat modul F&B mati),
+sedangkan permintaan ini menyangkut apa yang muncul saat melayani pembeli di halaman Kasir. Pemilik repo
+perlu **memuat ulang** halaman Kasir agar sesi lokalnya membawa kategori
+bisnis terkunci; kalau sidebar-nya masih memuat “Dapur & Meja” setelah itu, berarti sesi di perangkat itu
+belum menyimpan `businessCategory` (kasir yang membaca sesi lama). Bisnis yang kategorinya belum dipilih
+(934 workspace) tetap memakai modul sebagai penentu — memang disengaja, karena tanpa kategori tidak ada
+yang bisa dijadikan acuan.
+
+## 2026-10-18 — Master kategori & subkategori produk disemai untuk workspace yang sudah ada
+
+**Ruang lingkup:** pemilik repo menanyakan master kategori & subkategori produk yang belum terlihat di
+workspace-nya. Sebabnya: penyemaian sebelumnya hanya berjalan untuk workspace **baru** (`tenants.create`),
+workspace lama saat pilihan bisnisnya **dikunci**, atau lewat tombol manual — sedangkan workspace yang
+sudah mengunci kategori bisnis sejak sebelum fitur presets ada tidak pernah tersentuh.
+
+- `categories:backfillFromBusinessCategory` (**internalMutation**, hanya bisa dijalankan dari CLI admin)
+  menyemai seluruh workspace yang sudah memilih kategori bisnis sekaligus: hanya menambah, idempoten, dan
+  menghormati batas jumlah kategori/subkategori yang sama dengan halaman Produk & Stok.
+- Dijalankan sekali ke deployment (`bun convex run categories:backfillFromBusinessCategory '{}'`):
+  **956 workspace** dibaca, **17 disemai** (termasuk workspace nyata `pusat-bahan-bangunan` yang mendapat
+  Semen & Mortar, Besi & Logam, Cat & Finishing, Pipa & Sanitasi, Alat Listrik + 14 subkategori di bawahnya),
+  5 sudah sesuai, 934 belum memilih kategori bisnis.
+- Run kedua → **0 workspace disemai** (bukti idempotensi di seluruh deployment), dan katalog workspace
+  tersebut diperiksa langsung dari data deployment: 5 kategori baru berada di urutan 6–10 dengan 17 baris
+  subkategori terkait.
+
+**Berkas:** diubah: `src/convex/categories.ts`, `scripts/verify-backend.mjs`.
+
+**Verifikasi:**
+
+- `bun convex dev --once` → `Convex functions ready!` exit 0 · `bun tsc -p tsconfig.convex.json --noEmit`
+  → exit 0.
+- `bun convex run categories:backfillFromBusinessCategory '{}'` → run pertama menyemai 17 workspace;
+  run kedua `workspaceDisemai: 0` dan `workspaceSudahSesuai: 22` (exit 0).
+- `bun convex data categories/subcategories --limit 3000 --order desc` → kategori & subkategori hasil
+  semaian benar-benar ada di baris workspace `pusat-bahan-bangunan`.
+- `bun scripts/verify-backend.mjs` → **959/959** exit 0, termasuk cek baru “penyapuan admin kategori
+  produk aman diulang (run kedua tidak menyemai apa pun)”.
+
+**Catatan / blocker:** dalam workspace nyata itu, kategori lama (Kopi, Makanan, Snack, Minuman, Buah,
+Bahan Bangunan) **tidak** dihapus atau diganti namanya — preset hanya menambah. Kalau pemilik ingin
+katalognya benar-benar bersih dari kategori lama, ia bisa menonaktifkan/menghapusnya sendiri di halaman
+Produk & Stok (produk yang memakainya tetap aman).
+
+## 2026-10-18 — Master kategori & subkategori produk mengikuti kategori bisnis pemilik
+
+**Ruang lingkup:** permintaan pemilik repo: kategori & subkategori produk muncul otomatis sesuai
+kategori & subkategori bisnis yang dipilih owner/merchant; kalau masternya belum ada, buatkan yang
+berhubungan dengan pilihan itu. Sebelumnya katalog produk **selalu** daftar tetap
+`["Kopi","Makanan","Snack","Minuman"]` — toko bangunan pun mendapat Kopi.
+
+- **Preset murni** `src/convex/lib/productCatalogPresets.ts`: tiap kategori bisnis (dan subkategorinya)
+  dipetakan ke kategori produk + subkategorinya — kafe → Kopi/Non-Kopi/Makanan Ringan/Makanan Utama/Bahan
+  Baku, toko bangunan → Semen & Mortar/Besi & Logam/Cat & Finishing/Pipa & Sanitasi/Alat Listrik, laundry,
+  bengkel, bakery, distributor, produksi, dan seterusnya. Kategori bisnis buatan backstage yang belum
+  punya preset memakai **fallback**: satu kategori produk bernama subkategori bisnisnya — katalognya tetap
+  bisa dipakai, bukan kosong.
+- **Penyemaian** `src/convex/lib/productCatalogSeed.ts` (dipakai `tenants.create` untuk workspace baru,
+  `tenants.setBusinessCategory` untuk workspace lama yang baru mengunci, dan
+  `categories.syncFromBusinessCategory` untuk sinkronisasi manual). Sifatnya **hanya menambah**: kategori
+  yang sudah ada tidak diganti nama, dinonaktifkan, atau dihapus, produk tidak tersentuh; subkategori
+  preset tetap dilengkapi di kategori yang sudah ada; rencananya idempoten (tekanan kedua tidak menambah
+  baris) dan menghormati batas 100 kategori/workspace & 50 subkategori/kategori.
+- **Halaman Produk & Stok**: tombol “Sesuaikan dengan kategori bisnis” di kartu Kategori produk
+  (`category.manage`), lengkap dengan label pilihan bisnis workspace, pesan hasil, dan jalur ke halaman
+  Profil kalau kategori bisnisnya belum dipilih. Kartu Profil juga menyebut katalog produk yang ikut
+  menyesuaikan saat pilihan dikunci.
+- **Mode demo** mengikuti aturan murni yang sama (rencana dihitung di perangkat) supaya perilakunya tidak
+  berbeda dari server.
+
+**Berkas:** baru: `src/convex/lib/productCatalogPresets.ts`, `src/convex/lib/productCatalogSeed.ts`,
+`scripts/verify-product-presets.mjs` · diubah: `src/convex/tenants.ts`, `src/convex/categories.ts`,
+`src/convex/_generated/api.d.ts` (codegen), `src/lib/store/types.ts`, `src/lib/store/convex.tsx`,
+`src/lib/store/demo.tsx`, `src/pages/ProductsPage.tsx`, `src/components/BusinessCategoryCard.tsx`,
+`scripts/verify-backend.mjs`, `scripts/verify-render.mjs`, `scripts/verify-profile.mjs`.
+
+**Verifikasi:**
+
+- `bun convex dev --once` → `Convex functions ready!` exit 0.
+- `bun tsc -b --noEmit` → exit 0 · `bun tsc -p tsconfig.convex.json --noEmit` → exit 0.
+- `bun scripts/verify-product-presets.mjs` → **19/19** exit 0 (preset per pilihan, fallback, hanya-menambah,
+  idempoten, batas jumlah, kalimat hasil). Satu cek sempat gagal saat ditulis (assertion saya sendiri
+  keliru soal subkategori yang sudah ada) dan diperbaiki di harness-nya, bukan dengan melonggarkan aturan.
+- `bun scripts/verify-backend.mjs` → **958/958** exit 0, termasuk 7 cek baru: katalog produk workspace baru
+  mengikuti kategori bisnisnya (tanpa “Kopi”), subkategori ikut dibuat, kunci kategori bisnis menyemai
+  katalog (fallback), sinkronisasi manual mengembalikan kategori preset yang dihapus, idempoten, tidak
+  menggandakan, dan ditolak saat workspace belum memilih kategori bisnis.
+- `bun scripts/verify-render.mjs` → **973/973** exit 0 (7 cek baru: tombol menyemai preset kafe, tidak
+  menyentuh kategori lama, subkategori lahir, pesan hasil, tidak menggandakan, tekanan kedua “sudah
+  sesuai”).
+- `bun scripts/verify-profile.mjs` → **70/70** exit 0 (notis penguncian juga menyebut katalog produk).
+
+**Catatan / blocker:** workspace yang **sudah** mengunci kategori bisnis sebelum fitur ini tidak berubah
+sendiri — pemiliknya menekan “Sesuaikan dengan kategori bisnis” di halaman Produk & Stok (tombol itu
+memang dibuat untuk itu). Di mode demo, workspace bawaan tidak disemai saat onboarding (katalog demo
+adalah data contoh); tombol sinkronisasinya tetap bekerja dengan aturan yang sama.
+
+## 2026-10-18 — Kategori/subkategori baru dari backstage langsung muncul di pemilih onboarding
+
+**Ruang lingkup:** laporan pemilik repo: kategori/subkategori baru di backstage platform tidak langsung
+muncul di frontend saat pemilik bisnis memilih kategori utama. Akar masalahnya ketemu di jalur baca,
+bukan di penulisan:
+
+- `tenants.listBusinessCategories` dulu menuntut `tenantId` + **keanggotaan**, sedangkan pemilih itu
+  dipakai justru di **onboarding** — sebelum workspace ada. Store karena itu melewati query (`skip`) dan
+  jatuh ke katalog **bawaan kode**, jadi kategori/subkategori dari backstage tidak pernah terlihat di
+  sana (halaman Profil yang sudah punya tenant tidak terpengaruh).
+- Query diubah menjadi `{ actorId }` dengan syarat `verifyActor` saja — yang dibaca memang katalog
+  publik lintas-workspace, bukan data tenant. Store kini melanggannya dengan `userId` saja (tanpa
+  `tenantId`), dan karena query Convex reaktif, perubahan backstage sampai ke pemilih yang sedang
+  terbuka tanpa muat ulang.
+- Pagar lama tidak berubah: kategori baru tetap harus **diaktifkan** (dan punya minimal satu subkategori
+  aktif) sebelum ditawarkan, kategori nonaktif tidak muncul, dan workspace yang sudah mengunci
+  kategorinya tetap memegang labelnya.
+
+**Berkas:** diubah: `src/convex/tenants.ts`, `src/lib/store/convex.tsx`, `scripts/verify-backend.mjs`.
+
+**Verifikasi:**
+
+- `bun convex dev --once` → `Convex functions ready!` exit 0 (tipe `_generated` ikut diperbarui).
+- `bun tsc -b --noEmit` → exit 0 · `bun tsc -p tsconfig.convex.json --noEmit` → exit 0.
+- `bun scripts/verify-backend.mjs` → **951/951** exit 0, termasuk 4 cek baru: kategori nonaktif belum
+  ditawarkan; kategori & subkategori yang baru diaktifkan langsung terbaca pemilih; akun yang **belum
+  punya workspace** bisa membaca katalog pemilih; kategori yang dinonaktifkan hilang lagi dari pemilih.
+- `bun scripts/verify-render.mjs` → **966/966** exit 0 (pemilih mode demo tidak berubah).
+
+**Catatan / blocker:** jalur onboarding di mode Convex belum dijalankan di peramban sungguhan pada sesi
+ini — yang terbukti adalah query server (tanpa keanggotaan) + render mode demo + typecheck. Pemilih
+mode demo tetap memakai taksonomi bawaan kode karena backstage hanya hidup di mode Convex.
+
+## 2026-10-18 — Bersihkan “Kategori Uji …” dari katalog produksi & cegah terulang
+
+**Ruang lingkup:** pemilik repo menemukan “Kategori Uji 1792296612601” dan “Sub Uji 1792296612601”
+muncul di pemilih kategori onboard. Penyebabnya: run `scripts/verify-backend.mjs` yang **gagal di tengah**
+(sebelum barisnya sempat dihapus) meninggalkan kategorinya di tabel `businessCategories` deployment —
+tidak ada yang membersihkannya otomatis.
+
+- Baris sisa itu dihapus dari deployment (`platformCategories:apply` → `removeCategory`):
+  `tinggal 1 subkategori` ikut terhapus, katalog kembali 6 kategori bawaan (31 label total, tanpa “uji”).
+- Harness sekarang **menyapu sisa** `Kategori Uji <angka>` di awal blok backstage sebelum membuat barisnya
+  sendiri, dan memeriksa hasil sapuannya. Jadi run berikutnya tidak lagi mewarisi kotoran run yang gagal.
+- Daftar pengganti untuk uji “sudah terkunci” diambil dari katalog **setelah** sapuan, supaya sisa uji yang
+  sudah dihapus tidak terpilih sebagai pasangan uji.
+
+**Berkas:** diubah: `scripts/verify-backend.mjs`. Data deployment: 1 baris kategori uji dihapus.
+
+**Verifikasi:**
+
+- `bun scripts/verify-backend.mjs` → **947/947** exit 0 (termasuk cek baru “sisa kategori uji dari run
+  sebelumnya tidak tertinggal di katalog”).
+- `bun convex run platformCategories:list` (identitas platform) → 31 label, pencarian `uji` → tidak ada.
+
+**Catatan / blocker:** percobaan pertama blok sapuan gagal (`Cannot access 'katalogAwal' before
+initialization`) karena urutan deklarasi; blok disusun ulang lalu dijalankan sampai 947/947. Belum ada
+pencegahan di level server — akun platform memang boleh membuat kategori bernama apa pun; yang
+dibereskan adalah harness yang tidak membersihkan diri. Uji ini juga meninggalkan
+**tenant uji** tersendiri (bukan katalog), yang sudah menjadi perilaku lama suite dan tidak tampil di
+pemilih kategori.
+
+## 2026-10-18 — Jalan masuk Backstage platform (menu sidebar & onboarding)
+
+**Ruang lingkup:** pemilik repo melaporkan “Backstage platform tidak ketemu”. Setelah diperiksa,
+memang **tidak ada satu pun tautan** ke `/platform` di aplikasi — halaman itu hanya bisa dibuka
+dengan mengetik alamatnya. Perbaikannya: jalan masuk yang terlihat, khusus akun platform developer.
+
+- `store.platformDeveloper` baru (boolean) dihitung dari baris pengguna di server
+  (`users.get` → `platformRole`) lewat `isPlatformRole`; mode demo selalu `false` karena penanda itu
+  hidup di server dan backstage menolak berjalan dengan data demo.
+- **Sidebar aplikasi**: item “Backstage platform” (ikon perisai) muncul di bawah menu biasa hanya saat
+  `platformDeveloper`; `data-testid="sidebar-backstage"`, menuju `/platform`.
+- **Halaman onboarding**: tautan kecil “Backstage platform” di header, untuk akun platform yang belum
+  punya workspace (mereka tidak pernah melihat sidebar aplikasi).
+- Keduanya hanya soal keterlihatan menu: `/platform` tetap memeriksa identitas & peran sendiri lewat
+  `platform.me`, jadi tautan ini bukan gerbang.
+
+**Berkas:** diubah: `src/lib/store/types.ts`, `src/lib/store/convex.tsx`, `src/lib/store/demo.tsx`,
+`src/layouts/AppLayout.tsx`, `src/pages/OnboardingPage.tsx`, `scripts/verify-render.mjs`.
+
+**Verifikasi:**
+
+- `bun tsc -b --noEmit` → exit 0 · `bun tsc -p tsconfig.convex.json --noEmit` → exit 0.
+- `bun scripts/verify-render.mjs` → **966/966** exit 0, termasuk cek baru: akun platform melihat tautan
+  backstage di onboarding (href `/platform`), pengguna biasa tidak; sidebar menampilkan tautan hanya
+  saat `platformDeveloper` dan tidak memunculkan error konsol.
+- `bun scripts/verify-menus.mjs` → **427/427** exit 0 (aturan menu tidak berubah untuk peran tenant).
+
+**Catatan / blocker:** tautan bergantung pada `users.platformRole` yang sudah ada di deployment
+(`phansugisoft@gmail.com`). Di mode demo tautan sengaja tidak pernah muncul — halaman backstage-nya pun
+terkunci di sana. Belum diuji di peramban sungguhan; verifikasinya render DOM tiruan + typecheck.
+
+## 2026-10-18 — Backstage: kategori & subkategori bisnis dikelola pemilik platform
+
+**Ruang lingkup:** permintaan pemilik repo: kategori dan subkategori bisnis owner/merchant
+“bisa dibuat, edit, aktifkan/nonaktifkan dan hapus oleh owner developer platform ini”. Sebelumnya
+taksonomi hanya daftar tetap di kode (`BUSINESS_CATEGORIES`). Sekarang:
+
+- **Tabel `businessCategories`** (`src/convex/schema.ts`) menjadi sumber katalog. Deployment yang
+  belum pernah mengubahnya tetap membaca bawaan kode; perubahan pertama di backstage menyemai
+  bawaannya sebagai data, jadi tidak ada migrasi dan pilihan yang sudah terkunci tidak tersentuh.
+- **Aturan murni** di `src/convex/lib/businessCategory.ts` (`applyBusinessCategoryChange`, 8 aksi:
+  buat/ubah nama/aktif-nonaktif/hapus untuk kategori maupun subkategori) dengan dua pagar: minimal
+  satu kategori aktif selalu ada, dan setiap kategori aktif wajib punya minimal satu subkategori
+  aktif. Kategori baru lahir nonaktif; subkategori terakhir di kategori aktif tidak bisa
+  dinonaktifkan/dihapus sebelum kategorinya dinonaktifkan. Label 2–40 karakter, unik, kunci stabil
+  dari label (`bisnis-2`, dst.).
+- **Gerbang server** `src/convex/platformCategories.ts` memakai `requirePlatformDeveloper` — bukan
+  izin tenant — untuk `list` dan `apply`. Tidak ada anggota/pemilik tenant yang bisa menyentuhnya.
+- **Halaman `/platform`**: kartu baru `PlatformBusinessCategoriesCard` (nomor 2, kartu sesudahnya
+  digeser jadi 3–5) dengan tambah kategori, daftar subkategori per kategori, ubah nama, aktif/nonaktif,
+  hapus, dan tombol “tambah subkategori”. Penolakan server tampil apa adanya.
+- **Pemilih tenant ikut katalog tersimpan**: `tenants.listBusinessCategories` + store (`businessCategories`)
+  dipakai onboarding & kartu Profil, jadi kategori buatan/hasil sunting backstage langsung bisa dipilih.
+  Mode demo memakai bawaan kode karena backstage memang hanya hidup di mode Convex.
+- Perubahan taksonomi **tidak** menulis ulang `tenants.businessCategory`: workspace menyimpan salinan
+  label saat mengunci, jadi ganti nama/hapus hanya memengaruhi pilihan baru.
+
+**Berkas:** baru: `src/convex/platformCategories.ts`, `src/convex/lib/businessCategoryStore.ts`,
+`src/components/PlatformBusinessCategoriesCard.tsx` · diubah: `src/convex/lib/businessCategory.ts`,
+`src/convex/schema.ts`, `src/convex/tenants.ts`, `src/convex/_generated/api.d.ts` (codegen),
+`src/lib/store/types.ts`, `src/lib/store/convex.tsx`, `src/lib/store/demo.tsx`,
+`src/pages/OnboardingPage.tsx`, `src/pages/PlatformPage.tsx`,
+`src/components/BusinessCategoryCard.tsx`, `scripts/verify-backend.mjs`,
+`scripts/verify-render.mjs`, `scripts/verify-business-category.mjs`.
+
+**Verifikasi:**
+
+- `bun tsc -b --noEmit` → exit 0 · `bun tsc -p tsconfig.convex.json --noEmit` → exit 0.
+- `bun convex dev --once` → fungsi `platformCategories` terpasang (dipakai cek di bawah lewat
+  `bun convex run`).
+- `bun scripts/verify-business-category.mjs` → **62/62** exit 0 (aturan taksonomi: label, kunci, pagar).
+- `bun scripts/verify-backend.mjs` (awan `mellow-narwhal-477`) → **946/946** exit 0. Cek baru mencakup:
+  pemilik platform membaca katalog; kategori baru nonaktif tanpa subkategori; aktivasi kategori tanpa
+  subkategori ditolak; subkategori ditambahkan; kategori lalu bisa diaktifkan; kategori buatan backstage
+  bisa dipilih & dikunci pemilik; setelah dikunci tidak bisa diganti; ubah nama subkategori menjaga
+  kunci; subkategori terakhir tidak bisa dinonaktifkan; kategori+sub nonaktif; hapus; dan workspace yang
+  sudah mengunci tetap utuh setelah katalognya dihapus.
+- `bun scripts/verify-render.mjs` → **961/961** exit 0 (termasuk cek baru: kartu taksonomi tidak muncul
+  selama gerbang platform tertutup).
+- `bun scripts/verify-profile.mjs` → **69/69** exit 0 (kartu kategori di Profil tetap jalan).
+
+**Catatan / blocker:** kartu backstage **belum** diuji di peramban mode Convex (belum ada harness UI
+untuk Convex; di mode demo halaman `/platform` memang terkunci). Yang terverifikasi untuk UI hanya
+typecheck + cek render mode demo; jalur tulisnya terverifikasi ujung-ke-ujung lewat `bun convex run`
+seperti cek backend di atas. Blocker identitas platform (item 1 daftar Blocker) masih berlaku: backstage
+di browser baru terbuka setelah provider identitas terpasang.
+
+## 2026-10-18 — Koreksi entri kategori utama bisnis: jalur onboarding ke server & angka akhir
+
+**Ruang lingkup:** koreksi atas entri “Kategori utama bisnis: dipilih pemilik sekali, dikunci
+permanen” (tepat di bawah ini) — dua hal yang belum tercatat di sana:
+
+1. **Wiring onboarding → server kurang.** Sesudah entri itu ditulis, pemeriksaan ulang menemukan
+bahwa efek provisioning di `src/lib/store/convex.tsx` belum mengirim `businessCategory` ke
+`tenants.create`, sehingga di mode Convex kategori yang dipilih saat onboarding hanya hidup di sesi
+perangkat dan server masih menawarkannya untuk dipilih kedua kali. Sudah diperbaiki: pilihan itu kini
+ikut dikunci saat workspace lahir (`tenants.create` menerima `businessCategory` dan memvalidasinya
+sebelum menulis apa pun).
+2. **Angka verifikasi entri itu sudah bertambah.** Dua cek backend baru ditambahkan setelah entri
+itu ditulis (onboarding mengunci kategori saat workspace dibuat; kategori asing ditolak sebelum
+workspace setengah jadi), jadi hasil akhirnya **931/931**, bukan 929/929. Seluruh cek lain di entri
+itu tidak berubah.
+
+**Berkas:** diubah: `src/lib/store/convex.tsx`, `scripts/verify-backend.mjs`.
+
+**Verifikasi:** `bun tsc -b --noEmit` exit 0 · `bun tsc -p tsconfig.convex.json --noEmit` exit 0 ·
+`bun scripts/verify-backend.mjs` (awan `mellow-narwhal-477`) → **931/931** exit 0 (termasuk kedua cek
+baru). Tidak ada harness UI yang dijalankan ulang karena berkas yang diubah di koreksi ini hanya store
+Convex & skrip backend — harness demo/onboarding tidak menyentuhnya.
+
+**Catatan / blocker:** jalur provisioning Convex (onboarding → `tenants.create`) terverifikasi lewat
+tipe + cek mutation `tenants.create` di backend, **belum** dijalankan ujung-ke-ujung di peramban mode
+Convex pada sesi ini.
+
+## 2026-10-18 — Kategori utama bisnis: dipilih pemilik sekali, dikunci permanen
+
+**Ruang lingkup:** permintaan pemilik repo: “setiap owner bisnis/merchant bisa memilih kategori
+utama dari bisnisnya dan kemudian MesinPOS mengunci kategori dan subkategori yg dipilih tsb menjadi
+kategori utama di sistem ini selamanya”. Yang dikerjakan:
+
+- Taksonomi tetap MesinPOS dipilih (bukan teks bebas): 6 kategori utama × 2–5 subkategori
+  (Perdagangan Eceran, Makanan & Minuman, Perdagangan Besar & Distribusi, Jasa & Layanan,
+  Produksi & Kerajinan, Lainnya) di `src/convex/lib/businessCategory.ts`.
+- Pemilik memilih kategori **dan** subkategorinya sekali di langkah “Modul” onboarding (wajib;
+  tombol Lanjut mati sampai lengkap; modul yang ditawarkan menyesuaikan kategori, masih bisa
+  diganti), lalu pilihan itu langsung ikut dibuat saat `tenants.create`.
+- Workspace lama (kolomnya masih kosong) bisa memilih sekali dari kartu baru **Kategori utama
+  bisnis** di halaman Profil; sesudahnya kartu menampilkan nilai, tanggal, dan penjelasan bahwa
+  tidak ada tombol ubah — pemilihnya hilang, bukan formulir yang diam-diam menolak.
+- Penguncian ditegakkan di aturan murni yang dipakai bersama: pilihan pertama menulis
+  `tenants.businessCategory` (kategori, subkategori, label salinan, `lockedAt`, `lockedBy`);
+  panggilan ulang dengan pasangan sama → `changed: false`; pasangan berbeda atau pengosongan →
+  ditolak dengan pesan yang menyebut nilai yang sudah terkunci. Mutation `tenants.setBusinessCategory`
+  **hanya pemilik** (bukan manajer/keuangan), menolak baris terkunci yang bentuknya tidak dikenali,
+  dan menulis jejak audit `tenant.business_category`.
+- Kedua store memakai aturan yang sama: mode demo mengunci lewat sesi perangkat, mode Convex lewat
+  mutation server; nilai terkunci ikut dipulihkan saat sesi perangkat diselaraskan
+  (`adoptWorkspace`), jadi perangkat baru tidak melihat formulir pilihan kedua.
+
+**Berkas:** baru: `src/convex/lib/businessCategory.ts`, `src/lib/businessCategory.ts`,
+`src/components/BusinessCategoryCard.tsx`, `scripts/verify-business-category.mjs` · diubah:
+`src/convex/schema.ts`, `src/convex/tenants.ts`, `src/lib/session.tsx`, `src/lib/store/types.ts`,
+`src/lib/store/demo.tsx`, `src/lib/store/convex.tsx`, `src/pages/OnboardingPage.tsx`,
+`src/pages/ProfilePage.tsx`, `scripts/verify-profile.mjs`, `scripts/verify-render.mjs`,
+`scripts/verify-backend.mjs`, `README.md`.
+
+**Verifikasi:**
+`bun scripts/verify-business-category.mjs` → **31/31** (taksonomi, label dipetakan ke kunci kanonik,
+penolakan kategori asing/pasangan salah, kunci permanen & idempoten, kalimat notis) ·
+`bun scripts/verify-profile.mjs` → **69/69** (kartu belum dipilih → pilih → terkunci, nilai & tanggal
+terbaca, muat ulang tetap terkunci, kasir hanya membaca) ·
+`bun scripts/verify-render.mjs` → **960/960** (alur onboarding: kategori wajib, subkategori per
+kategori, pasangan tersimpan terkunci saat trial dimulai) ·
+`bun scripts/verify-menus.mjs` → **427/427** · `bun scripts/verify-store-gate.mjs` → **17/17** ·
+`bun scripts/verify-modules.mjs` → **34/34** ·
+`bun scripts/verify-backend.mjs` (awan `mellow-narwhal-477`, ter-push lebih dulu) → **929/929**
+(termasuk pilih sekali, panggilan ulang tidak menulis, penggantian ditolak selamanya, kasir ditolak) ·
+`bun tsc -b --noEmit` exit 0 · `bun tsc -p tsconfig.convex.json --noEmit` exit 0 ·
+`bun convex dev --once` → “✔ Convex functions ready!” exit 0.
+
+**Catatan / blocker:** verifikasi UI lewat DOM tiruan (happy-dom) + Chromium tidak dipakai di sesi
+ini — halaman onboarding & Profil belum diperiksa **secara visual** di peramban. Panduan
+(`public/panduan/panduan-mesinpos.pdf`) belum menyebut langkah kategori utama. Kategori utama adalah
+identitas bisnis yang tersimpan di baris tenant; ia belum ikut dikirim ke API publik.
+
+## 2026-10-18 — Subkategori dibuat di bawah kategorinya (bukan di form produk)
+
+**Ruang lingkup:** permintaan pemilik repo: “pembuatan subkategori berada di bawah kategori”.
+Subkategori kini punya tempatnya sendiri, menempel pada baris kategori di kartu **Kategori produk**
+(halaman Produk & Stok), bukan sebagai teks bebas di form produk. Yang dikerjakan:
+
+- Tabel `subcategories` (tenant + kategori induk + nama + status + urutan) dan fungsi
+`subcategories.ts`: `list`, `create`, `rename`, `setActive`, `remove` — semuanya bergerbang
+`category.manage`, nama dirapikan & unik **per kategori induk**, nama “Tanpa kategori” ditolak.
+- Di baris kategori ada tautan “Belum ada subkategori · atur” / “N subkategori · atur” yang membuka
+panel tepat di bawah baris kategori itu: daftar subkategori beserta jumlah produk, ubah nama,
+aktif/nonaktif, hapus (produknya dilepas dari subkategori, bukan ikut terhapus), dan kolom
+“Tambah subkategori di bawah <kategori>”.
+- Form produk baru & kartu edit produk memilih subkategori dari **daftar di bawah kategori yang
+dipilih** (bukan teks bebas); subkategori kategori lain tidak ditawarkan, subkategori nonaktif
+hilang dari pemilih tetapi produk lama tetap menyimpannya.
+- Hapus kategori ikut menghapus subkategorinya dan melepas produknya; ganti nama kategori
+membawa serta nama kategori di subkategorinya.
+- Mode demo menyimpan `subcategoryRows` + validasi yang sama dengan server. **Koreksi di sesi ini:**
+`createProduct` dan `setCategory` di store demo memakai `useCallback` dengan dependensi yang kurang,
+sehingga validasi subkategori membaca daftar dari render pertama (masih kosong) dan produk
+bersubkategori gagal disimpan — dependensinya kini menyertakan `categoryRows` & `subcategoryRows`.
+- Subkategori ikut dikirim ke API & webhook (lihat entri 2026-10-18 di bawah untuk sisi API).
+
+**Berkas:** baru: `src/convex/subcategories.ts` · diubah: `src/convex/schema.ts`,
+`src/convex/categories.ts`, `src/convex/lib/categories.ts`, `src/convex/tenants.ts`,
+`src/convex/products.ts`, `src/convex/apiAccess.ts`, `src/convex/lib/webhooks.ts`,
+`src/convex/lib/webhookEvents.ts`, `src/convex/_generated/api.d.ts`, `src/lib/store/types.ts`,
+`src/lib/store/demo.tsx`, `src/lib/store/convex.tsx`, `src/pages/ProductsPage.tsx`,
+`src/lib/apiDocs.ts`, `README.md`, `scripts/verify-categories.mjs`,
+`scripts/verify-platform-sync.mjs`, `scripts/verify-api-docs.mjs`, `scripts/verify-render.mjs`.
+
+**Verifikasi:**
+- `bun scripts/verify-render.mjs` → **953/953** lulus (termasuk cek baru: panel subkategori terbuka di
+  bawah kategorinya, nama “  Sabun   Cair ” dirapikan jadi “Sabun Cair” dan tersimpan di bawah
+  kategori induknya, nama kembar di kategori yang sama ditolak, form produk hanya menawarkan
+  subkategori kategorinya sendiri, produk menyimpan subkategori tanpa mengubah SKU, dan jumlah
+  produk per subkategori terhitung).
+- `bun scripts/verify-categories.mjs` → 56/56 · `bun scripts/verify-platform-sync.mjs` → 42/42 ·
+  `bun scripts/verify-api-docs.mjs` → 76/76 · `bun scripts/verify-api.mjs` → 226/226 ·
+  `bun scripts/verify-store-gate.mjs` → 17/17 · `bun scripts/verify-backend.mjs` (deployment awan)
+  → 924/924.
+- `bun tsc -b --noEmit` → exit 0 · `bun tsc -p tsconfig.convex.json --noEmit` → exit 0 ·
+  `bun convex dev --once` → “Convex functions ready!” (4,42 s), exit 0.
+
+**Catatan / blocker:** harness render sempat gagal dua kali karena kesalahan ujinya sendiri, bukan
+kode aplikasi: kategori ujinya sudah berganti nama menjadi “Sanitasi & Kebersihan” (label tombol
+diperbaiki), dan opsi “Tanpa subkategori” bernilai kosong sehingga harus dibaca dari labelnya. Sisi
+UI diperiksa lewat DOM tiruan (happy-dom), bukan peramban sungguhan — pemeriksaan visual di preview
+belum dijalankan di sesi ini. Tabel **Status Phase 1** dan daftar **Blocker yang masih terbuka**
+diperiksa: subkategori adalah pengelolaan katalog, bukan klausa roadmap, jadi keduanya tidak berubah.
+
+## 2026-10-18 — API & webhook: kategori dan subkategori katalog disinkronkan
+
+**Ruang lingkup:** permintaan pemilik repo: “tambahkan dalam API untuk field kategori dan subkategori
+agar bisa disinkronkan juga”. Yang dikerjakan:
+
+- `GET /api/v1/products` kini mengirim `category` & `subcategory` (**nama**, bukan id internal) per
+produk — `null` bila tidak ada; daftar kategori dibaca sekali untuk seluruh halaman, bukan per produk.
+- `product.updated` membawa `category` & `subcategory` terkini di **setiap** kiriman, dan `changed`
+menyebut `subcategory` saat labelnya berganti — platform bisa memperbarui katalog dua tingkat tanpa
+menebak dari nama produk.
+- **Subkategori adalah kemampuan baru di MesinPOS**, bukan field yang sekadar diteruskan: kolom
+`products.subcategory` (teks bebas yang dirapikan, 2–40 karakter) dengan aturan murni
+`validateSubcategoryName` di `lib/categories.ts` — wajib punya kategori, nama “Tanpa kategori”
+terlarang, spasi ganda/ pinggir dirapikan. Sengaja **bukan** baris `categories` dan **tidak**
+menyentuh SKU maupun tab POS: mengganti subkategori tidak pernah mengganti SKU (diuji di runtime).
+- Halaman Produk & Stok: kolom **Subkategori (opsional)** di form produk baru & panel “Atur harga”
+(terkunci saat belum ada kategori, saran dari subkategori yang sudah dipakai di kategori itu); tabel
+menampilkan `Kategori › Subkategori`; kedua store (Convex & demo) memakai aturan yang sama.
+
+**Berkas:** diubah: `src/convex/lib/categories.ts`, `src/convex/schema.ts`, `src/convex/products.ts`,
+`src/convex/lib/webhookEvents.ts`, `src/convex/lib/webhooks.ts`, `src/convex/apiAccess.ts`,
+`src/lib/apiDocs.ts`, `src/lib/store/types.ts`, `src/lib/store/convex.tsx`, `src/lib/store/demo.tsx`,
+`src/pages/ProductsPage.tsx`, `README.md`, `scripts/verify-categories.mjs`,
+`scripts/verify-platform-sync.mjs`, `scripts/verify-api-docs.mjs`, `worklog.md`.
+
+**Verifikasi:**
+
+- `bun convex dev --once` → exit 0, `Convex functions ready! (4.55s)`.
+- **Runtime `GET products` (deployment)**: `products:create` dengan kategori “Uji Katalog API” &
+subkategori `"Semen  Portland"` → `apiAccess:readResource` mengembalikan
+`"category": "Uji Katalog API"`, `"subcategory": "Semen Portland"` (spasi ganda dirapikan); produk
+lain di tenant yang sama tetap `"subcategory": null`.
+- **Runtime `setCategory`**: subkategori `"Semen Putih"` → `sku` **tidak berubah**
+(`UJI-SUB-000001` → `UJI-SUB-000001`), balikan `subcategory: "Semen Putih"`; memanggilnya tanpa
+kategori ditolak — `Subkategori hanya bisa diisi kalau produk punya kategori — pilih kategorinya lebih
+dulu.` (CLI exit 1).
+- **Webhook nyata**: endpoint uji (tenant enterprise) menerima dua kiriman `product.updated` —
+`"category":"Uji Katalog API","subcategory":"Semen Portland","changed":["created"]` lalu
+`"subcategory":"Semen Putih","changed":["subcategory"]`; pekerja mencoba (attempts 1, gagal karena
+host uji) → antrean & pengiriman bekerja. Data uji (produk, kategori, endpoint → 3 kiriman) dihapus lagi.
+- `bun tsc -b --noEmit` → exit 0. Harness: `verify-categories.mjs` **41/41**,
+`verify-platform-sync.mjs` **39/39**, `verify-api-docs.mjs` **76/76**, `verify-api.mjs` **226/226**,
+`verify-render.mjs` **946/946** — semuanya exit 0.
+- `bun scripts/verify-backend.mjs` **tidak dijalankan ulang** di entri ini (butuh deployment penuh dan
+mengubah data uji); alur produk/kategori yang disentuh sudah dibuktikan lewat cek runtime di atas.
+
+**Catatan / blocker:**
+
+- `setCategory` menetapkan penempatan **utuh**: memanggilnya tanpa `subcategory` berarti melepas
+subkategori. Pemanggil lama (produk tanpa subkategori) tidak berubah perilakunya; panel “Atur harga”
+hanya memanggilnya saat kategori **atau** subkategori benar-benar berubah.
+- Impor massal/API tulis belum bisa mengisi subkategori, dan laporan/analitik tetap dikelompokkan per
+**kategori** — subkategori murni label katalog untuk sinkronisasi, sesuai keputusan itu.
+- Tabel **Status Phase 4** diperbarui pada baris **API akses penuh & webhook** (angka harness &
+katalog dua tingkat); daftar **Blocker** diperiksa: tidak ada butir yang berubah status.
+
 ## 2026-10-17 — Verifikasi runtime sinkronisasi + koreksi “belum di-push”
 
 **Ruang lingkup:** pemeriksaan akhir entri sebelumnya. Dua koreksi dan verifikasi susulan:
@@ -11425,9 +12714,10 @@ dibuat ulang.
 
 | Klausa (roadmap) | Status kode | Verifikasi |
 |---|---|---|
-| Multi-tenant database | Selesai (isolasi baca **dan** tulis; tiap akun berdiri sendiri — nama bisnis boleh sama, workspace & pengaturannya terpisah — dan anggota tim masuk ke workspace yang sama lewat undangan email yang benar-benar dikirim, bisa juga lewat tautan WhatsApp `wa.me`; anggota yang sudah ada bisa diubah, diaktifkan/nonaktifkan, dan dihapus dari workspace itu) | `verify-backend.mjs` 607/607 |
-| Billing & entitlement engine | Selesai | `verify-backend.mjs` 607/607 |
-| Auth RBAC | Selesai di sisi kode (**termasuk model akses akun platform developer**, di luar RBAC tenant; sejak 2026-10-12 jalur masuknya **tanpa kata sandi** — kode OTP ke email, aturan murni `lib/otp.ts`, satu jalur untuk masuk & daftar) | `verify-authz.mjs` 86/86 · `verify-otp.mjs` 79/79 · `verify-menus.mjs` 384/384 · `verify-team.mjs` 41/41 · `verify-backend.mjs` 607/607 |
+| Multi-tenant database | Selesai (isolasi baca **dan** tulis; tiap akun berdiri sendiri — nama bisnis boleh sama, workspace & pengaturannya terpisah — dan anggota tim masuk ke workspace yang sama lewat undangan email yang benar-benar dikirim, bisa juga lewat tautan WhatsApp `wa.me`; anggota yang sudah ada bisa diubah, diaktifkan/nonaktifkan, dan dihapus dari workspace itu) | `verify-backend.mjs` 959/959 |
+| Billing & entitlement engine | Selesai | `verify-backend.mjs` 959/959 |
+| Auth RBAC | Selesai di sisi kode (**termasuk model akses akun platform developer**, di luar RBAC tenant; sejak 2026-10-12 jalur masuknya **tanpa kata sandi** — kode OTP ke email, aturan murni `lib/otp.ts`, satu jalur untuk masuk & daftar) | `verify-authz.mjs` 86/86 · `verify-otp.mjs` 79/79 · `verify-menus.mjs` 384/384 · `verify-team.mjs` 41/41 · `verify-backend.mjs` 959/959 |
+| Taksonomi kategori bisnis (backstage) | Selesai di sisi kode — buat, ubah nama, aktif/nonaktif, hapus kategori & subkategori oleh pemilik platform (`requirePlatformDeveloper`); katalog tersimpan dipakai onboarding & Profil (termasuk akun yang belum punya workspace), pilihan tenant yang sudah terkunci tidak berubah; **master kategori & subkategori produk disemai mengikuti pilihan bisnis** (workspace baru, saat pilihan dikunci, tombol sinkronisasi di halaman Produk & Stok yang sejak 2026-10-18 menyebut **apa** yang belum ada, dan penyapuan admin `categories:backfillFromBusinessCategory` untuk workspace lama) | `verify-business-category.mjs` 73/73 · `verify-product-presets.mjs` 21/21 · `verify-backend.mjs` 959/959 · `verify-render.mjs` 1037/1037 · `verify-profile.mjs` 70/70 |
 | Offline-first POS engine | Selesai | `verify-offline.mjs` 24/24 |
 
 Provider identitas Convex **sudah terpasang** (2026-10-12, Convex Auth + OTP email Resend):
@@ -11588,8 +12878,8 @@ webhook: aturan murni `lib/apiKeys.ts` + `lib/webhooks.ts` + `lib/hash.ts`, tabe
 | Klausa (roadmap) | Status kode | Verifikasi |
 |---|---|---|
 | **Advanced BI & analitik** (`report.advanced`) | Selesai (aturan murni `lib/analytics.ts`; query `reports.advanced`; periode 7/30/90 hari dengan batas **tengah malam lokal**; margin kotor dari omzet bersih + pemisahan omzet tanpa harga beli; produk/kategori/metode/jam/hari; perbandingan periode sama panjang; temuan berambang) | `verify-analytics.mjs` 65/65 · `verify-backend.mjs` 375/375 (14 cek analitik) · `verify-render.mjs` 237/237 |
-| **Peran kustom** (`rbac.custom`) | Selesai (aturan murni `lib/rbac.ts` + `lib/roleSettings.ts`; tabel `customRoles` + `memberships.customRoleId` + **`roleSettings`**; fungsi `roles.*` untuk peran kustom **dan peran bawaan** (`setBuiltin`/`removeBuiltin`/`restoreBuiltin`/`resetBuiltin`); **lingkup semua peran termasuk bawaan** — izin peran bawaan bisa disesuaikan, dinonaktifkan, dihapus dari penugasan, dan dikembalikan; nama peran bawaan tetap & Pemilik terkunci; `requirePermission` memakai izin efektif; gerbang fitur tidak seragam — lihat catatan di bawah; halaman `/app/team` + menu + rute; izin `team.manage`; **satu daftar peran (bawaan + tambahan) & satu pemilih peran** saat mendaftarkan anggota; peran tambahan **berdiri sendiri** — `memberships.role` opsional, satu anggota menyimpan `role` **atau** `customRoleId`, dan tidak ada peran dasar tersembunyi; **pembersih baris lama** `members.cleanupLegacyRoles` + laporan `members.legacyRoleReport` — 113 baris lama di `mellow-narwhal-477` dirapikan tanpa mengubah akses, sisa 0) | `verify-rbac.mjs` 48/48 · `verify-role-settings.mjs` 62/62 · `verify-team.mjs` 61/61 · `verify-backend.mjs` 924/924 (peran kustom + peran bawaan) · `verify-render.mjs` 946/946 |
-| **API akses penuh & webhook** (`api.access`) | Selesai (aturan murni `lib/apiKeys.ts` + `lib/webhooks.ts` + `lib/apiOrders.ts` + `lib/webhookEvents.ts` + kripto `lib/hash.ts`; tabel `apiKeys`/`webhookEndpoints`/`webhookDeliveries` + indeks antrean `by_status_next_attempt`; fungsi `apiAccess.*` + HTTP action baca & **tulis** `/api/v1/*` (`POST /api/v1/sales`, scope tulis `pos.sell`); scope dibatasi izin efektif pembuat; halaman `/app/api` + menu + rute; izin `api.manage`; **pekerja terjadwal `crons.ts` yang benar-benar mengirim ulang webhook gagal** + **pemicu seluruh katalog**: transaksi (penjualan selesai/dibatalkan, stok menembus ambang, opname diposting), dokumen jatuh tempo (`payable.due`/`receivable.overdue`, pekerja harian), dan tiket dukungan (`support.*`) — tidak ada lagi entri katalog yang bisa dilanggan tanpa pemicu; **dokumentasi API publik `/dokumentasi-api`** yang isinya diturunkan dari `API_RESOURCES`/`WEBHOOK_EVENTS`; **sinkronisasi platform** dengan MesinPOS sebagai sumber utama — event `product.updated`/`stock.changed`/`purchase.received`, endpoint tarik `purchases` + `since`/`cursor`, dan kontrak `SYNC_DOC`) | `verify-api.mjs` 226/226 · `verify-backend.mjs` 489/489 (penjualan nyata lewat `POST /api/v1/sales`, pemicu event transaksi, **pemicu kalender end-to-end**, + 29 cek baca) · `verify-render.mjs` 309/309 · `verify-webhook-retries.mjs` 6/6 (E2E, menunggu jadwal sungguhan) · `verify-api-docs.mjs` 73/73 · `verify-platform-sync.mjs` 35/35 |
+| **Peran kustom** (`rbac.custom`) | Selesai (aturan murni `lib/rbac.ts` + `lib/roleSettings.ts`; tabel `customRoles` + `memberships.customRoleId` + **`roleSettings`**; fungsi `roles.*` untuk peran kustom **dan peran bawaan** (`setBuiltin`/`removeBuiltin`/`restoreBuiltin`/`resetBuiltin`); **lingkup semua peran termasuk bawaan** — izin peran bawaan bisa disesuaikan, dinonaktifkan, dihapus dari penugasan, dan dikembalikan; nama peran bawaan tetap & Pemilik terkunci; `requirePermission` memakai izin efektif; gerbang fitur tidak seragam — lihat catatan di bawah; halaman `/app/team` + menu + rute; izin `team.manage`; **satu daftar peran (bawaan + tambahan) & satu pemilih peran** saat mendaftarkan anggota; peran tambahan **berdiri sendiri** — `memberships.role` opsional, satu anggota menyimpan `role` **atau** `customRoleId`, dan tidak ada peran dasar tersembunyi; **pembersih baris lama** `members.cleanupLegacyRoles` + laporan `members.legacyRoleReport` — 113 baris lama di `mellow-narwhal-477` dirapikan tanpa mengubah akses, sisa 0) | `verify-rbac.mjs` 48/48 · `verify-role-settings.mjs` 66/66 · `verify-team.mjs` 61/61 · `verify-backend.mjs` 959/959 (peran kustom + peran bawaan) · `verify-render.mjs` 992/992 |
+| **API akses penuh & webhook** (`api.access`) | Selesai (aturan murni `lib/apiKeys.ts` + `lib/webhooks.ts` + `lib/apiOrders.ts` + `lib/webhookEvents.ts` + kripto `lib/hash.ts`; tabel `apiKeys`/`webhookEndpoints`/`webhookDeliveries` + indeks antrean `by_status_next_attempt`; fungsi `apiAccess.*` + HTTP action baca & **tulis** `/api/v1/*` (`POST /api/v1/sales`, scope tulis `pos.sell`); scope dibatasi izin efektif pembuat; halaman `/app/api` + menu + rute; izin `api.manage`; **pekerja terjadwal `crons.ts` yang benar-benar mengirim ulang webhook gagal** + **pemicu seluruh katalog**: transaksi (penjualan selesai/dibatalkan, stok menembus ambang, opname diposting), dokumen jatuh tempo (`payable.due`/`receivable.overdue`, pekerja harian), dan tiket dukungan (`support.*`) — tidak ada lagi entri katalog yang bisa dilanggan tanpa pemicu; **dokumentasi API publik `/dokumentasi-api`** yang isinya diturunkan dari `API_RESOURCES`/`WEBHOOK_EVENTS`; **sinkronisasi platform** dengan MesinPOS sebagai sumber utama — event `product.updated`/`stock.changed`/`purchase.received`, endpoint tarik `purchases` + `since`/`cursor`, kontrak `SYNC_DOC`, dan **katalog dua tingkat**: `GET /api/v1/products` mengirim `category` & `subcategory` (nama, bukan id) yang juga ikut di `product.updated`) | `verify-api.mjs` 226/226 · `verify-backend.mjs` 489/489 (penjualan nyata lewat `POST /api/v1/sales`, pemicu event transaksi, **pemicu kalender end-to-end**, + 29 cek baca) · `verify-render.mjs` 309/309 · `verify-webhook-retries.mjs` 6/6 (E2E, menunggu jadwal sungguhan) · `verify-api-docs.mjs` 76/76 · `verify-platform-sync.mjs` 39/39 |
 
 **Pembaruan 2026-10-16 (analitik enterprise, entri teratas):** klausa **Advanced BI & analitik**
 bertambah **proyeksi akhir periode** (laju hari-hari penuh, pembanding jumlah hari penuh yang sama)
@@ -11635,6 +12925,12 @@ menugaskan** butuh fitur `rbac.custom`, sedangkan **melihat, melepas penugasan, 
 menghapus peran yang tidak dipakai, dan memulihkannya** selalu boleh — supaya tenant tidak terkunci
 dari timnya sendiri setelah paket turun. Mengembalikan izin bawaan ikut butuh fiturnya, karena jalur
 itu sama-sama bisa menambah izin orang lain.
+**Pembaruan 2026-10-18 (entri teratas):** gerbang itu kini sampai ke tombolnya — di paket tanpa
+`rbac.custom` tombol **Ubah izin** peran bawaan tampil **mati beserta alasannya** (dulu hidup, jadi
+penolakan baru muncul saat menyimpan: “Fitur Custom role (RBAC) tidak termasuk paket starter”),
+**Kembalikan izin bawaan** disembunyikan, sedangkan menonaktifkan/menghapus/memulihkan peran dan
+**menugaskan peran bawaan** (termasuk pemilih peran di formulir undangan) tetap bisa seperti yang
+diizinkan server.
 
 ## Status Phase 5
 
@@ -11713,6 +13009,11 @@ kasir yang menunjuk tagihan yang sudah lunas tetap boleh disimpan), dan
    backstage di browser tetap menunggu permintaan kode baru lalu memasukkannya. Temuan samping:
    satu akun uji sisa harness (`platform-1791779111174@mesinpos.id`) masih ber-penanda `developer`
    dan belum dicabut (butuh keputusan, karena itu tulisan ke data produksi).
+   **Pembaruan 2026-10-18 (bersih-bersih akun uji):** **selesai** — akun itu beserta dua akun
+   developer uji lain (`platform-1792296612601@mesinpos.id`, `platform-1792298883916@mesinpos.id`)
+   sudah dihapus oleh `platform:purgeFixtureUsers` (sisa `users` kini **5 baris**, semuanya nyata),
+   dan pagarnya kini otomatis: akun pengembang uji disapu selama masih ada pengembang beremail non-uji.
+   Rinciannya di entri worklog teratas.
    **Pembaruan 2026-10-12 (entri teratas: workspace berdiri sendiri):** sesi perangkat kini
    diselaraskan dengan keanggotaan di server (`tenants.listMine` → `adoptWorkspace`, ditahan
    `store.workspacePending` selama identitas belum pasti). Jadi bagian “sesi per perangkat” pada butir
@@ -12002,8 +13303,16 @@ kasir yang menunjuk tagihan yang sudah lunas tetap boleh disimpan), dan
 bun tsc -b --noEmit                          # tipe frontend
 bun tsc -p tsconfig.convex.json --noEmit     # tipe backend
 bun scripts/verify-authz.mjs                 # tabel peran, kebijakan identitas & akun platform (murni, 92/92)
-bun scripts/verify-categories.mjs            # kategori produk category.manage: nama terlarang & kembar, kode SKU, kategori nonaktif, tab POS, dampak hapus (murni, 35/35)
+bun scripts/verify-categories.mjs            # kategori produk category.manage: nama terlarang & kembar, kode SKU, kategori nonaktif, tab POS, dampak hapus, subkategori (label katalog: rapi, batas panjang, wajib berkategori, nama terlarang) (murni, 41/41)
+bun scripts/verify-business-category.mjs     # kategori utama bisnis: taksonomi tetap, label dipetakan ke kunci kanonik, penolakan kategori asing/pasangan salah, penguncian permanen (idempoten untuk pasangan sama, ditolak untuk pasangan lain/pengosongan), saran modul (murni, 31/31)
 bun scripts/verify-impersonation.mjs         # sesi pendampingan platform: alasan, batas waktu, penolakan workspace sendiri & jejak audit (murni, 52/52)
+bun scripts/verify-platform-tenants.mjs      # akun bisnis di backstage: ubah nama/paket, nonaktif/aktifkan, hapus + konfirmasi slug, pembersihan massal (domain uji, workspace pengelola sendiri tidak pernah ikut, yang tidak jelas disisakan, dry-run) + sisa akun pengguna uji (yatim dihapus; pemilik tenant, anggota workspace, dan pengembang terakhir disisakan), pencocokan kata kunci (nama/slug/paket/email) & cakupan sapuan, rekap, jejak audit, kecocokan daftar tabel sapuan dengan schema.ts, jadwal cron pembersihan (murni, 131/131)
+bun scripts/verify-error-notice.mjs          # kotak galat bersama: ConvexError vs bungkusannya, string validasi, kalimat pengganti, “Detail teknis”; plus cek sumber kasir/produk/pembelian (23/23)
+bun run bersih:uji                           # WAJIB sesudah uji yang menulis ke deployment: akun bisnis uji + baris pengguna yatim (AGENTS.md)
+bun convex run platform:purgeFixtureUsers '{"dryRun":true}'   # lihat sisa baris pengguna uji yang sudah yatim
+bunx convex run platform:purgeFixtureTenants '{"actorId":"…","dryRun":true}'   # lihat kandidat akun uji (baca-saja); tanpa dryRun menjalankan pembersihan bergelombang
+bun convex data platformAuditLogs --limit 4000 | grep -c "bersih-bersih akun uji"   # berapa akun uji yang sudah dihapus (jejak pengelola)
+bun scripts/verify-platform-edit-ui.mjs      # kartu Akun bisnis di DOM tiruan (convex/react di-stub): tombol Edit & formulirnya, kiriman mutation + notis, dan pencarian (jeda ketikan, hasil di luar 100 baris pertama, kalimat “diperiksa N akun”/“kena batas” apa adanya) (25/25)
 bun scripts/verify-offline.mjs               # mesin antrean offline (murni)
 bun scripts/verify-fnb.mjs                   # aturan denah meja + antrean dapur + pagar hapus meja + urutan & impor denah + penanda kanal/momen pelunasan tiket + kapan tagihan QR baru boleh diberitahukan (bunyi & kilat: sekali per tagihan, hanya yang baru) + dua sumber tiket (pesanan tertahan & penjualan lunas yang otomatis dikirim ke dapur) beserta label pembayarannya + kunci meja sampai dapur menekan Selesai (`tableHolders`/`ticketTableHolders`, kalimat penolakan "sudah dibayar", penjualan yang tidak pernah ke dapur tidak menahan meja) (murni, 124/124)
 bun scripts/verify-meja.mjs                   # pesanan QR meja: token `mj_`/`mjo_`, keranjang tamu (harga dari katalog & batasnya), total tamu = total kasir, cara bayar QRIS/VA + nomor VA deterministik, gambar QRIS (screenshot) bisa dipindai balik, pagar pembatalan tamu, “masih menunggu pelunasan” (`isAwaitingPayment`) (murni, 72/72)
@@ -12019,7 +13328,7 @@ bun scripts/verify-threeway.mjs               # pencocokan 3 arah + bayar sekali
 bun scripts/verify-opname.mjs                 # stock opname & audit selisih (murni)
 bun scripts/verify-analytics.mjs              # analitik lanjutan report.advanced (murni)
 bun scripts/verify-rbac.mjs                   # peran kustom rbac.custom (murni, 48/48)
-bun scripts/verify-role-settings.mjs          # peran bawaan yang disesuaikan: izin, status aktif, hapus/pulihkan, pagar Pemilik, dan aksi kartu halaman (izin mana yang ditawarkan tombol) (murni, 62/62)
+bun scripts/verify-role-settings.mjs          # peran bawaan yang disesuaikan: izin, status aktif, hapus/pulihkan, pagar Pemilik, dan aksi kartu halaman (izin mana yang ditawarkan tombol — termasuk tombol yang mati karena paketnya tanpa `rbac.custom`) (murni, 66/66)
 bun scripts/verify-store-gate.mjs             # gerbang langganan store Convex: izin yang dituntut tiap query di src/convex/*.ts vs gerbang `has(<izin>)` dari roles.myAccess, wajib "skip", izin sesi dilarang, keanggotaan nonaktif (murni, 17/17)
 bun scripts/verify-scan-beep.mjs              # bunyi bip kasir + nada notifikasi tagihan QR dapur: nada yang dijadwalkan (frekuensi, amplop, sambungan simpul), konteks sekali & dipakai ulang, resume autoplay, tanpa Web Audio = senyap, aturan setelan aktif/mati (bawaan aktif, hanya "off" yang mematikan, penyimpanan menolak, pendengar React), plus aturan volume 10–100 % (langkah 10 %, bawaan 70 % yang mengembalikan kekuatan lama 0,18, nilai rusak kembali ke bawaan, label & kalimat, nada yang dijadwalkan memakai kekuatan sesuai volume), dan nada dapur yang satu oktaf di atas bip kasir & ikut saklar bunyi yang sama (murni + tiruan AudioContext, 62/62)
 # uji browser sungguhan (Chromium/Playwright) — butuh paket peramban DI LUAR repo (PLAYWRIGHT_DIR) dan
@@ -12092,8 +13401,8 @@ bun scripts/verify-scan-beep.mjs              # bunyi bip kasir + nada notifikas
 #     lunasnya — isi pesanannya ikut terbaca dapur (100/100)
 bun scripts/verify-team.mjs                   # tim: nomor WA (`62…`), pesan & tautan wa.me, pagar ubah/nonaktif/hapus anggota (murni, 47/47)
 bun scripts/verify-api.mjs                    # kunci API, webhook, pekerja retry, pemicu event/kalender & pesanan masuk api.access (murni, 226/226)
-bun scripts/verify-api-docs.mjs               # dokumentasi API publik /dokumentasi-api: sinkron dengan API_RESOURCES & WEBHOOK_EVENTS, contoh JSON sah, tanda tangan webhook, rute tetap di luar sesi (murni, 73/73)
-bun scripts/verify-platform-sync.mjs          # sinkronisasi platform: event harga/stok/pembelian, pemicunya di jalur tulis domain, endpoint tarik since/cursor, kontrak MesinPOS sumber utama (murni, 35/35)
+bun scripts/verify-api-docs.mjs               # dokumentasi API publik /dokumentasi-api: sinkron dengan API_RESOURCES & WEBHOOK_EVENTS, contoh JSON sah, kategori & subkategori katalog terdokumentasi, tanda tangan webhook, rute tetap di luar sesi (murni, 76/76)
+bun scripts/verify-platform-sync.mjs          # sinkronisasi platform: event harga/katalog (kategori & subkategori ikut) /stok/pembelian, pemicunya di jalur tulis domain, endpoint tarik since/cursor, kontrak MesinPOS sumber utama (murni, 39/39)
 bun scripts/verify-support.mjs                # dukungan khusus support.dedicated: janji tanggap, SLA, transisi & kanal keluar (murni, 61/61)
 bun scripts/verify-scale.mjs                  # skala franchise scale.franchise: anggaran query, pangsa & gabungan top-N (murni, 42/42)
 bun scripts/verify-payments.mjs               # pembayaran digital payment.digital: umur tagihan, pelunasan pas, transisi & tagih dari keranjang (murni, 72/72)

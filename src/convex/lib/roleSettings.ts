@@ -275,6 +275,12 @@ export interface RoleActions {
   reset: boolean;
   /** Kenapa tombol Hapus mati — `null` saat tombolnya hidup. */
   removeReason: string | null;
+  /**
+   * Kenapa tombol “Ubah izin”/“Kembalikan izin bawaan” mati — `null` saat
+   * tombolnya hidup. Alasannya datang dari `featureUnavailableReason` supaya
+   * kalimatnya sama dengan yang dijawab server.
+   */
+  editReason: string | null;
 }
 
 export function roleActions(input: {
@@ -284,18 +290,32 @@ export function roleActions(input: {
   customized: boolean;
   memberCount: number;
   canManage: boolean;
+  /**
+   * Ketersediaan fitur `rbac.custom` untuk workspace ini — `null` berarti
+   * tersedia.
+   *
+   * Menyunting izin peran bawaan **membuka akses baru**, jadi server menuntut
+   * fitur itu (`roles.setBuiltin`/`roles.resetBuiltin` → `requireFeature`). Kalau
+   * keputusan ini tidak sampai ke halaman, tombol “Ubah izin” hidup di paket
+   * Starter dan pengguna baru tahu setelah server menolak:
+   * “Fitur Custom role (RBAC) tidak termasuk paket Starter.” Tombol yang mati
+   * beserta alasannya lebih baik daripada request yang pasti ditolak.
+   */
+  editGateReason: string | null;
 }): RoleActions {
   const locked = isLockedRole(input.role) || !input.canManage;
   if (locked) {
+    const reason = isLockedRole(input.role)
+      ? "Pemilik tenant selalu memegang seluruh izin."
+      : "Butuh izin team.manage.";
     return {
       edit: false,
       toggle: false,
       remove: false,
       restore: false,
       reset: false,
-      removeReason: isLockedRole(input.role)
-        ? "Pemilik tenant selalu memegang seluruh izin."
-        : "Butuh izin team.manage.",
+      removeReason: reason,
+      editReason: reason,
     };
   }
   const removeReason = input.removed
@@ -303,13 +323,18 @@ export function roleActions(input: {
     : input.memberCount > 0
       ? `Masih dipakai ${input.memberCount} anggota; pindahkan mereka ke peran lain dulu.`
       : null;
+  const canEditPermissions = input.editGateReason === null;
   return {
-    edit: true,
+    edit: canEditPermissions,
     toggle: !input.removed,
     remove: removeReason === null,
     restore: input.removed,
-    reset: input.customized,
+    // “Kembalikan izin bawaan” juga bisa **menambah** izin orang lain (izin
+    // bawaan diperiksa pagar eskalasi yang sama), jadi ia tunduk pada gerbang
+    // fitur yang sama — tombolnya disembunyikan, bukan dipasang lalu ditolak.
+    reset: canEditPermissions && input.customized,
     removeReason,
+    editReason: input.editGateReason,
   };
 }
 

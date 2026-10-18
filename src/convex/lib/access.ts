@@ -1,3 +1,4 @@
+import { ConvexError } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import {
@@ -40,7 +41,7 @@ export async function getTenantOrThrow(
   tenantId: Id<"tenants">,
 ): Promise<Doc<"tenants">> {
   const tenant = await ctx.db.get(tenantId);
-  if (!tenant) throw new Error("Tenant tidak ditemukan.");
+  if (!tenant) throw new ConvexError("Tenant tidak ditemukan.");
   return tenant;
 }
 
@@ -65,7 +66,7 @@ export async function requireMembership(
     )
     .unique();
   if (!membership || !membership.active) {
-    throw new Error("Akses ditolak: Anda bukan anggota aktif tenant ini.");
+    throw new ConvexError("Akses ditolak: Anda bukan anggota aktif tenant ini.");
   }
   return membership;
 }
@@ -103,11 +104,11 @@ export async function requirePlatformDeveloper(
     allowUnverified: allowUnverifiedActors(),
   });
   if (!access.allowed) {
-    throw new Error(`Akses ditolak: ${access.reason}`);
+    throw new ConvexError(`Akses ditolak: ${access.reason}`);
   }
 
   // `allowed` hanya mungkin saat identitas terverifikasi dan pengguna ada.
-  if (!user) throw new Error("Akses ditolak: akun pengguna tidak ditemukan.");
+  if (!user) throw new ConvexError("Akses ditolak: akun pengguna tidak ditemukan.");
   return user;
 }
 
@@ -146,15 +147,15 @@ export async function requireImpersonation(
 
   const session = await ctx.db.get(sessionId);
   if (!session || session.source !== "platform") {
-    throw new Error("Akses ditolak: sesi pendampingan tidak ditemukan.");
+    throw new ConvexError("Akses ditolak: sesi pendampingan tidak ditemukan.");
   }
   if (session.actorId !== user._id) {
-    throw new Error("Akses ditolak: sesi pendampingan ini bukan milik Anda.");
+    throw new ConvexError("Akses ditolak: sesi pendampingan ini bukan milik Anda.");
   }
 
   const status = impersonationStatus(session, Date.now());
   if (status !== "active") {
-    throw new Error(
+    throw new ConvexError(
       status === "expired"
         ? "Akses ditolak: sesi pendampingan sudah kedaluwarsa. Buka sesi baru dengan alasan baru."
         : "Akses ditolak: sesi pendampingan sudah ditutup.",
@@ -162,7 +163,7 @@ export async function requireImpersonation(
   }
 
   const tenant = await ctx.db.get(session.tenantId);
-  if (!tenant) throw new Error("Tenant tujuan sesi pendampingan tidak ditemukan.");
+  if (!tenant) throw new ConvexError("Tenant tujuan sesi pendampingan tidak ditemukan.");
 
   return { user, session, tenant };
 }
@@ -307,7 +308,7 @@ export async function requirePermission(
       : membership.role
         ? `peran ${membership.role}`
         : "anggota tanpa peran";
-    throw new Error(`Akses ditolak: ${actor} tidak memiliki izin ${permission}.`);
+    throw new ConvexError(`Akses ditolak: ${actor} tidak memiliki izin ${permission}.`);
   }
   return membership;
 }
@@ -322,6 +323,24 @@ export function accessForTenant(
   tenant: Doc<"tenants">,
   now: Date = new Date(),
 ): AccessDecision {
+  /*
+    Penonaktifan oleh **pengelola platform** diperiksa lebih dulu, dan hasilnya
+    `blocked` — bukan `suspended` langganan. Dua keadaan itu sengaja dipisah:
+    yang ini keputusan manusia (dan bisa diurungkan tanpa menebak status
+    langganan), sedangkan `status` dihitung mesin billing. Pelunasan tagihan yang
+    sudah beredar tetap boleh, sama seperti keadaan `blocked` lainnya.
+  */
+  if (tenant.platformSuspended) {
+    return {
+      mode: "blocked",
+      canCreateSales: false,
+      canSettlePayments: true,
+      reason:
+        "Akun bisnis ini dinonaktifkan oleh pengelola platform MesinPOS. Transaksi baru berhenti; hubungi dukungan untuk mengaktifkannya kembali.",
+      graceDaysRemaining: 0,
+    };
+  }
+
   return evaluateAccess({
     status: tenant.status,
     now,
@@ -362,11 +381,11 @@ export async function requireFeature(
 
   const owner = featureOwner(feature);
   if (owner) {
-    throw new Error(
+    throw new ConvexError(
       `Fitur ${FEATURE_LABELS[feature]} memerlukan modul ${VERTICAL_LABELS[owner]} yang belum aktif.`,
     );
   }
-  throw new Error(
+  throw new ConvexError(
     `Fitur ${FEATURE_LABELS[feature]} tidak termasuk paket ${entitlements.planKey}.`,
   );
 }
@@ -382,7 +401,7 @@ export async function requireSalesAllowed(
   const tenant = await getTenantOrThrow(ctx, tenantId);
   const access = accessForTenant(tenant);
   if (!access.canCreateSales) {
-    throw new Error(`Transaksi baru diblokir: ${access.reason}`);
+    throw new ConvexError(`Transaksi baru diblokir: ${access.reason}`);
   }
   return tenant;
 }
@@ -492,7 +511,7 @@ export async function applyStockChange(
   const next = current + args.delta;
 
   if (next < 0 && !args.allowNegative) {
-    throw new Error(
+    throw new ConvexError(
       `Stok tidak cukup untuk produk ${args.productId} (tersedia ${current}).`,
     );
   }

@@ -167,6 +167,147 @@ async function main() {
   );
   check("tenant menyimpan 2 modul", tenant?.verticals?.length === 2, JSON.stringify(tenant?.verticals));
 
+  // ------------------------------------------- kategori utama bisnis (kunci)
+  const kategori = await client.mutation(api.tenants.setBusinessCategory, {
+    tenantId,
+    actorId: userId,
+    category: "fnb",
+    subcategory: "kafe",
+  });
+  check(
+    "pemilik bisa memilih kategori utama bisnis sekali",
+    kategori.changed === true &&
+      kategori.businessCategory.category === "fnb" &&
+      kategori.businessCategory.categoryLabel === "Makanan & Minuman" &&
+      kategori.businessCategory.subcategory === "kafe" &&
+      kategori.businessCategory.subcategoryLabel === "Kafe & Kedai Kopi" &&
+      typeof kategori.businessCategory.lockedAt === "number",
+    JSON.stringify(kategori),
+  );
+  const kategoriUlang = await client.mutation(api.tenants.setBusinessCategory, {
+    tenantId,
+    actorId: userId,
+    category: "fnb",
+    subcategory: "kafe",
+  });
+  check(
+    "panggilan ulang dengan pasangan sama tidak menulis ulang kunci",
+    kategoriUlang.changed === false &&
+      kategoriUlang.businessCategory.lockedAt === kategori.businessCategory.lockedAt,
+    JSON.stringify(kategoriUlang),
+  );
+  let tolakGantiKategori = null;
+  try {
+    await client.mutation(api.tenants.setBusinessCategory, {
+      tenantId,
+      actorId: userId,
+      category: "retail",
+      subcategory: "minimarket",
+    });
+  } catch (error) {
+    tolakGantiKategori = error?.message ?? String(error);
+  }
+  check(
+    "pilihan berbeda ditolak selamanya, termasuk bagi pemilik",
+    typeof tolakGantiKategori === "string" &&
+      tolakGantiKategori.includes("Makanan & Minuman") &&
+      tolakGantiKategori.includes("tidak bisa diubah lagi"),
+    String(tolakGantiKategori),
+  );
+  const tenantTerkunci = await client.query(api.tenants.getMine, {
+    tenantId,
+    actorId: userId,
+  });
+  check(
+    "kolom kategori terkunci benar-benar tersimpan di baris tenant",
+    tenantTerkunci?.businessCategory?.category === "fnb" &&
+      tenantTerkunci?.businessCategory?.subcategoryLabel === "Kafe & Kedai Kopi" &&
+      tenantTerkunci?.businessCategory?.lockedBy === userId,
+    JSON.stringify(tenantTerkunci?.businessCategory),
+  );
+
+  // Jalur onboarding: pilihan dari langkah “Modul” ikut dikunci saat workspace
+  // lahir, dan pilihan yang tidak dikenal tidak boleh meninggalkan tenant.
+  const slugKategori = `verify-kategori-${runId}`;
+  const { tenantId: tenantKategoriId } = await client.mutation(api.tenants.create, {
+    ownerId: userId,
+    name: "Toko Kategori",
+    slug: slugKategori,
+    planKey: "starter",
+    businessCategory: { category: "retail", subcategory: "bangunan" },
+  });
+  const barisKategori = await client.query(api.tenants.getMine, {
+    tenantId: tenantKategoriId,
+    actorId: userId,
+  });
+  check(
+    "onboarding mengunci kategori utama langsung saat workspace dibuat",
+    barisKategori?.businessCategory?.category === "retail" &&
+      barisKategori?.businessCategory?.categoryLabel === "Perdagangan Eceran" &&
+      barisKategori?.businessCategory?.subcategoryLabel === "Toko Bangunan & Material" &&
+      barisKategori?.businessCategory?.lockedBy === userId,
+    JSON.stringify(barisKategori?.businessCategory),
+  );
+
+  /*
+    Master **kategori & subkategori produk** ikut lahir dari pilihan bisnis itu —
+    bukan daftar generik yang sama untuk semua bisnis. Toko bangunan mendapat
+    semen/besi/cat/pipa/alat listrik beserta subkategorinya, dan itu langsung
+    terpakai di halaman Produk & Stok tanpa diatur manual. `Kopi` tidak muncul:
+    daftar F&B lama tidak dipakai lagi untuk workspace yang memilih kategori.
+  */
+  const kategoriProdukBangunan = await client.query(api.tenants.listCategories, {
+    tenantId: tenantKategoriId,
+    actorId: userId,
+  });
+  const subProdukBangunan = await client.query(api.tenants.listSubcategories, {
+    tenantId: tenantKategoriId,
+    actorId: userId,
+  });
+  const semenMortar = kategoriProdukBangunan.find((row) => row.name === "Semen & Mortar");
+  check(
+    "katalog produk workspace baru mengikuti kategori bisnisnya, bukan daftar generik",
+    ["Semen & Mortar", "Besi & Logam", "Cat & Finishing", "Pipa & Sanitasi", "Alat Listrik"].every(
+      (name) => kategoriProdukBangunan.some((row) => row.name === name),
+    ) && !kategoriProdukBangunan.some((row) => row.name === "Kopi"),
+    JSON.stringify(kategoriProdukBangunan.map((row) => row.name)),
+  );
+  check(
+    "subkategori produk ikut dibuat di bawah kategorinya",
+    Boolean(semenMortar) &&
+      subProdukBangunan.some(
+        (row) =>
+          row.categoryId === semenMortar?._id && row.name === "Semen Portland",
+      ),
+    JSON.stringify(
+      subProdukBangunan
+        .filter((row) => row.categoryId === semenMortar?._id)
+        .map((row) => row.name),
+    ),
+  );
+
+  const slugKategoriBuruk = `verify-kategori-buruk-${runId}`;
+  let tolakBuatKategori = null;
+  try {
+    await client.mutation(api.tenants.create, {
+      ownerId: userId,
+      name: "Toko Kategori Buruk",
+      slug: slugKategoriBuruk,
+      planKey: "starter",
+      businessCategory: { category: "kategori-asing", subcategory: "apa-saja" },
+    });
+  } catch (error) {
+    tolakBuatKategori = error?.message ?? String(error);
+  }
+  const sisaBuruk = await client.query(api.tenants.getBySlug, { slug: slugKategoriBuruk });
+  check(
+    "kategori asing ditolak sebelum workspace setengah jadi dibuat",
+    typeof tolakBuatKategori === "string" &&
+      tolakBuatKategori.includes("tidak disediakan MesinPOS") &&
+      sisaBuruk === null,
+    JSON.stringify({ tolakBuatKategori, sisaBuruk }),
+  );
+
   // ------------------------------------------------ batalkan pendaftaran
   // Tautan “Batalkan” di onboarding menjanjikan **email yang dipakai mendaftar
   // dihapus**, bukan hanya sesinya ditutup. Jadi yang diuji di sini: baris `users`
@@ -535,6 +676,24 @@ async function main() {
     role: "cashier",
   });
   check("owner dapat mengundang kasir (team.manage)", typeof membershipId === "string", membershipId);
+
+  let tolakKategoriKasir = null;
+  try {
+    await client.mutation(api.tenants.setBusinessCategory, {
+      tenantId,
+      actorId: cashierId,
+      category: "fnb",
+      subcategory: "restoran",
+    });
+  } catch (error) {
+    tolakKategoriKasir = error?.message ?? String(error);
+  }
+  check(
+    "kasir ditolak memilih kategori utama (bukan pemilik)",
+    typeof tolakKategoriKasir === "string" &&
+      tolakKategoriKasir.includes("hanya pemilik bisnis"),
+    String(tolakKategoriKasir),
+  );
 
   const members = await client.query(api.members.list, { tenantId, actorId: userId });
   check(
@@ -10078,6 +10237,487 @@ async function main() {
           "akun platform tetap tidak muncul di daftar anggota tenant orang lain",
           anggotaOrangLain.every((row) => row.user.email !== emailPlatform),
           JSON.stringify(anggotaOrangLain.map((row) => row.user.email)),
+        );
+
+        // ------------- backstage: kategori & subkategori bisnis ---------------
+        // Gerbang akun platform menuntut identitas login terverifikasi, jadi
+        // jalur yang bisa mengubah katalog di sini adalah `bun convex run` dengan
+        // `--identity` — sama seperti `platform:grant` di atas. Yang diuji:
+        // pemilik platform bisa membuat/mengubah/menonaktifkan/menghapus, pagar
+        // katalog menahan keadaan yang tidak bisa dipakai onboarding, dan
+        // workspace yang sudah mengunci pilihan tidak ikut berubah saat
+        // katalognya dihapus.
+        const runPlatform = (fn, args, identityEmail = emailPlatform) => {
+          const res = spawnSync(
+            "bun",
+            [
+              "convex",
+              "run",
+              `platformCategories:${fn}`,
+              JSON.stringify(args),
+              "--identity",
+              JSON.stringify({ email: identityEmail }),
+            ],
+            { encoding: "utf8", timeout: 120_000 },
+          );
+          const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+          let json = null;
+          try {
+            json = JSON.parse(`${res.stdout ?? ""}`.trim());
+          } catch {
+            const garis = `${res.stdout ?? ""}`
+              .split("\n")
+              .reverse()
+              .find((row) => row.trim().startsWith("{"));
+            try {
+              json = garis ? JSON.parse(garis.trim()) : null;
+            } catch {
+              json = null;
+            }
+          }
+          return { status: res.status, out, json };
+        };
+
+        const labelKategori = `Kategori Uji ${runId}`;
+        const labelSub = `Sub Uji ${runId}`;
+        const katalogAwal = runPlatform("list", { actorId: platformUserId });
+        check(
+          "pemilik platform bisa membaca katalog kategori bisnis",
+          katalogAwal.status === 0 &&
+            Array.isArray(katalogAwal.json?.categories) &&
+            katalogAwal.json.categories.length >= 6 &&
+            typeof katalogAwal.json.note === "string",
+          katalogAwal.out.trim() || `exit ${katalogAwal.status}`,
+        );
+
+        /*
+          Sisa run yang gagal di tengah bisa tertinggal di katalog **nyata** dan
+          ikut muncul di pemilih onboarding (pernah terjadi: “Kategori Uji …”
+          dari run yang berhenti sebelum menghapus barisnya). Karena itu setiap
+          run menyapu sisa bertanda “Kategori Uji <angka>” lebih dulu, sebelum
+          membuat barisnya sendiri — uji boleh diulang tanpa mengotori taksonomi
+          deployment.
+        */
+        const sisaUji = (katalogAwal.json?.categories ?? []).filter((row) =>
+          /^kategori uji \d+$/i.test((row.label ?? "").trim()),
+        );
+        for (const sisa of sisaUji) {
+          runPlatform("apply", {
+            actorId: platformUserId,
+            action: { type: "removeCategory", key: sisa.key },
+          });
+        }
+        const katalogSetelahSapu = runPlatform("list", { actorId: platformUserId });
+        check(
+          "sisa kategori uji dari run sebelumnya tidak tertinggal di katalog",
+          katalogSetelahSapu.status === 0 &&
+            (katalogSetelahSapu.json?.categories ?? []).every(
+              (row) => !/^kategori uji \d+$/i.test((row.label ?? "").trim()),
+            ),
+          katalogSetelahSapu.out.trim().slice(0, 200),
+        );
+
+        const buatKategori = runPlatform("apply", {
+          actorId: platformUserId,
+          action: { type: "createCategory", label: labelKategori },
+        });
+        const barisKategori = (buatKategori.json?.categories ?? []).find(
+          (row) => row.label === labelKategori,
+        );
+        check(
+          "kategori baru dibuat oleh pemilik platform, nonaktif sampai punya subkategori",
+          buatKategori.status === 0 &&
+            barisKategori?.active === false &&
+            barisKategori?.subcategories.length === 0 &&
+            buatKategori.json.sentence.includes("nonaktif"),
+          buatKategori.out.trim() || `exit ${buatKategori.status}`,
+        );
+
+        const pemilihKategori = (actorId) =>
+          client.query(api.tenants.listBusinessCategories, { actorId });
+        check(
+          "kategori nonaktif belum ditawarkan ke pemilih",
+          !(await pemilihKategori(userId)).some(
+            (row) => row.key === barisKategori?.key,
+          ),
+          String(barisKategori?.key),
+        );
+
+        const aktifSebelumSub = runPlatform("apply", {
+          actorId: platformUserId,
+          action: { type: "setCategoryActive", key: barisKategori?.key, active: true },
+        });
+        check(
+          "kategori tanpa subkategori aktif ditolak saat diaktifkan",
+          aktifSebelumSub.status !== 0 &&
+            aktifSebelumSub.out.includes("belum punya subkategori aktif"),
+          aktifSebelumSub.out.trim().slice(0, 200),
+        );
+
+        const buatSub = runPlatform("apply", {
+          actorId: platformUserId,
+          action: {
+            type: "createSubcategory",
+            categoryKey: barisKategori?.key,
+            label: labelSub,
+          },
+        });
+        const subBaru = (buatSub.json?.categories ?? [])
+          .find((row) => row.key === barisKategori?.key)
+          ?.subcategories.find((sub) => sub.label === labelSub);
+        check(
+          "subkategori baru ditambahkan di bawah kategorinya",
+          buatSub.status === 0 && subBaru?.active === true,
+          buatSub.out.trim() || `exit ${buatSub.status}`,
+        );
+
+        const aktifKategori = runPlatform("apply", {
+          actorId: platformUserId,
+          action: { type: "setCategoryActive", key: barisKategori?.key, active: true },
+        });
+        check(
+          "kategori bisa diaktifkan setelah punya subkategori aktif",
+          aktifKategori.status === 0 &&
+            (aktifKategori.json?.categories ?? []).find(
+              (row) => row.key === barisKategori?.key,
+            )?.active === true,
+          aktifKategori.out.trim() || `exit ${aktifKategori.status}`,
+        );
+
+        /*
+          Inti keluhan “kategori baru tidak langsung muncul”: pemilih onboarding
+          dipakai **sebelum** workspace ada, jadi query ini tidak boleh menuntut
+          keanggotaan tenant. Yang diuji di sini katalog yang baru diaktifkan
+          langsung terbaca — termasuk oleh akun yang belum punya workspace sama
+          sekali.
+        */
+        const pemilihAktif = await pemilihKategori(userId);
+        check(
+          "kategori & subkategori baru dari backstage langsung terbaca pemilih",
+          pemilihAktif.some(
+            (row) =>
+              row.key === barisKategori?.key &&
+              row.subcategories.some((sub) => sub.key === subBaru?.key),
+          ),
+          JSON.stringify(pemilihAktif.map((row) => row.key)),
+        );
+        const { userId: pemilihBaruId } = await client.mutation(
+          api.users.createOrGet,
+          { email: `pemilih+${runId}@mesinpos.test`, name: "Pemilih Baru" },
+        );
+        check(
+          "akun yang belum punya workspace bisa membaca katalog pemilih",
+          (await pemilihKategori(pemilihBaruId)).some(
+            (row) => row.key === barisKategori?.key,
+          ),
+          pemilihBaruId,
+        );
+
+        // Kategori buatan backstage memang bisa dipilih pemilik bisnis…
+        const pilihKategoriBaru = await client.mutation(
+          api.tenants.setBusinessCategory,
+          {
+            tenantId: tenantPlatform,
+            actorId: platformUserId,
+            category: barisKategori?.key,
+            subcategory: subBaru?.key,
+          },
+        );
+        check(
+          "kategori & subkategori buatan backstage bisa dipilih dan dikunci pemilik",
+          pilihKategoriBaru.changed === true &&
+            pilihKategoriBaru.businessCategory.categoryLabel === labelKategori &&
+            pilihKategoriBaru.businessCategory.subcategoryLabel === labelSub,
+          JSON.stringify(pilihKategoriBaru.businessCategory),
+        );
+
+        /*
+          Kunci itu juga menyesuaikan **katalog produk** workspace ini: kategori
+          bisnis buatan backstage tidak punya preset khusus, jadi yang dibuat adalah
+          kategori produk bernama subkategori bisnisnya (fallback) — sementara
+          kategori produk yang sudah ada (bawaan lama workspace ini) tidak diganti,
+          dinonaktifkan, atau dihapus.
+        */
+        const produkSetelahKunci = await client.query(api.tenants.listCategories, {
+          tenantId: tenantPlatform,
+          actorId: platformUserId,
+        });
+        check(
+          "kunci kategori bisnis menyemai kategori produk (fallback dari subkategori bisnis)",
+          produkSetelahKunci.some((row) => row.name === labelSub) &&
+            ["Kopi", "Makanan", "Snack", "Minuman"].every((name) =>
+              produkSetelahKunci.some((row) => row.name === name),
+            ),
+          JSON.stringify(produkSetelahKunci.map((row) => row.name)),
+        );
+
+        /*
+          Sinkronisasi manual (tombol di halaman Produk & Stok): mengembalikan
+          kategori preset yang hilang, tidak menyentuh yang lain, dan idempoten —
+          tekanan kedua melaporkan katalog sudah sesuai tanpa menambah baris.
+        */
+        const bangunanSebelumSync = await client.query(api.tenants.listCategories, {
+          tenantId: tenantKategoriId,
+          actorId: userId,
+        });
+        const catHilang = bangunanSebelumSync.find((row) => row.name === "Cat & Finishing");
+        if (catHilang) {
+          await client.mutation(api.categories.remove, {
+            tenantId: tenantKategoriId,
+            actorId: userId,
+            categoryId: catHilang._id,
+          });
+        }
+        const syncPertama = await client.mutation(
+          api.categories.syncFromBusinessCategory,
+          { tenantId: tenantKategoriId, actorId: userId },
+        );
+        check(
+          "sinkronisasi manual mengembalikan kategori preset yang sudah dihapus",
+          Boolean(catHilang) &&
+            syncPertama.changed === true &&
+            syncPertama.createdCategories.includes("Cat & Finishing"),
+          JSON.stringify(syncPertama),
+        );
+        const syncKedua = await client.mutation(
+          api.categories.syncFromBusinessCategory,
+          { tenantId: tenantKategoriId, actorId: userId },
+        );
+        check(
+          "sinkronisasi bersifat idempoten — tekanan kedua tidak menambah apa pun",
+          syncKedua.changed === false &&
+            syncKedua.createdCategories.length === 0 &&
+            syncKedua.createdSubcategories === 0 &&
+            syncKedua.sentence.includes("sudah sesuai"),
+          syncKedua.sentence,
+        );
+        const bangunanSetelahSync = await client.query(api.tenants.listCategories, {
+          tenantId: tenantKategoriId,
+          actorId: userId,
+        });
+        const namaProdukBangunan = bangunanSetelahSync.map((row) => row.name);
+        check(
+          "sinkronisasi tidak menggandakan kategori maupun mengubah jumlahnya",
+          new Set(namaProdukBangunan).size === namaProdukBangunan.length &&
+            namaProdukBangunan.length === bangunanSebelumSync.length,
+          JSON.stringify(namaProdukBangunan),
+        );
+
+        const { tenantId: tenantTanpaKategori } = await client.mutation(
+          api.tenants.create,
+          {
+            ownerId: userId,
+            name: `Toko Tanpa Kategori ${runId}`,
+            slug: `tanpa-kategori-${runId}`,
+            planKey: "starter",
+          },
+        );
+        const tolakSync = await client
+          .mutation(api.categories.syncFromBusinessCategory, {
+            tenantId: tenantTanpaKategori,
+            actorId: userId,
+          })
+          .then(
+            () => null,
+            (error) => error?.message ?? String(error),
+          );
+        check(
+          "sinkronisasi ditolak saat workspace belum memilih kategori bisnis",
+          typeof tolakSync === "string" &&
+            tolakSync.includes("belum memilih kategori utama bisnis"),
+          String(tolakSync),
+        );
+
+        /*
+          Penyapuan admin (`internalMutation`, dipakai sekali setelah rilis untuk
+          workspace lama): dijalankan dari CLI, aman diulang, dan pada run kedua
+          tidak boleh menyemai apa pun lagi — itulah bukti idempotensinya di
+          seluruh deployment, bukan hanya di satu workspace.
+        */
+        const sapuUlang = spawnSync(
+          "bun",
+          ["convex", "run", "categories:backfillFromBusinessCategory", "{}"],
+          { encoding: "utf8", timeout: 180_000 },
+        );
+        const keluaranSapu = `${sapuUlang.stdout ?? ""}${sapuUlang.stderr ?? ""}`;
+        let ringkasanSapu = null;
+        try {
+          ringkasanSapu = JSON.parse(`${sapuUlang.stdout ?? ""}`.trim());
+        } catch {
+          ringkasanSapu = null;
+        }
+        check(
+          "penyapuan admin kategori produk aman diulang (run kedua tidak menyemai apa pun)",
+          sapuUlang.status === 0 &&
+            ringkasanSapu?.workspaceDisemai === 0 &&
+            typeof ringkasanSapu?.sentence === "string",
+          keluaranSapu.trim().slice(0, 300) || `exit ${sapuUlang.status}`,
+        );
+
+        // …dan kuncinya tetap berlaku walau katalognya kelak dihapus. Pasangan
+        // pengganti diambil dari katalog bawaan supaya yang diuji murni pagar
+        // "sudah terkunci", bukan validasi katalog.
+        const pasanganLain = (katalogSetelahSapu.json?.categories ?? [])
+          .filter((row) => row.key !== barisKategori?.key && row.active)
+          .map((row) => ({
+            category: row.key,
+            subcategory: row.subcategories.find((sub) => sub.active)?.key,
+          }))
+          .find((pair) => pair.subcategory);
+        const gantiSetelahKunci = await client
+          .mutation(api.tenants.setBusinessCategory, {
+            tenantId: tenantPlatform,
+            actorId: platformUserId,
+            category: pasanganLain?.category ?? barisKategori?.key,
+            subcategory: pasanganLain?.subcategory ?? subBaru?.key,
+          })
+          .then(
+            () => null,
+            (error) => error?.message ?? String(error),
+          );
+        check(
+          "setelah dikunci, kategori buatan backstage tidak bisa diganti",
+          typeof gantiSetelahKunci === "string" &&
+            gantiSetelahKunci.includes("tidak bisa diubah lagi"),
+          String(gantiSetelahKunci),
+        );
+
+        const ubahNamaSub = runPlatform("apply", {
+          actorId: platformUserId,
+          action: {
+            type: "renameSubcategory",
+            categoryKey: barisKategori?.key,
+            key: subBaru?.key,
+            label: `${labelSub} Baru`,
+          },
+        });
+        check(
+          "nama subkategori bisa diubah tanpa mengganti kuncinya",
+          ubahNamaSub.status === 0 &&
+            (ubahNamaSub.json?.categories ?? [])
+              .find((row) => row.key === barisKategori?.key)
+              ?.subcategories.some(
+                (sub) => sub.key === subBaru?.key && sub.label === `${labelSub} Baru`,
+              ),
+          ubahNamaSub.out.trim() || `exit ${ubahNamaSub.status}`,
+        );
+
+        const matikanSubTerakhir = runPlatform("apply", {
+          actorId: platformUserId,
+          action: {
+            type: "setSubcategoryActive",
+            categoryKey: barisKategori?.key,
+            key: subBaru?.key,
+            active: false,
+          },
+        });
+        check(
+          "subkategori terakhir di kategori aktif tidak bisa dinonaktifkan",
+          matikanSubTerakhir.status !== 0 &&
+            matikanSubTerakhir.out.includes("satu-satunya subkategori aktif"),
+          matikanSubTerakhir.out.trim().slice(0, 200),
+        );
+
+        const nonaktifKategori = runPlatform("apply", {
+          actorId: platformUserId,
+          action: { type: "setCategoryActive", key: barisKategori?.key, active: false },
+        });
+        const nonaktifSub = runPlatform("apply", {
+          actorId: platformUserId,
+          action: {
+            type: "setSubcategoryActive",
+            categoryKey: barisKategori?.key,
+            key: subBaru?.key,
+            active: false,
+          },
+        });
+        check(
+          "kategori & subkategori bisa dinonaktifkan (sub menyusul setelah kategorinya)",
+          nonaktifKategori.status === 0 && nonaktifSub.status === 0,
+          `${nonaktifKategori.out.trim().slice(0, 120)} | ${nonaktifSub.out.trim().slice(0, 120)}`,
+        );
+        check(
+          "kategori yang dinonaktifkan hilang lagi dari pemilih",
+          !(await pemilihKategori(userId)).some(
+            (row) => row.key === barisKategori?.key,
+          ),
+          String(barisKategori?.key),
+        );
+
+        const hapusKategori = runPlatform("apply", {
+          actorId: platformUserId,
+          action: { type: "removeCategory", key: barisKategori?.key },
+        });
+        check(
+          "kategori bisa dihapus beserta subkategorinya",
+          hapusKategori.status === 0 &&
+            hapusKategori.json.sentence.includes("1 subkategorinya") &&
+            !(hapusKategori.json.categories ?? []).some(
+              (row) => row.key === barisKategori?.key,
+            ),
+          hapusKategori.out.trim() || `exit ${hapusKategori.status}`,
+        );
+
+        const terkunciTetap = await client.query(api.tenants.getMine, {
+          tenantId: tenantPlatform,
+          actorId: platformUserId,
+        });
+        check(
+          "workspace yang sudah mengunci tetap memegang label lamanya walau katalognya dihapus",
+          terkunciTetap?.businessCategory?.categoryLabel === labelKategori &&
+            terkunciTetap?.businessCategory?.subcategoryLabel === labelSub,
+          JSON.stringify(terkunciTetap?.businessCategory),
+        );
+
+        const pilihYangDihapus = await client
+          .mutation(api.tenants.setBusinessCategory, {
+            tenantId: tenantKategoriId,
+            actorId: userId,
+            category: barisKategori?.key,
+            subcategory: subBaru?.key,
+          })
+          .then(
+            () => null,
+            (error) => error?.message ?? String(error),
+          );
+        check(
+          "kategori yang sudah dihapus tidak bisa dipilih lagi",
+          typeof pilihYangDihapus === "string" &&
+            pilihYangDihapus.includes("tidak disediakan MesinPOS"),
+          String(pilihYangDihapus),
+        );
+
+        // Dua pagar: klien tanpa identitas ditolak (gerbang akun platform), dan
+        // akun non-platform ditolak walau identitasnya terverifikasi.
+        let klienTanpaIdentitas = null;
+        try {
+          await client.mutation(api.platformCategories.apply, {
+            actorId: platformUserId,
+            action: { type: "createCategory", label: "Nakal" },
+          });
+        } catch (error) {
+          klienTanpaIdentitas = error?.message ?? String(error);
+        }
+        check(
+          "klien aplikasi tidak bisa mengubah katalog kategori bisnis",
+          typeof klienTanpaIdentitas === "string" &&
+            klienTanpaIdentitas.includes("ALLOW_UNVERIFIED_ACTOR"),
+          String(klienTanpaIdentitas),
+        );
+
+        const bukanPengembang = runPlatform(
+          "apply",
+          {
+            actorId: userId,
+            action: { type: "createCategory", label: "Nakal" },
+          },
+          `owner+${runId}@mesinpos.test`,
+        );
+        check(
+          "akun non-platform ditolak walau identitasnya terverifikasi",
+          bukanPengembang.status !== 0 &&
+            bukanPengembang.out.includes("bukan akun platform"),
+          bukanPengembang.out.trim().slice(0, 200),
         );
       }
 
