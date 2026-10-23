@@ -24,14 +24,22 @@ import {
   validateProductIdentity,
   type ProductUsage,
 } from "./lib/productEdit";
-import { formatProductSku, recodeProductSku } from "./lib/productSku";
+import { formatProductSku } from "./lib/productSku";
+import {
+  productBarcodeKey,
+  validateProductBarcode,
+  type ProductBarcodeType,
+} from "./lib/productBarcode";
 import {
   resolveModifierConfig,
   type ModifierGroup,
 } from "./lib/modifiers";
 import { DEFAULT_LOW_STOCK_THRESHOLD } from "./lib/inventory";
 import { enqueueWebhookEvent, scheduleWebhookDeliveryPass } from "./lib/webhookOutbox";
-import { productUpdatedEventData } from "./lib/webhookEvents";
+import {
+  productCreatedEventData,
+  productUpdatedEventData,
+} from "./lib/webhookEvents";
 import {
   BASE_UNIT,
   normaliseUnitCode,
@@ -42,6 +50,52 @@ import {
   type UnitConversion,
 } from "./lib/wholesale";
 
+/** Produk yang isinya dipakai untuk menyusun kiriman katalog. */
+interface ProductEventSource {
+  tenantId: Id<"tenants">;
+  sku: string;
+  name: string;
+  price: number;
+  unit?: string;
+  active: boolean;
+  /** Kategori & subkategori ikut dikirim supaya platform bisa menyusun katalog. */
+  categoryId?: Id<"categories">;
+  subcategoryId?: Id<"subcategories">;
+}
+
+/**
+ * Isi bersama `product.created` & `product.updated`. Nama kategori dibaca dari
+ * id di sini, bukan diketik pemanggil: satu jalur untuk semua pemicu, sehingga
+ * kiriman tidak pernah membawa nama yang sudah berganti (produk menunjuk id,
+ * bukan nama).
+ */
+async function productEventBase(
+  ctx: MutationCtx,
+  product: ProductEventSource,
+): Promise<{
+  sku: string;
+  name: string;
+  price: number;
+  unit: string;
+  active: boolean;
+  category: string | null;
+  subcategory: string | null;
+}> {
+  const category = product.categoryId ? await ctx.db.get(product.categoryId) : null;
+  const subcategory = product.subcategoryId
+    ? await ctx.db.get(product.subcategoryId)
+    : null;
+  return {
+    sku: product.sku,
+    name: product.name,
+    price: product.price,
+    unit: product.unit ?? BASE_UNIT,
+    active: product.active,
+    category: category?.name ?? null,
+    subcategory: subcategory?.name ?? null,
+  };
+}
+
 /**
  * Memberi tahu platform mitra bahwa katalog/harga berubah (`product.updated`).
  *
@@ -49,56 +103,106 @@ import {
  * halaman — supaya perubahan yang datang dari kasir, impor, atau penerimaan
  * barang sama-sama terkirim. Kalau tidak ada endpoint yang melanggan, fungsi
  * ini tidak menulis apa pun (lihat `enqueueWebhookEvent`).
+ *
+ * `pendingBefore` adalah kiriman lain yang sudah ditulis di mutation yang sama
+ * (mis. `product.created` saat produk baru dibuat). Ia ikut dihitung dalam satu
+ * penjadwalan pekerja — dua penjadwalan untuk satu transaksi membuat dua putaran
+ * mengambil baris antrean yang sama.
  */
 async function emitProductUpdated(
   ctx: MutationCtx,
-  product: {
-    tenantId: Id<"tenants">;
-    sku: string;
-    name: string;
-    price: number;
-    unit?: string;
-    active: boolean;
-    /** Kategori & subkategori ikut dikirim supaya platform bisa menyusun katalog. */
-    categoryId?: Id<"categories">;
-    subcategoryId?: Id<"subcategories">;
-  },
+  product: ProductEventSource,
   changed: string[],
   previous: { sku?: string; price?: number } = {},
+  pendingBefore = 0,
 ): Promise<number> {
   if (changed.length === 0) return 0;
-  // Nama kategori & subkategori dibaca di sini, bukan diketik pemanggil: satu jalur
-  // untuk semua pemicu, sehingga kiriman tidak pernah membawa nama yang sudah
-  // berganti (produk menunjuk id, bukan nama).
-  const category = product.categoryId ? await ctx.db.get(product.categoryId) : null;
-  const subcategory = product.subcategoryId
-    ? await ctx.db.get(product.subcategoryId)
-    : null;
+  const base = await productEventBase(ctx, product);
   const enqueued = await enqueueWebhookEvent(ctx, {
     tenantId: product.tenantId,
     event: "product.updated",
-    subject: product.sku,
+    subject: base.sku,
     data: productUpdatedEventData({
-      sku: product.sku,
-      name: product.name,
-      price: product.price,
-      unit: product.unit ?? BASE_UNIT,
-      active: product.active,
-      category: category?.name ?? null,
-      subcategory: subcategory?.name ?? null,
+      ...base,
       changed,
       previousSku: previous.sku,
       previousPrice: previous.price,
     }),
   });
-  await scheduleWebhookDeliveryPass(ctx, enqueued);
+  await scheduleWebhookDeliveryPass(ctx, pendingBefore + enqueued);
   return enqueued;
+}
+
+/**
+ * Mengabarkan produk yang **baru pertama kali** masuk katalog
+ * (`product.created`).
+ *
+ * Dikirim di samping `product.updated` (`changed: ["created"]`) karena keduanya
+ * menjawab pertanyaan berbeda: penerima yang hanya ingin tahu “ada produk baru”
+ * tidak perlu memeriksa daftar perubahan, sementara penerima yang sudah memakai
+ * `product.updated` tetap menerima katalognya tanpa jalur kedua. Penjadwalan
+ * pekerja dilakukan pemanggil bersama kiriman `product.updated`, sekali per
+ * transaksi.
+ */
+async function emitProductCreated(
+  ctx: MutationCtx,
+  product: ProductEventSource,
+  createdAt: number,
+): Promise<number> {
+  const base = await productEventBase(ctx, product);
+  return await enqueueWebhookEvent(ctx, {
+    tenantId: product.tenantId,
+    event: "product.created",
+    subject: base.sku,
+    at: createdAt,
+    data: productCreatedEventData({ ...base, createdAt }),
+  });
 }
 
 /** Bentuk argumen yang sama dipakai `create` dan `setPricing`. */
 const tierValidator = v.array(
   v.object({ minQty: v.number(), price: v.number() }),
 );
+
+/** Jenis kode yang sama dengan yang digambar di form produk. */
+const barcodeTypeValidator = v.union(
+  v.literal("barcode"),
+  v.literal("qr"),
+);
+
+/**
+ * Barcode/QR harus unik di antara produk tenant ini, dan tidak boleh menabrak
+ * SKU produk lain — kalau tidak, satu hasil scan bisa menunjuk dua barang. SKU
+ * diperiksa lebih dulu oleh kasir, jadi tabrakan dengan SKU justru membuat kode
+ * ini tidak pernah terpakai.
+ */
+async function assertBarcodeAvailable(
+  ctx: MutationCtx,
+  args: {
+    tenantId: Id<"tenants">;
+    barcode: string;
+    productId?: Id<"products">;
+  },
+): Promise<void> {
+  if (args.barcode.length === 0) return;
+  const key = productBarcodeKey(args.barcode);
+  const rows = await ctx.db
+    .query("products")
+    .withIndex("by_tenant", (q) => q.eq("tenantId", args.tenantId))
+    .collect();
+  const bentrok = rows.find(
+    (row) =>
+      row._id !== args.productId &&
+      (productBarcodeKey(row.sku) === key ||
+        (row.barcode ? productBarcodeKey(row.barcode) === key : false)),
+  );
+  if (bentrok) {
+    throw new Error(
+      `Kode ${args.barcode} sudah dipakai produk ${bentrok.name} (${bentrok.sku}). Pakai kode lain, atau kosongkan kolomnya.`,
+    );
+  }
+}
+
 const unitValidator = v.array(
   v.object({ code: v.string(), factor: v.number() }),
 );
@@ -246,29 +350,29 @@ async function resolveWholesale(
  * Menentukan SKU sebuah produk baru.
  *
  * SKU yang **diketik** pemilik toko dipakai apa adanya; SKU yang **kosong** dibuat
- * otomatis dengan format `PBB-<KATEGORI>-<nomor urut>` (lihat lib/productSku.ts).
+ * otomatis dengan format `PBB-<nomor urut>` (lihat lib/productSku.ts).
  * Nomornya datang dari counter tenant (naik sekali per pembuatan), lalu
  * dicocokkan dengan SKU yang sudah ada: SKU yang diketik manual dengan format sama
- * (mis. `PBB-SAN-000042` yang dibuat sendiri) tidak boleh tertabrak, jadi
+ * (mis. `PBB-0000042` yang dibuat sendiri) tidak boleh tertabrak, jadi
  * counter-nya dinaikkan lagi sampai ketemu nomor yang bebas. Pemeriksaan itu tetap
  * perlu walau counter-nya monoton — katalog lama bisa punya SKU apa saja.
+ *
+ * Kategori sengaja tidak ikut: SKU hanya nomor urut, jadi memindahkan produk ke
+ * kategori lain tidak pernah mengubah kode yang mungkin sudah tercetak di label.
  */
 async function resolveProductSku(
   ctx: MutationCtx,
   args: {
     tenantId: Id<"tenants">;
     requested?: string;
-    categoryId?: Id<"categories">;
   },
 ): Promise<string> {
   const requested = (args.requested ?? "").trim();
   if (requested.length > 0) return requested;
 
-  const category = args.categoryId ? await ctx.db.get(args.categoryId) : null;
-
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const sequence = await nextSequence(ctx, args.tenantId, "product.sku");
-    const candidate = formatProductSku({ category: category?.name, sequence });
+    const candidate = formatProductSku({ sequence });
     const clash = await ctx.db
       .query("products")
       .withIndex("by_tenant_sku", (q) =>
@@ -400,6 +504,9 @@ export const create = mutation({
     storeId: v.optional(v.id("stores")),
     /** Kosongkan/boleh tidak diisi: server membuat SKU otomatis yang unik. */
     sku: v.optional(v.string()),
+    /** Kode tambahan untuk kasir; kosong = hanya SKU yang dipindai. */
+    barcode: v.optional(v.string()),
+    barcodeType: v.optional(barcodeTypeValidator),
     name: v.string(),
     price: v.number(),
     cost: v.optional(v.number()),
@@ -448,7 +555,6 @@ export const create = mutation({
     const sku = await resolveProductSku(ctx, {
       tenantId: args.tenantId,
       requested: args.sku,
-      categoryId: args.categoryId,
     });
 
     const duplicate = await ctx.db
@@ -459,10 +565,22 @@ export const create = mutation({
       .unique();
     if (duplicate) throw new Error(`SKU ${sku} sudah dipakai.`);
 
+    const barcode = validateProductBarcode({
+      barcode: args.barcode,
+      barcodeType: args.barcodeType,
+    });
+    if (!barcode.ok) throw new Error(barcode.reason);
+    await assertBarcodeAvailable(ctx, {
+      tenantId: args.tenantId,
+      barcode: barcode.value,
+    });
+
     const now = Date.now();
     const productId = await ctx.db.insert("products", {
       tenantId: args.tenantId,
       sku,
+      barcode: barcode.value.length > 0 ? barcode.value : undefined,
+      barcodeType: barcode.value.length > 0 ? barcode.type : undefined,
       name: args.name,
       categoryId: args.categoryId,
       subcategoryId: subcategory.subcategoryId,
@@ -490,20 +608,27 @@ export const create = mutation({
     }
 
     // Katalog baru langsung dikabarkan ke platform mitra; produk yang dibuat
-    // tanpa stok pun tetap perlu muncul di sana.
+    // tanpa stok pun tetap perlu muncul di sana. Dua event ditulis: `created`
+    // untuk penerima yang hanya menunggu produk baru, `updated` untuk penerima
+    // yang sudah mengikuti katalog lewat `changed`. Satu jadwal pekerja untuk
+    // keduanya.
+    const productEventSource = {
+      tenantId: args.tenantId,
+      sku,
+      name: args.name,
+      price: args.price,
+      unit: wholesale.unit,
+      active: true,
+      categoryId: args.categoryId,
+      subcategoryId: subcategory.subcategoryId,
+    };
+    const enqueuedCreated = await emitProductCreated(ctx, productEventSource, now);
     await emitProductUpdated(
       ctx,
-      {
-        tenantId: args.tenantId,
-        sku,
-        name: args.name,
-        price: args.price,
-        unit: wholesale.unit,
-        active: true,
-        categoryId: args.categoryId,
-        subcategoryId: subcategory.subcategoryId,
-      },
+      productEventSource,
       ["created"],
+      {},
+      enqueuedCreated,
     );
 
     await writeAuditLog(ctx, {
@@ -512,7 +637,12 @@ export const create = mutation({
       action: "product.create",
       entity: "products",
       entityId: productId,
-      meta: { sku, name: args.name },
+      meta: {
+        sku,
+        name: args.name,
+        barcode: barcode.value || null,
+        barcodeType: barcode.value ? barcode.type : null,
+      },
     });
 
     // SKU-nya ikut dikembalikan: kalau server yang membuatnya, klien perlu tahu
@@ -616,12 +746,10 @@ export const setPricing = mutation({
 /**
  * Mengatur penempatan katalog produk: kategori dan subkategorinya.
  *
- * Kategori menentukan **kode di tengah SKU**, jadi menggantinya harus ikut
- * mengganti SKU — kalau tidak, `PBB-SAN-000042` tetap tertulis “Sanitasi” di
- * sistem padahal produknya sudah Makanan. Aturannya ada di `recodeProductSku`:
- * nomornya dipertahankan selama masih bebas, dan SKU yang **diketik pemilik toko**
- * (di luar format `PBB-…`) tidak disentuh sama sekali. Subkategori **tidak**
- * menyentuh SKU maupun tab POS: ia hanya label katalog yang ikut disinkronkan.
+ * SKU **tidak** ikut berubah: formatnya `PBB-<nomor urut>` (tanpa kode kategori),
+ * jadi kode yang sudah tercetak di label tetap sah setelah produknya dipindah.
+ * Subkategori juga tidak menyentuh SKU maupun tab POS: ia hanya label katalog yang
+ * ikut disinkronkan.
  *
  * Pemanggilan ini menetapkan penempatan utuh (bukan menambal sebagian):
  * `subcategoryId` yang tidak dikirim berarti produknya tidak punya subkategori,
@@ -636,7 +764,7 @@ export const setCategory = mutation({
     tenantId: v.id("tenants"),
     actorId: v.id("users"),
     productId: v.id("products"),
-    /** Kosong = produk tanpa kategori (kode SKU-nya kembali ke `UMU`). */
+    /** Kosong = produk tanpa kategori. SKU tidak ikut berubah. */
     categoryId: v.optional(v.id("categories")),
     /** Subkategori yang dibuat di bawah `categoryId`; kosong = tanpa subkategori. */
     subcategoryId: v.optional(v.id("subcategories")),
@@ -669,39 +797,20 @@ export const setCategory = mutation({
       subcategoryId: args.subcategoryId,
     });
 
-    // SKU produk lain dipakai sebagai daftar “sudah terpakai”; SKU produk ini
-    // sendiri disingkirkan supaya nomornya tidak dianggap bentrok.
-    const others = await ctx.db
-      .query("products")
-      .withIndex("by_tenant", (q) => q.eq("tenantId", args.tenantId))
-      .collect();
-    const takenSkus = others.filter((row) => row._id !== args.productId).map((row) => row.sku);
-
-    const sku = recodeProductSku({
-      sku: product.sku,
-      category: categoryName,
-      takenSkus,
-    });
-
-    if (sku !== product.sku && takenSkus.includes(sku)) {
-      throw new Error(`SKU ${sku} sudah dipakai.`);
-    }
-
     await ctx.db.patch(args.productId, {
       categoryId: args.categoryId,
       subcategoryId: subcategory.subcategoryId,
-      sku,
     });
 
     const categoryChanged = (product.categoryId ?? null) !== (args.categoryId ?? null);
     const subcategoryChanged =
       (product.subcategoryId ?? null) !== (subcategory.subcategoryId ?? null);
-    if (categoryChanged || subcategoryChanged || sku !== product.sku) {
+    if (categoryChanged || subcategoryChanged) {
       await emitProductUpdated(
         ctx,
         {
           tenantId: args.tenantId,
-          sku,
+          sku: product.sku,
           name: product.name,
           price: product.price,
           unit: product.unit,
@@ -712,11 +821,7 @@ export const setCategory = mutation({
         [
           ...(categoryChanged ? ["category"] : []),
           ...(subcategoryChanged ? ["subcategory"] : []),
-          ...(sku !== product.sku ? ["sku"] : []),
         ],
-        // SKU baru saja berganti: penerima harus tahu SKU lama yang harus
-        // diganti, bukan menebak dari nama produk.
-        sku !== product.sku ? { sku: product.sku } : {},
       );
     }
 
@@ -730,14 +835,14 @@ export const setCategory = mutation({
         category: categoryName ?? null,
         subcategory: subcategory.name ?? null,
         previousSubcategoryId: product.subcategoryId ?? null,
-        previousSku: product.sku,
-        sku,
-        skuChanged: sku !== product.sku,
+        // SKU tidak ikut berubah; dicatat supaya jejaknya jelas.
+        sku: product.sku,
+        skuChanged: false,
       },
     });
 
     return {
-      sku,
+      sku: product.sku,
       previousSku: product.sku,
       category: categoryName ?? null,
       subcategory: subcategory.name ?? null,
@@ -939,6 +1044,75 @@ export const update = mutation({
       cost: decision.value.cost,
       changed: decision.changed,
     };
+  },
+});
+
+/**
+ * Menyimpan (atau melepas) **barcode / QR Code** produk.
+ *
+ * Kode kosong berarti melepas kode — kasir kembali hanya mencocokkan SKU. Satu
+ * kode per produk, unik per tenant, dan tidak boleh menabrak SKU produk lain;
+ * aturan & pesannya sama dengan `create` karena memakai modul yang sama
+ * (`lib/productBarcode.ts`).
+ */
+export const setBarcode = mutation({
+  args: {
+    tenantId: v.id("tenants"),
+    actorId: v.id("users"),
+    productId: v.id("products"),
+    /** Kosong = lepas kode. */
+    barcode: v.string(),
+    barcodeType: v.optional(barcodeTypeValidator),
+  },
+  handler: async (ctx, args) => {
+    await requirePermission(ctx, args.tenantId, args.actorId, "product.manage");
+
+    const product = await ctx.db.get(args.productId);
+    if (!product || product.tenantId !== args.tenantId) {
+      throw new Error("Produk tidak ditemukan untuk tenant ini.");
+    }
+
+    const cek = validateProductBarcode({
+      barcode: args.barcode,
+      // Kalau pemanggil tidak mengirim jenis, pertahankan pilihan yang tersimpan.
+      barcodeType: args.barcodeType ?? product.barcodeType,
+    });
+    if (!cek.ok) throw new Error(cek.reason);
+
+    const barcode = cek.value.length > 0 ? cek.value : undefined;
+    const barcodeType: ProductBarcodeType | undefined = barcode ? cek.type : undefined;
+    const before = {
+      barcode: product.barcode ?? "",
+      barcodeType: product.barcodeType ?? "barcode",
+    };
+    const after = {
+      barcode: barcode ?? "",
+      barcodeType: barcodeType ?? "barcode",
+    };
+    const changed =
+      before.barcode !== after.barcode || before.barcodeType !== after.barcodeType;
+
+    if (!changed) {
+      return { barcode: after.barcode, barcodeType: after.barcodeType, changed: false };
+    }
+
+    // `undefined` menghapus kolomnya, jadi produk tanpa kode tidak menyimpan
+    // string kosong yang membingungkan saat dibaca API.
+    await ctx.db.patch(args.productId, {
+      barcode,
+      barcodeType,
+    });
+
+    await writeAuditLog(ctx, {
+      tenantId: args.tenantId,
+      actorId: args.actorId,
+      action: "product.barcode",
+      entity: "products",
+      entityId: args.productId,
+      meta: { from: before, to: after },
+    });
+
+    return { barcode: after.barcode, barcodeType: after.barcodeType, changed: true };
   },
 });
 

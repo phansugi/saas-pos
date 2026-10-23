@@ -96,6 +96,12 @@ export const WEBHOOK_EVENTS: WebhookEventDefinition[] = [
       "Kas belum dibuka padahal toko sudah buka, atau shift belum ditutup padahal toko sudah tutup.",
   },
   {
+    key: "product.created",
+    label: "Produk baru dibuat",
+    description:
+      "Satu produk masuk ke katalog untuk pertama kalinya — lengkap dengan SKU, harga, satuan, dan kategorinya.",
+  },
+  {
     key: "product.updated",
     label: "Produk berubah",
     description:
@@ -363,6 +369,90 @@ export function retryStopReason(endpoint: { active: boolean } | null): string | 
   if (!endpoint) return "Endpoint webhook sudah dihapus; kiriman dihentikan.";
   if (!endpoint.active) return "Endpoint webhook dinonaktifkan; percobaan ulang dihentikan.";
   return null;
+}
+
+/** Panjang rahasia penanda tangan yang boleh dipakai. */
+export const WEBHOOK_SECRET_MIN = 16;
+export const WEBHOOK_SECRET_MAX = 128;
+
+/**
+ * Memeriksa rahasia yang **diketik pemilik** — biasanya nilai yang sama dengan
+ * yang disimpan penerimanya (mis. kolom rahasia MesinPOS di Pengaturan
+ * marketplace).
+ *
+ * Tanpa jalur ini, satu-satunya cara menyamakan rahasia adalah memutar rahasia
+ * di MesinPOS lalu menyalinnya ke penerima — dan kalau penerimanya yang lebih
+ * dulu punya rahasia, pemilik tidak punya cara apa pun (itulah yang membuat
+ * kiriman stok berhenti di 401).
+ *
+ * Aturannya ketat karena nilai ini masuk ke header HTTP dan HMAC: tanpa spasi,
+ * karakter kontrol, atau huruf non-ASCII (tanda hubung tipografi dan koma
+ * “pintar” dari salin-tempel dokumen sering lolos dari pemeriksaan mata).
+ */
+export function validateWebhookSecret(
+  value: string,
+): { ok: true; value: string } | { ok: false; reason: string } {
+  const secret = (value ?? "").trim();
+  if (secret.length === 0) {
+    return { ok: false, reason: "Rahasia penanda tangan wajib diisi." };
+  }
+  if (secret.length < WEBHOOK_SECRET_MIN) {
+    return {
+      ok: false,
+      reason: `Rahasia minimal ${WEBHOOK_SECRET_MIN} karakter; nilai yang lebih pendek terlalu mudah ditebak.`,
+    };
+  }
+  if (secret.length > WEBHOOK_SECRET_MAX) {
+    return { ok: false, reason: `Rahasia maksimal ${WEBHOOK_SECRET_MAX} karakter.` };
+  }
+  if (!/^[\x21-\x7E]+$/.test(secret)) {
+    return {
+      ok: false,
+      reason:
+        "Rahasia tidak boleh memuat spasi, karakter kontrol, atau huruf non-ASCII (mis. tanda hubung tipografi hasil salin-tempel).",
+    };
+  }
+  return { ok: true, value: secret };
+}
+
+/** Batas panjang pesan penerima yang disimpan dari balasan gagal. */
+export const RECEIVER_FAILURE_MESSAGE_MAX = 200;
+
+/**
+ * Keterangan kegagalan yang **menyebut pesan penerimanya**, bukan hanya status.
+ *
+ * Banyak penerima menolak kiriman dengan alasan yang bisa langsung ditindaklanjuti
+ * — mis. “Tanda tangan tidak cocok — pastikan rahasia endpoint … sama dengan yang
+ * diisi di Pengaturan.” Tanpa pesan itu, riwayat kiriman hanya berbunyi “Penerima
+ * menjawab 401”, dan pemilik tidak tahu apa yang harus diperbaiki. Penerima yang
+ * tidak menjawab apa-apa (atau menjawab bukan JSON) tetap ditulis apa adanya
+ * sebagai “Penerima menjawab <status>.”
+ *
+ * Fungsi murni: dipakai jalur kirim, riwayat, dan harness.
+ */
+export function describeReceiverFailure(statusCode: number, bodyText: string): string {
+  const base = `Penerima menjawab ${statusCode}.`;
+  const text = (bodyText ?? "").replace(/\s+/g, " ").trim();
+  if (text === "") return base;
+
+  let detail = text;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    const record =
+      parsed && typeof parsed === "object"
+        ? (parsed as Record<string, unknown>)
+        : null;
+    const message = record
+      ? [record.error, record.message, record.detail].find(
+          (value) => typeof value === "string" && value.trim() !== "",
+        )
+      : undefined;
+    if (typeof message === "string") detail = message.trim();
+  } catch {
+    // Bukan JSON: teks balasannya tetap dipakai, hanya dirapatkan spasinya.
+  }
+
+  return `${base} Pesan penerima: ${detail.slice(0, RECEIVER_FAILURE_MESSAGE_MAX)}`;
 }
 
 /**

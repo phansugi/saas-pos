@@ -329,17 +329,22 @@ for (const entity of ["penjualan", "pembelian", "stok", "harga", "pesanan"]) {
   check(`kontrak sinkronisasi menyebut ${entity}`, entities.includes(entity), entities);
 }
 check(
-  "kontrak menetapkan MesinPOS sebagai sumber utama",
-  SYNC_DOC.rules.some((rule) => rule.includes("MesinPOS menang")) &&
-    SYNC_DOC.rules.some((rule) => rule.includes("Platform tidak mengirim balik")),
+  "kontrak menetapkan MesinPOS sebagai pemegang data operasional",
+  SYNC_DOC.rules.some((rule) => rule.includes("MesinPOS memegang data operasional")) &&
+    SYNC_DOC.rules.some((rule) => rule.includes("bukan dengan menimpa")),
   "aturan sumber utama tidak ada",
 );
 check(
   "kontrak menyebut rekonsiliasi & idempotensi",
   SYNC_DOC.steps.some((step) => step.title.toLowerCase().includes("rekonsiliasi")) &&
     SYNC_DOC.rules.some((rule) => rule.includes("idempotensi")) &&
-    SYNC_DOC.rules.some((rule) => rule.includes("`since`")),
+    SYNC_DOC.rules.some((rule) => rule.includes("`from`/`to`")),
   "rekonsiliasi tidak dijelaskan",
+);
+check(
+  "kontrak mencantumkan jalur tulis dari platform",
+  SYNC_DOC.ownership.some((row) => row.entity.toLowerCase().includes("harga") && row.direction.includes("platform →")),
+  JSON.stringify(SYNC_DOC.ownership.map((row) => [row.entity, row.direction])),
 );
 check(
   "kontrak menyebut event untuk pembelian, stok, harga",

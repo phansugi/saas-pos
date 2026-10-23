@@ -51,6 +51,7 @@ import {
   enqueueWebhookEvent,
   scheduleWebhookDeliveryPass,
 } from "./lib/webhookOutbox";
+import { queueMarketplaceSalePush } from "./lib/marketplaceSaleQueue";
 import { paymentValidator } from "./schema";
 
 const saleStatusValidator = v.union(
@@ -221,6 +222,14 @@ export const createSale = mutation({
      * server. Hanya berlaku untuk satu metode pembayaran.
      */
     payExactTotal: v.optional(v.boolean()),
+    /**
+     * Nota ini **berasal dari marketplace** (`POST /api/marketplace/orders`).
+     * Notanya tidak dikabarkan balik sebagai penjualan baru ke marketplace —
+     * di sana pesanan itu sudah ada dengan nomornya sendiri, sedangkan
+     * `upsertKey` kita adalah nomor MesinPOS. Stok tetap dikirim lewat antrean
+     * stok otomatis, jadi saldo marketplace tetap menyusul.
+     */
+    fromMarketplace: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     // 1. Idempotency — replaying the same key returns the original sale.
@@ -687,6 +696,14 @@ export const createSale = mutation({
       // Satu putaran pekerja untuk semua kiriman transaksi ini (lihat alasannya
       // di `scheduleWebhookDeliveryPass`).
       await scheduleWebhookDeliveryPass(ctx, enqueued);
+
+      // Penjualan juga dikabarkan ke vendor marketplace yang dipasangkan — nota
+      // + stok SKU-nya dalam satu kiriman. Tanpa pairing, ini hanya satu kueri
+      // berindeks dan tidak menulis apa pun. Nota yang datang **dari**
+      // marketplace dilewati supaya tidak tercatat dua kali di sana.
+      if (args.fromMarketplace !== true) {
+        await queueMarketplaceSalePush(ctx, { tenantId: args.tenantId, saleId });
+      }
     }
 
     return {
@@ -806,6 +823,10 @@ async function finalizeHeldSaleNow(
     }
 
     await scheduleWebhookDeliveryPass(ctx, enqueued);
+    await queueMarketplaceSalePush(ctx, {
+      tenantId: sale.tenantId,
+      saleId: sale._id,
+    });
 
     return { saleId: sale._id };
   }
@@ -960,6 +981,12 @@ export const voidSale = mutation({
       }),
     });
     await scheduleWebhookDeliveryPass(ctx, enqueuedVoid);
+    // Pembatalan memakai antrean yang sama: nota yang sama dikirim ulang dengan
+    // `status: "void"` dan stok sesudah pengembalian, bukan sebagai nota baru.
+    await queueMarketplaceSalePush(ctx, {
+      tenantId: sale.tenantId,
+      saleId: sale._id,
+    });
 
     return { saleId: sale._id };
   },

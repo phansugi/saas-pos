@@ -114,6 +114,26 @@ import {
   type FnbTaxProfile,
 } from "@/lib/fnbTax";
 import {
+  EMPTY_MARKETPLACE_CATALOG_COUNTS,
+  EMPTY_MARKETPLACE_PRODUCT_COUNTS,
+  EMPTY_MARKETPLACE_STOCK_DIFF_COUNTS,
+  filterMarketplaceVendors,
+  marketplaceSnapshotCounts,
+  pairingCodeFrom,
+  parseMarketplaceContact,
+  type MarketplaceCatalogPullResult,
+  type MarketplaceLookupResult,
+  type MarketplacePairingView,
+  type MarketplaceProductPushResult,
+  type MarketplaceReconcileResult,
+  type MarketplaceRetryResult,
+  type MarketplaceStockDiffPullResult,
+  type MarketplaceStockDiffPushResult,
+  type MarketplaceStatusView,
+  type MarketplaceSyncResult,
+  type MarketplaceVendor,
+} from "@/lib/marketplace";
+import {
   DEFAULT_SHIFT_SETTING,
   EMPTY_SHIFT_STATE,
   SHIFT_STORAGE_KEY,
@@ -291,7 +311,6 @@ import {
 import {
   categoryIsActive,
   categoryNameKey,
-  categorySkuCode,
   normalizeCategoryName,
   normalizeSubcategoryName,
   subcategoryNameKey,
@@ -304,7 +323,12 @@ import {
   validateProductImage,
 } from "@/lib/productImages";
 import { validateTenantLogo } from "@/lib/tenantLogo";
-import { recodeProductSku, suggestProductSku } from "@/lib/productSku";
+import { suggestProductSku } from "@/lib/productSku";
+import {
+  productBarcodeKey,
+  validateProductBarcode,
+  type ProductBarcodeType,
+} from "@/lib/productBarcode";
 import {
   productDeletionCheck,
   validateProductIdentity,
@@ -327,6 +351,7 @@ import {
   sanitizeWebhookEvents,
   signWebhookPayload,
   validateWebhookEndpoint,
+  validateWebhookSecret,
 } from "@/lib/webhooks";
 import {
   FRANCHISE_TOP_SALES,
@@ -507,6 +532,7 @@ import {
   type SetCreditInput,
   type SetModifiersInput,
   type SetPricingInput,
+  type SetProductBarcodeInput,
   type SetProductCategoryInput,
   type CreateCategoryInput,
   type CreateMemberInput,
@@ -530,6 +556,7 @@ import {
   type StoreWebhookEndpoint,
   type StoreWebhookSummary,
   type UpdateWebhookEndpointInput,
+  type WebhookRetryResult,
   type WebhookTestResult,
   type StoreArSummary,
   type StoreBuiltinRole,
@@ -1427,6 +1454,89 @@ function readDeviceTill(): ShiftState {
     return parseShiftState(window.localStorage.getItem(SHIFT_STORAGE_KEY));
   } catch {
     return EMPTY_SHIFT_STATE;
+  }
+}
+
+/**
+ * Tiga vendor contoh untuk mode demo. Namanya sengaja sama dengan vendor yang
+ * benar-benar tampil di direktori publik pusatbahanbangunan.com, supaya alur
+ * pairing bisa dicoba tanpa jaringan — dan tanpa berpura-pura menjadi data
+ * marketplace yang sebenarnya.
+ */
+const DEMO_MARKETPLACE_VENDORS: MarketplaceVendor[] = [
+  {
+    id: "demo-pbb-official",
+    name: "Pusat Bahan Bangunan Official",
+    description: "Toko resmi platform: saniter, keramik, dan material bangunan.",
+    city: "Jakarta",
+    productCount: 11,
+    joinedAt: 1787804248344,
+    logo: null,
+    cover: null,
+  },
+  {
+    id: "demo-megah-jaya",
+    name: "Megah Jaya Bangunan",
+    description: "Material bangunan dan kebutuhan proyek.",
+    city: "Bekasi",
+    productCount: 3,
+    joinedAt: 1788090973133,
+    logo: null,
+    cover: null,
+  },
+  {
+    id: "demo-mitra-bangunan",
+    name: "CV. Mitra Bangunan",
+    description: "Distributor keramik dan granit.",
+    city: "Bandung",
+    productCount: 0,
+    joinedAt: 1789922389490,
+    logo: null,
+    cover: null,
+  },
+];
+
+/** Kontak demo untuk mencoba pencocokan email/WA tanpa jaringan. */
+const DEMO_MARKETPLACE_CONTACTS: Record<string, string[]> = {
+  "demo-pbb-official": ["owner@pusatbahanbangunan.com", "6281200000001"],
+  "demo-megah-jaya": ["megahjaya@contoh.id", "6281200000002"],
+  "demo-mitra-bangunan": ["mitra@contoh.id", "6281200000003"],
+};
+
+/** Hex acak untuk token demo (bukan rahasia produksi). */
+function demoHex(bytes: number): string {
+  return Array.from({ length: bytes * 2 }, () =>
+    Math.floor(Math.random() * 16).toString(16),
+  ).join("");
+}
+
+/**
+ * Pairing demo disimpan per perangkat supaya tidak hilang saat halaman dimuat
+ * ulang — mode demo tidak punya server, tetapi perilakunya tetap harus terasa
+ * seperti workspace yang benar-benar terpasang. Tokennya token demo, bukan
+ * token produksi.
+ */
+const MARKETPLACE_PAIRING_KEY = "mesinpos.marketplace.demo.v1";
+
+function readDemoMarketplacePairing(): MarketplacePairingView | null {
+  try {
+    const raw = globalThis.localStorage?.getItem(MARKETPLACE_PAIRING_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as MarketplacePairingView;
+    if (
+      typeof parsed?.vendorId !== "string" ||
+      typeof parsed?.vendorName !== "string" ||
+      typeof parsed?.pairingCode !== "string" ||
+      typeof parsed?.syncToken !== "string" ||
+      typeof parsed?.contactMasked !== "string" ||
+      typeof parsed?.pairedAt !== "number" ||
+      (parsed?.contactKind !== "email" && parsed?.contactKind !== "whatsapp")
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
   }
 }
 
@@ -3375,11 +3485,31 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       const sku =
         input.sku?.trim() ||
         suggestProductSku({
-          category: input.category?.trim() || undefined,
           takenSkus: productsRef.current.map((product) => product.sku),
         });
       if (productsRef.current.some((p) => p.sku === sku)) {
         throw new Error(`SKU ${sku} sudah dipakai.`);
+      }
+
+      // Barcode/QR memakai aturan & pesan yang sama dengan server: kode kosong
+      // boleh, kode yang menabrak SKU/barcode produk lain ditolak.
+      const barcode = validateProductBarcode({
+        barcode: input.barcode,
+        barcodeType: input.barcodeType,
+      });
+      if (!barcode.ok) throw new Error(barcode.reason);
+      if (barcode.value.length > 0) {
+        const key = productBarcodeKey(barcode.value);
+        const bentrok = productsRef.current.find(
+          (product) =>
+            productBarcodeKey(product.sku) === key ||
+            (product.barcode ? productBarcodeKey(product.barcode) === key : false),
+        );
+        if (bentrok) {
+          throw new Error(
+            `Kode ${barcode.value} sudah dipakai produk ${bentrok.name} (${bentrok.sku}). Pakai kode lain, atau kosongkan kolomnya.`,
+          );
+        }
       }
 
       const openingStock = Math.max(0, Math.trunc(input.openingStock ?? 0));
@@ -3399,6 +3529,8 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
           subcategory,
           stock: openingStock,
           unit: (input.unit ?? "").trim().toUpperCase() || "PCS",
+          barcode: barcode.value.length > 0 ? barcode.value : undefined,
+          barcodeType: barcode.value.length > 0 ? barcode.type : undefined,
         },
       ]);
 
@@ -3666,6 +3798,60 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
     );
   }, [requireModuleFeature]);
 
+  /**
+   * Mengisi/melepas barcode produk di mode demo — aturan yang sama dengan
+   * `products.setBarcode`: kode kosong melepasnya, dan kode yang menabrak SKU
+   * atau barcode produk lain ditolak sebelum state berubah.
+   */
+  const setProductBarcode = useCallback(
+    async (
+      input: SetProductBarcodeInput,
+    ): Promise<{ barcode: string; barcodeType: ProductBarcodeType; changed: boolean }> => {
+      const product = productsRef.current.find((row) => row.id === input.productId);
+      if (!product) throw new Error("Produk tidak ditemukan untuk tenant ini.");
+
+      const cek = validateProductBarcode({
+        barcode: input.barcode,
+        barcodeType: input.barcodeType ?? product.barcodeType,
+      });
+      if (!cek.ok) throw new Error(cek.reason);
+
+      if (cek.value.length > 0) {
+        const key = productBarcodeKey(cek.value);
+        const bentrok = productsRef.current.find(
+          (row) =>
+            row.id !== input.productId &&
+            (productBarcodeKey(row.sku) === key ||
+              (row.barcode ? productBarcodeKey(row.barcode) === key : false)),
+        );
+        if (bentrok) {
+          throw new Error(
+            `Kode ${cek.value} sudah dipakai produk ${bentrok.name} (${bentrok.sku}). Pakai kode lain, atau kosongkan kolomnya.`,
+          );
+        }
+      }
+
+      const barcode = cek.value.length > 0 ? cek.value : undefined;
+      const barcodeType = barcode ? cek.type : undefined;
+      const changed =
+        (product.barcode ?? "") !== (barcode ?? "") ||
+        (product.barcodeType ?? "barcode") !== (barcodeType ?? "barcode");
+
+      if (changed) {
+        updateProducts((current) =>
+          current.map((row) =>
+            row.id === input.productId
+              ? { ...row, barcode, barcodeType }
+              : row,
+          ),
+        );
+      }
+
+      return { barcode: barcode ?? "", barcodeType: barcodeType ?? "barcode", changed };
+    },
+    [updateProducts],
+  );
+
   const setPricing = useCallback(async (input: SetPricingInput) => {
     setProducts((current) =>
       current.map((product) =>
@@ -3683,9 +3869,9 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   /**
-   * Pindah kategori, dengan aturan SKU yang sama seperti `products.setCategory`:
-   * SKU buatan sistem ikut kode kategori barunya (nomornya dipertahankan selama
-   * bebas), sedangkan SKU yang diketik pemilik toko tidak disentuh.
+   * Pindah kategori. SKU **tidak** ikut berubah — sama seperti
+   * `products.setCategory`: formatnya `PBB-<nomor urut>` tanpa nama kategori, jadi
+   * kode yang mungkin sudah tercetak di label tetap sah.
    */
   const setCategory = useCallback(
     async (
@@ -3716,27 +3902,15 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       }
       const category = hasCategory ? trimmed : "Tanpa kategori";
       const subcategory = resolveDemoSubcategory(hasCategory ? category : undefined, input.subcategory);
-      const takenSkus = productsRef.current
-        .filter((row) => row.id !== input.productId)
-        .map((row) => row.sku);
-
-      const sku = recodeProductSku({
-        sku: product.sku,
-        category: hasCategory ? category : undefined,
-        takenSkus,
-      });
-      if (sku !== product.sku && takenSkus.includes(sku)) {
-        throw new Error(`SKU ${sku} sudah dipakai.`);
-      }
 
       updateProducts((current) =>
         current.map((row) =>
-          row.id === input.productId ? { ...row, category, subcategory, sku } : row,
+          row.id === input.productId ? { ...row, category, subcategory } : row,
         ),
       );
 
       return {
-        sku,
+        sku: product.sku,
         previousSku: product.sku,
         category: hasCategory ? category : null,
         subcategory: subcategory ?? null,
@@ -3796,7 +3970,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
 
       const previousName = existing.name;
       if (decision.value.name === previousName) {
-        return { name: previousName, previousName, skuCodeChanged: false };
+        return { name: previousName, previousName };
       }
 
       setCategoryRows((current) =>
@@ -3818,7 +3992,6 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       return {
         name: decision.value.name,
         previousName,
-        skuCodeChanged: categorySkuCode(previousName) !== categorySkuCode(decision.value.name),
       };
     },
     [categoryRows, updateProducts],
@@ -5648,6 +5821,419 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
     ? ROLE_LABELS[actingBaseRole]
     : "peran tambahan";
 
+  /*
+    Pairing vendor marketplace untuk mode demo. Disimpan di memori sesi — mode
+    demo tidak punya server tempat token snapshot bisa hidup, dan token demo tidak
+    boleh terlihat seperti token produksi yang benar-benar bisa dipakai.
+  */
+  const [marketplacePairing, setMarketplacePairingState] =
+    useState<MarketplacePairingView | null>(readDemoMarketplacePairing);
+  const setMarketplacePairing = useCallback(
+    (next: MarketplacePairingView | null) => {
+      setMarketplacePairingState(next);
+      try {
+        if (next) {
+          globalThis.localStorage?.setItem(
+            MARKETPLACE_PAIRING_KEY,
+            JSON.stringify(next),
+          );
+        } else {
+          globalThis.localStorage?.removeItem(MARKETPLACE_PAIRING_KEY);
+        }
+      } catch {
+        // Penyimpanan perangkat penuh/diblokir bukan alasan menggagalkan pairing
+        // di layar; server (mode Convex) tetap sumber kebenarannya.
+      }
+    },
+    [],
+  );
+  const canPairMarketplace = actingBaseRole === "owner";
+  const marketplace = useMemo<MarketplaceStatusView>(
+    () => ({
+      pairing: marketplacePairing,
+      canPair: canPairMarketplace,
+      pairBlockedReason: canPairMarketplace
+        ? null
+        : "Hanya pemilik bisnis yang boleh memasangkan atau melepas vendor marketplace.",
+      loading: false,
+      // Mode demo tidak punya endpoint jaringan: kartu mengatakannya apa adanya
+      // supaya tidak ada yang mengira stok berangkat sendiri di luar deployment.
+      pushEndpointReady: false,
+    }),
+    [marketplacePairing, canPairMarketplace],
+  );
+
+  const lookupMarketplaceVendors = useCallback(
+    async (input: {
+      contactKind: "email" | "whatsapp";
+      value: string;
+      includeDirectory?: boolean;
+    }): Promise<MarketplaceLookupResult> => {
+      if (!canPairMarketplace) {
+        throw new Error(
+          "Hanya pemilik bisnis yang boleh mencari vendor marketplace.",
+        );
+      }
+      const raw = input.value.trim();
+      let contact: string | null = null;
+      if (raw !== "") {
+        const parsed = parseMarketplaceContact({
+          kind: input.contactKind,
+          value: raw,
+        });
+        if (!parsed.ok) throw new Error(parsed.reason);
+        contact = parsed.value;
+      }
+      const includeDirectory = input.includeDirectory === true;
+
+      // Sama seperti mode Convex: tanpa kontak, direktori tidak dibuka sendiri.
+      if (!includeDirectory && contact === null) {
+        return {
+          vendors: [],
+          source: "directory",
+          match: null,
+          note: "Masukkan email atau nomor WA yang terdaftar di marketplace dulu — daftar toko hanya menampilkan vendor yang cocok dengan kontak itu.",
+          fetchedAt: Date.now(),
+        };
+      }
+
+      const matched = contact
+        ? DEMO_MARKETPLACE_VENDORS.find((vendor) =>
+            (DEMO_MARKETPLACE_CONTACTS[vendor.id] ?? []).includes(contact!),
+          )
+        : null;
+      const match = matched
+        ? {
+            vendorId: matched.id,
+            vendorName: matched.name,
+            verified: true,
+          }
+        : null;
+
+      if (!includeDirectory) {
+        if (!matched) {
+          return {
+            vendors: [],
+            source: "directory",
+            match: null,
+            note: "Kontak ini belum cocok dengan vendor mana pun di marketplace demo. Coba kontak lain; direktori toko ditampilkan di langkah 2 supaya Anda bisa memilih sendiri.",
+            fetchedAt: Date.now(),
+          };
+        }
+        return {
+          vendors: [matched],
+          source: "pairing-api",
+          match,
+          note: `Kontak cocok dengan ${matched.name}.`,
+          fetchedAt: Date.now(),
+        };
+      }
+
+      return {
+        vendors: matched
+          ? [matched, ...DEMO_MARKETPLACE_VENDORS.filter((v) => v.id !== matched.id)]
+          : filterMarketplaceVendors(DEMO_MARKETPLACE_VENDORS, contact ? "" : raw),
+        source: match ? "pairing-api" : "directory",
+        match,
+        note: match
+          ? `Kontak cocok dengan ${matched!.name}.`
+          : "Direktori toko marketplace. Pilih toko Anda di bawah, lalu konfirmasi kontaknya.",
+        fetchedAt: Date.now(),
+      };
+    },
+    [canPairMarketplace],
+  );
+
+  const pairMarketplace = useCallback(
+    async (input: {
+      vendorId: string;
+      vendorName: string;
+      contactKind: "email" | "whatsapp";
+      contact: string;
+      contactVerified: boolean;
+    }): Promise<{ pairing: MarketplacePairingView; sentence: string }> => {
+      if (!canPairMarketplace) {
+        throw new Error(
+          "Hanya pemilik bisnis yang boleh memasangkan vendor marketplace.",
+        );
+      }
+      const contact = parseMarketplaceContact({
+        kind: input.contactKind,
+        value: input.contact,
+      });
+      if (!contact.ok) throw new Error(contact.reason);
+      if (marketplacePairing && marketplacePairing.vendorId !== input.vendorId) {
+        throw new Error(
+          `Workspace ini sudah dipasangkan ke ${marketplacePairing.vendorName}. Lepas pairing lama dulu sebelum memasang vendor lain.`,
+        );
+      }
+
+      const now = Date.now();
+      const pairing: MarketplacePairingView = {
+        vendorId: input.vendorId,
+        vendorName: input.vendorName,
+        contactKind: contact.kind,
+        contact: contact.value,
+        contactMasked: contact.masked,
+        contactVerified: input.contactVerified === true,
+        pairedAt: marketplacePairing?.pairedAt ?? now,
+        pairedByName: session?.user.name ?? "Pemilik",
+        pairingCode:
+          marketplacePairing?.pairingCode ?? pairingCodeFrom(demoHex(4)),
+        syncToken: marketplacePairing?.syncToken ?? `mp_${demoHex(24)}`,
+        lastPullAt: marketplacePairing?.lastPullAt ?? null,
+        lastPullCounts: marketplacePairing?.lastPullCounts ?? null,
+        lastSyncAt: marketplacePairing?.lastSyncAt ?? null,
+        lastSyncStatus: marketplacePairing?.lastSyncStatus ?? null,
+        lastSyncNote: marketplacePairing?.lastSyncNote ?? null,
+        lastProductSyncAt: marketplacePairing?.lastProductSyncAt ?? null,
+        lastProductSyncStatus: marketplacePairing?.lastProductSyncStatus ?? null,
+        lastProductSyncNote: marketplacePairing?.lastProductSyncNote ?? null,
+        lastProductSyncCounts:
+          marketplacePairing?.lastProductSyncCounts ?? null,
+        lastCatalogAt: marketplacePairing?.lastCatalogAt ?? null,
+        lastCatalogStatus: marketplacePairing?.lastCatalogStatus ?? null,
+        lastCatalogNote: marketplacePairing?.lastCatalogNote ?? null,
+        lastCatalogCounts: marketplacePairing?.lastCatalogCounts ?? null,
+      };
+      setMarketplacePairing(pairing);
+      return {
+        pairing,
+        sentence: `Workspace dipasangkan ke ${input.vendorName} (${pairing.pairingCode}).`,
+      };
+    },
+    [canPairMarketplace, marketplacePairing, session?.user.name],
+  );
+
+  const unpairMarketplace = useCallback(async (): Promise<{ sentence: string }> => {
+    if (!canPairMarketplace) {
+      throw new Error("Hanya pemilik bisnis yang boleh melepas vendor marketplace.");
+    }
+    const previous = marketplacePairing;
+    setMarketplacePairing(null);
+    return {
+      sentence: previous
+        ? `Pairing dengan ${previous.vendorName} dilepas. Tautan sinkron lama tidak berlaku lagi.`
+        : "Workspace belum dipasangkan ke vendor mana pun.",
+    };
+  }, [canPairMarketplace, marketplacePairing]);
+
+  const setMarketplacePushSecret = useCallback(
+    async (
+      secret: string | null,
+    ): Promise<{ saved: boolean; lastFour: string | null; sentence: string }> => {
+      if (!canPairMarketplace) {
+        throw new Error("Hanya pemilik bisnis yang boleh mengatur rahasia marketplace.");
+      }
+      if (!marketplacePairing) throw new Error("Pasangkan vendor marketplace dulu.");
+      const raw = (secret ?? "").trim();
+      if (raw === "") {
+        setMarketplacePairing({
+          ...marketplacePairing,
+          pushSecretSet: false,
+          pushSecretLastFour: null,
+        });
+        return {
+          saved: false,
+          lastFour: null,
+          sentence: "Mode demo: rahasia penanda tangan dihapus.",
+        };
+      }
+      if (raw.length < 16) {
+        throw new Error("Rahasia penanda tangan minimal 16 karakter.");
+      }
+      const lastFour = raw.slice(-4);
+      setMarketplacePairing({
+        ...marketplacePairing,
+        pushSecretSet: true,
+        pushSecretLastFour: lastFour,
+      });
+      return {
+        saved: true,
+        lastFour,
+        sentence: `Mode demo: rahasia penanda tangan disimpan (••••${lastFour}).`,
+      };
+    },
+    [canPairMarketplace, marketplacePairing],
+  );
+
+  const syncMarketplaceNow = useCallback(async (): Promise<MarketplaceSyncResult> => {
+    if (!canPairMarketplace) {
+      throw new Error("Hanya pemilik bisnis yang boleh menyinkronkan marketplace.");
+    }
+    if (!marketplacePairing) {
+      throw new Error("Pasangkan vendor marketplace dulu.");
+    }
+    const counts = marketplaceSnapshotCounts({
+      products,
+      sales,
+      purchases: receipts,
+      payables: payables.filter((row) => row.status === "open"),
+    });
+    return {
+      delivered: false,
+      status: "ready",
+      note:
+        "Mode demo: snapshot disusun dari data demo. Di deployment Convex, marketplace menarik data lewat tautan pairing bertoken.",
+      counts,
+      at: Date.now(),
+    };
+  }, [canPairMarketplace, marketplacePairing, products, sales, receipts, payables]);
+
+  const pushMarketplaceProducts =
+    useCallback(async (): Promise<MarketplaceProductPushResult> => {
+      if (!canPairMarketplace) {
+        throw new Error(
+          "Hanya pemilik bisnis yang boleh menyinkronkan produk marketplace.",
+        );
+      }
+      if (!marketplacePairing) {
+        throw new Error("Pasangkan vendor marketplace dulu.");
+      }
+
+      const at = Date.now();
+      const imageCount = products.reduce(
+        (sum, row) => sum + (row.images?.length ?? 0),
+        0,
+      );
+      const counts = {
+        ...EMPTY_MARKETPLACE_PRODUCT_COUNTS,
+        products: products.length,
+      };
+      const note = `Mode demo: katalog ${products.length} produk (${imageCount} gambar) beserta seluruh field dan pohon kategori disiapkan dari data demo. Di deployment Convex tombol ini mendorong katalog ke platform marketplace, dan perubahan kategori/subkategori dikirim sendiri sesudah disimpan; tanpa endpoint dorong hasilnya “siap ditarik”.`;
+      setMarketplacePairing({
+        ...marketplacePairing,
+        lastProductSyncAt: at,
+        lastProductSyncStatus: "ready",
+        lastProductSyncNote: note,
+        lastProductSyncCounts: counts,
+      });
+      return {
+        delivered: false,
+        status: "ready",
+        note,
+        counts,
+        at,
+      };
+    }, [canPairMarketplace, marketplacePairing, products]);
+
+  const pullMarketplaceCatalog =
+    useCallback(async (): Promise<MarketplaceCatalogPullResult> => {
+      if (!canPairMarketplace) {
+        throw new Error(
+          "Hanya pemilik bisnis yang boleh mengimpor katalog marketplace.",
+        );
+      }
+      if (!marketplacePairing) {
+        throw new Error("Pasangkan vendor marketplace dulu.");
+      }
+      const at = Date.now();
+      const note =
+        "Mode demo: katalog marketplace tidak diunduh. Di deployment Convex tombol ini membaca katalog vendor yang dipasangkan, membuat kategori/subkategori yang belum ada, lalu meng-upsert produk berdasarkan SKU.";
+      const counts = { ...EMPTY_MARKETPLACE_CATALOG_COUNTS };
+      setMarketplacePairing({
+        ...marketplacePairing,
+        lastCatalogAt: at,
+        lastCatalogStatus: "empty",
+        lastCatalogNote: note,
+        lastCatalogCounts: counts,
+      });
+      return { status: "empty", note, counts, at };
+    }, [canPairMarketplace, marketplacePairing, setMarketplacePairing]);
+
+  /**
+   * Rekonsiliasi stok di mode demo.
+   *
+   * Demo tidak punya marketplace untuk dibaca, jadi hasilnya ditulis apa adanya:
+   * `failed` dengan sebab “mode demo tidak tersambung”. Yang penting kartunya
+   * tidak pernah menampilkan angka selisih karangan — di mode Convex laporan itu
+   * datang dari katalog vendor yang benar-benar dipasangkan.
+   */
+  const reconcileMarketplaceStock =
+    useCallback(async (): Promise<MarketplaceReconcileResult> => {
+      if (!canPairMarketplace) {
+        throw new Error(
+          "Hanya pemilik bisnis yang boleh memeriksa selisih stok marketplace.",
+        );
+      }
+      if (!marketplacePairing) {
+        throw new Error("Pasangkan vendor marketplace dulu.");
+      }
+      const at = Date.now();
+      const note =
+        "Mode demo: katalog marketplace tidak dibaca, jadi selisih stok tidak bisa dihitung. Di deployment Convex pemeriksaan ini membandingkan saldo lokasi jual dengan katalog vendor — otomatis sekali sehari, dan bisa dipicu dari tombol ini.";
+      const counts = { ...EMPTY_MARKETPLACE_STOCK_DIFF_COUNTS };
+      setMarketplacePairing({
+        ...marketplacePairing,
+        lastReconcileAt: at,
+        lastReconcileStatus: "failed",
+        lastReconcileNote: note,
+        lastReconcileCounts: counts,
+        stockDiffs: [],
+      });
+      return { status: "failed", note, counts, diffs: [], at };
+    }, [canPairMarketplace, marketplacePairing, setMarketplacePairing]);
+
+  /**
+   * Kirim stok dari laporan selisih di mode demo.
+   *
+   * Demo tidak membaca katalog marketplace, jadi tidak ada selisih yang bisa
+   * dikirim — pesannya menyebut itu, bukan berpura-pura mengirim.
+   */
+  const pushMarketplaceStockDiffs =
+    useCallback(async (): Promise<MarketplaceStockDiffPushResult> => {
+      if (!canPairMarketplace) {
+        throw new Error(
+          "Hanya pemilik bisnis yang boleh mengirim stok dari laporan selisih.",
+        );
+      }
+      if (!marketplacePairing) {
+        throw new Error("Pasangkan vendor marketplace dulu.");
+      }
+      throw new Error(
+        "Mode demo tidak tersambung ke marketplace, jadi tidak ada SKU selisih yang bisa dikirim. Di deployment Convex tombol ini hanya mengirim saldo lokasi jual untuk SKU yang saldonya berbeda.",
+      );
+    }, [canPairMarketplace, marketplacePairing]);
+
+  /** Arah sebaliknya (tarik angka marketplace) — sama-sama tidak tersedia di demo. */
+  const pullMarketplaceStockDiffs =
+    useCallback(async (): Promise<MarketplaceStockDiffPullResult> => {
+      if (!canPairMarketplace) {
+        throw new Error(
+          "Hanya pemilik bisnis yang boleh menarik angka marketplace dari laporan selisih.",
+        );
+      }
+      if (!marketplacePairing) {
+        throw new Error("Pasangkan vendor marketplace dulu.");
+      }
+      throw new Error(
+        "Mode demo tidak punya katalog marketplace, jadi tidak ada angka yang bisa ditarik. Di deployment Convex tombol ini menyalin saldo marketplace ke lokasi jual POS hanya untuk SKU yang berbeda.",
+      );
+    }, [canPairMarketplace, marketplacePairing]);
+
+  /**
+   * Catat ulang pesanan marketplace yang ditolak — tidak ada di demo.
+   *
+   * Mode demo tidak pernah menerima pesanan marketplace, jadi tidak ada isi
+   * pesanan tersimpan yang bisa diterapkan ulang. Pesannya menyebut itu apa
+   * adanya, bukan berpura-pura membuat nota.
+   */
+  const retryMarketplaceOrder = useCallback(
+    async (orderId: string): Promise<MarketplaceRetryResult> => {
+      if (!canPairMarketplace) {
+        throw new Error(
+          "Hanya pemilik bisnis yang boleh mencatat ulang pesanan marketplace.",
+        );
+      }
+      return {
+        ok: false,
+        saleNumber: null,
+        message: `Mode demo tidak menerima pesanan marketplace (${orderId}), jadi tidak ada yang bisa dicatat ulang. Di deployment Convex tombol ini menerapkan ulang isi pesanan yang tersimpan.`,
+      };
+    },
+    [canPairMarketplace],
+  );
+
   const storeCustomRoles: StoreCustomRole[] = useMemo(
     () =>
       customRoles
@@ -6483,18 +7069,35 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
 
   const revokeApiKey = useCallback(
     async (keyId: string): Promise<void> => {
-      // Tanpa gerbang fitur: mencabut akses harus selalu mungkin.
+      // Tanpa gerbang fitur: mencabut akses harus selalu mungkin. Barisnya
+      // **dihapus**, bukan ditandai mati — sama seperti server.
       const existing = apiKeysRef.current.find((row) => row.id === keyId);
-      if (!existing) throw new Error("Kunci API tidak ditemukan untuk tenant ini.");
-      if (!existing.active) throw new Error(`Kunci "${existing.name}" sudah dicabut.`);
-      commitApiKeys(
-        apiKeysRef.current.map((row) =>
-          row.id === keyId ? { ...row, active: false, revokedAt: Date.now() } : row,
-        ),
-      );
+      if (!existing) {
+        throw new Error(
+          "Kunci API tidak ditemukan — mungkin sudah dicabut dan dihapus.",
+        );
+      }
+      commitApiKeys(apiKeysRef.current.filter((row) => row.id !== keyId));
     },
     [commitApiKeys],
   );
+
+  const purgeRevokedApiKeys = useCallback(async () => {
+    const revoked = apiKeysRef.current.filter(
+      (row) => !row.active || row.revokedAt !== null,
+    );
+    if (revoked.length > 0) {
+      const removed = new Set(revoked.map((row) => row.id));
+      commitApiKeys(apiKeysRef.current.filter((row) => !removed.has(row.id)));
+    }
+    return {
+      removed: revoked.length,
+      sentence:
+        revoked.length === 0
+          ? "Tidak ada kunci yang sudah dicabut untuk dihapus."
+          : `${revoked.length} kunci yang sudah dicabut dihapus permanen.`,
+    };
+  }, [commitApiKeys]);
 
   const createWebhookEndpoint = useCallback(
     async (input: CreateWebhookEndpointInput): Promise<{ id: string; secret: string }> => {
@@ -6538,9 +7141,13 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       const existing = webhookEndpointsRef.current.find((row) => row.id === input.endpointId);
       if (!existing) throw new Error("Endpoint webhook tidak ditemukan untuk tenant ini.");
 
-      // Memutar rahasia atau mengubah langganan menambah komitmen baru dan
-      // karenanya butuh fiturnya; menyalakan/mematikan selalu boleh.
-      if (input.events !== undefined || input.rotateSecret === true) {
+      // Memutar/menetapkan rahasia atau mengubah langganan menambah komitmen baru
+      // dan karenanya butuh fiturnya; menyalakan/mematikan selalu boleh.
+      if (
+        input.events !== undefined ||
+        input.rotateSecret === true ||
+        input.secret !== undefined
+      ) {
         requireModuleFeature("api.access");
       }
 
@@ -6550,10 +7157,20 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
         if (events.length === 0) throw new Error("Pilih minimal satu event yang mau dikirim.");
       }
 
+      // Rahasia yang diketik pemilik diperiksa aturan murni yang sama dengan
+      // server; hanya bentuk yang sah yang boleh menggantikan rahasia lama.
+      let typedSecret: string | null = null;
+      if (input.secret !== undefined) {
+        const check = validateWebhookSecret(input.secret);
+        if (!check.ok) throw new Error(check.reason);
+        typedSecret = check.value;
+      }
+
       const secret =
-        input.rotateSecret === true
+        typedSecret ??
+        (input.rotateSecret === true
           ? randomToken(API_KEY_SECRET_LENGTH, API_KEY_SECRET_ALPHABET)
-          : null;
+          : null);
       const description =
         input.description === undefined
           ? existing.description
@@ -6574,7 +7191,9 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
             : row,
         ),
       );
-      return { secret };
+      // Rahasia yang diketik pemilik tidak dikembalikan sebagai “rahasia baru”:
+      // nilainya sudah ada padanya (dari penerima).
+      return { secret: typedSecret ? null : secret };
     },
     [commitWebhookEndpoints, requireModuleFeature],
   );
@@ -6632,6 +7251,48 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       };
       commitWebhookDeliveries([row, ...webhookDeliveriesRef.current]);
       return { status: "delivered", attempts: 1, event, error: null };
+    },
+    [commitWebhookDeliveries],
+  );
+
+  /**
+   * Kirim ulang satu baris riwayat. Mode demo tidak punya jaringan, jadi
+   * penerimanya disimulasikan menjawab 200 — sama seperti “Kirim uji” — tetapi
+   * baris yang dikirim ulang adalah **baris yang sama** (event & id-nya tidak
+   * berubah), sehingga alur “gagal → perbaiki rahasia → kirim ulang → terkirim”
+   * bisa dilihat utuh di riwayat.
+   */
+  const retryWebhookDelivery = useCallback(
+    async (deliveryId: string): Promise<WebhookRetryResult> => {
+      const row = webhookDeliveriesRef.current.find((item) => item.id === deliveryId);
+      if (!row) throw new Error("Kiriman webhook tidak ditemukan untuk tenant ini.");
+      if (row.status === "delivered") {
+        throw new Error("Kiriman ini sudah diterima penerima; tidak perlu dikirim ulang.");
+      }
+      const endpoint = webhookEndpointsRef.current.find(
+        (item) => item.id === row.endpointId,
+      );
+      if (!endpoint) {
+        throw new Error("Endpoint webhook sudah tidak ada; kiriman tidak bisa dikirim ulang.");
+      }
+
+      const now = Date.now();
+      commitWebhookDeliveries(
+        webhookDeliveriesRef.current.map((item) =>
+          item.id === deliveryId
+            ? {
+                ...item,
+                status: "delivered" as const,
+                attempts: 1,
+                lastStatusCode: 200,
+                lastError: null,
+                nextAttemptAt: null,
+                deliveredAt: now,
+              }
+            : item,
+        ),
+      );
+      return { status: "delivered", attempts: 1, event: row.event, error: null };
     },
     [commitWebhookDeliveries],
   );
@@ -7841,6 +8502,18 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       setReceipt,
       shift,
       setShift,
+      marketplace,
+      lookupMarketplaceVendors,
+      pairMarketplace,
+      unpairMarketplace,
+      retryMarketplaceOrder,
+      setMarketplacePushSecret,
+      syncMarketplaceNow,
+      pushMarketplaceProducts,
+      pullMarketplaceCatalog,
+      reconcileMarketplaceStock,
+      pushMarketplaceStockDiffs,
+      pullMarketplaceStockDiffs,
       shiftAlerts,
       reportShiftAlert,
       resolveShiftAlert,
@@ -7867,6 +8540,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       addProductImage,
       removeProductImage,
       setPricing,
+      setProductBarcode,
       setCategory,
       setModifiers,
       customers: storeCustomers,
@@ -7989,10 +8663,12 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       webhookSummary,
       createApiKey,
       revokeApiKey,
+      purgeRevokedApiKeys,
       createWebhookEndpoint,
       updateWebhookEndpoint,
       removeWebhookEndpoint,
       testWebhookEndpoint,
+      retryWebhookDelivery,
       createSale,
       adjustStock,
       offline,
@@ -8025,6 +8701,18 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       setReceipt,
       shift,
       setShift,
+      marketplace,
+      lookupMarketplaceVendors,
+      pairMarketplace,
+      unpairMarketplace,
+      retryMarketplaceOrder,
+      setMarketplacePushSecret,
+      syncMarketplaceNow,
+      pushMarketplaceProducts,
+      pullMarketplaceCatalog,
+      reconcileMarketplaceStock,
+      pushMarketplaceStockDiffs,
+      pullMarketplaceStockDiffs,
       shiftAlerts,
       reportShiftAlert,
       resolveShiftAlert,
@@ -8051,6 +8739,7 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       addProductImage,
       removeProductImage,
       setPricing,
+      setProductBarcode,
       setCategory,
       setModifiers,
       storeCustomers,
@@ -8173,10 +8862,12 @@ export function DemoStoreProvider({ children }: { children: ReactNode }) {
       webhookSummary,
       createApiKey,
       revokeApiKey,
+      purgeRevokedApiKeys,
       createWebhookEndpoint,
       updateWebhookEndpoint,
       removeWebhookEndpoint,
       testWebhookEndpoint,
+      retryWebhookDelivery,
       createSale,
       adjustStock,
       offline,

@@ -8,8 +8,8 @@
  *
  *   1. nama “Tanpa kategori” masuk sebagai kategori sungguhan, sehingga produk
  *      tanpa kategori dan produk yang memakai kategori itu tidak bisa dibedakan;
- *   2. ganti nama kategori diam-diam menulis ulang SKU produk (atau sebaliknya,
- *      halaman mengklaim kodenya berubah padahal tidak);
+ *   2. ganti nama kategori diam-diam menulis ulang SKU produk (SKU berformat
+ *      `PBB-<nomor urut>` tanpa nama kategori, jadi tidak boleh tersentuh);
  *   3. kategori nonaktif tetap ditawarkan ke produk baru, atau sebaliknya hilang
  *      dari tab POS padahal produknya masih dijual;
  *   4. hapus kategori yang masih dipakai produk tidak diberitahukan dampaknya.
@@ -22,10 +22,8 @@ import {
   CATEGORY_NO_CATEGORY_LABEL,
   categoryIsActive,
   categoryNameKey,
-  categorySkuCode,
   countProductsInCategory,
   deleteCategorySentence,
-  duplicateCategoryCodes,
   isReservedCategoryName,
   MAX_CATEGORIES_PER_TENANT,
   countProductsInSubcategory,
@@ -34,7 +32,6 @@ import {
   normalizeCategoryName,
   normalizeSubcategoryName,
   posCategoryChips,
-  renamesSkuCode,
   selectableCategoryNames,
   selectableSubcategoryNames,
   SUBCATEGORY_NAME_MAX,
@@ -44,7 +41,6 @@ import {
   validateCategoryName,
   validateSubcategoryName,
 } from "../src/convex/lib/categories.ts";
-import { PRODUCT_SKU_NO_CATEGORY_LABEL } from "../src/convex/lib/productSku.ts";
 
 const results = [];
 function check(name, condition, detail) {
@@ -95,9 +91,9 @@ for (const [label, input, expected] of [
   );
 }
 
-// “Tanpa kategori” berarti “tidak ada kategori” di seluruh aplikasi: tabel produk,
-// pemilih kategori, dan kode SKU (`productSkuCategoryCode` → `UMU`). Nama itu harus
-// dikenali dari bentuk apa pun, bukan hanya kalimat persisnya.
+// “Tanpa kategori” berarti “tidak ada kategori” di seluruh aplikasi: tabel produk
+// dan pemilih kategori. Nama itu harus dikenali dari bentuk apa pun, bukan hanya
+// kalimat persisnya.
 check(
   "semua bentuk “tanpa kategori” dianggap terlarang",
   isReservedCategoryName("Tanpa kategori") &&
@@ -110,12 +106,6 @@ check(
     .map((value) => `${value}=${isReservedCategoryName(value)}`)
     .join(", "),
 );
-check(
-  "label terlarang memang label yang dipakai SKU untuk “tanpa kategori”",
-  categoryNameKey(CATEGORY_NO_CATEGORY_LABEL) === PRODUCT_SKU_NO_CATEGORY_LABEL,
-  `${categoryNameKey(CATEGORY_NO_CATEGORY_LABEL)} vs ${PRODUCT_SKU_NO_CATEGORY_LABEL}`,
-);
-
 // --------------------------------------------------------------- subkategori
 check(
   "nama subkategori dirapikan dengan aturan spasi yang sama",
@@ -306,32 +296,6 @@ check(
   JSON.stringify(validateCategoryName({ name: "Kategori Baru" }, { existingNames: [] })),
 );
 
-// ----------------------------------------------------------------- kode SKU
-for (const [name, code] of [
-  ["Sanitasi", "SAN"],
-  ["Kopi", "KOP"],
-  ["AB", "ABX"],
-  ["", "UMU"],
-  ["Tanpa kategori", "UMU"],
-]) {
-  check(
-    `kode SKU kategori “${name}” = ${code}`,
-    categorySkuCode(name) === code,
-    categorySkuCode(name),
-  );
-}
-
-check(
-  "ganti nama yang mengubah kode SKU dikenali",
-  renamesSkuCode("Makanan", "Minuman") === true,
-  `${categorySkuCode("Makanan")} → ${categorySkuCode("Minuman")}`,
-);
-check(
-  "ganti nama yang tidak mengubah kode SKU juga dikenali",
-  renamesSkuCode("Sanitasi", "Sanitasi & Kebersihan") === false,
-  `${categorySkuCode("Sanitasi")} → ${categorySkuCode("Sanitasi & Kebersihan")}`,
-);
-
 // -------------------------------------------------------------- status aktif
 check(
   "baris kategori lama tanpa kolom aktif dianggap aktif",
@@ -414,27 +378,6 @@ check(
     "kategori yang sudah dipakai tapi barisnya hilang tetap dibuatkan tab",
     posCategoryChips([], ["Arsip Lama"]).includes("Arsip Lama"),
     JSON.stringify(posCategoryChips([], ["Arsip Lama"])),
-  );
-}
-
-// ------------------------------------------------------- kode SKU yang bentrok
-{
-  const bentrok = duplicateCategoryCodes([
-    { name: "Makanan" },
-    { name: "Makmur" },
-    { name: "Kopi" },
-  ]);
-  check(
-    "dua kategori dengan kode SKU yang sama dilaporkan",
-    bentrok.length === 1 &&
-      bentrok[0].code === "MAK" &&
-      bentrok[0].names.join(",") === "Makanan,Makmur",
-    JSON.stringify(bentrok),
-  );
-  check(
-    "kategori dengan kode berbeda tidak dilaporkan",
-    duplicateCategoryCodes([{ name: "Kopi" }, { name: "Makanan" }]).length === 0,
-    JSON.stringify(duplicateCategoryCodes([{ name: "Kopi" }, { name: "Makanan" }])),
   );
 }
 

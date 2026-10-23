@@ -670,6 +670,12 @@ export default defineSchema({
      * kunci lama yang pembuatnya tidak tercatat.
      */
     creatorRole: v.optional(roleValidator),
+    /**
+     * Pencabutan **menghapus baris** (`apiAccess.revokeKey`), jadi `active`
+     * selalu `true` untuk kunci yang masih ada. Kolom ini dan `revokedAt`
+     * dipertahankan hanya untuk baris peninggalan cara lama; keduanya
+     * dibersihkan lewat `apiAccess.purgeRevokedKeys`.
+     */
     active: v.boolean(),
     expiresAt: v.optional(v.number()),
     revokedAt: v.optional(v.number()),
@@ -730,6 +736,70 @@ export default defineSchema({
     .index("by_tenant_created", ["tenantId", "createdAt"])
     .index("by_endpoint", ["endpointId"])
     .index("by_status_next_attempt", ["status", "nextAttemptAt"]),
+
+  /**
+   * Endpoint **webhook masuk** (`api.access`, arah platform mitra → MesinPOS).
+   *
+   * Ini kebalikan dari `webhookEndpoints`: di sana kita yang mengirim, di sini
+   * mitra yang mengirim dan kita yang memverifikasi. Karena itu ada dua nilai
+   * rahasia yang berbeda peran:
+   *
+   * - `token` masuk ke **URL** (`/api/v1/webhooks/incoming/<token>`) dan hanya
+   *   berfungsi sebagai penunjuk endpoint. Bocornya URL tidak cukup untuk
+   *   menulis apa pun.
+   * - `secret` dipakai mitra untuk menandatangani badan kiriman
+   *   (HMAC-SHA256 atas `timestamp.body`, header yang sama dengan webhook
+   *   keluar). Nilainya disimpan apa adanya — kita harus menghitung ulang tanda
+   *   tangan untuk memverifikasinya, persis seperti `webhookEndpoints.secret`.
+   *
+   * `storeId` adalah toko bawaan endpoint ini: peristiwa masuk yang tidak
+   * menyebut `storeCode` dijalankan pada toko tersebut. `events` membatasi apa
+   * yang boleh dikirim mitra — event di luar daftar ditolak, bukan diabaikan.
+   */
+  inboundWebhookEndpoints: defineTable({
+    tenantId: v.id("tenants"),
+    name: v.string(),
+    token: v.string(),
+    secret: v.string(),
+    secretLastFour: v.string(),
+    events: v.array(v.string()),
+    active: v.boolean(),
+    storeId: v.optional(v.id("stores")),
+    createdById: v.optional(v.id("users")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_token", ["token"]),
+
+  /**
+   * Riwayat peristiwa webhook masuk. Satu baris per kiriman mitra, dengan
+   * `eventId` dari mitra sebagai kunci idempotensi: kiriman ulang yang sama
+   * (mis. setelah mitra timeout) dijawab `duplicate` tanpa menjalankan
+   * operasinya dua kali.
+   *
+   * `status` menyebut nasib kiriman apa adanya — `applied` (operasinya jalan),
+   * `rejected` (ditolak aturan, pesannya disimpan), atau `duplicate`. Badan
+   * kiriman disimpan utuh supaya bisa diperiksa ulang tanpa meminta mitra
+   * mengirim lagi.
+   */
+  inboundWebhookEvents: defineTable({
+    tenantId: v.id("tenants"),
+    endpointId: v.id("inboundWebhookEndpoints"),
+    eventId: v.string(),
+    event: v.string(),
+    status: v.union(
+      v.literal("applied"),
+      v.literal("rejected"),
+      v.literal("duplicate"),
+    ),
+    message: v.optional(v.string()),
+    payload: v.string(),
+    createdAt: v.number(),
+    appliedAt: v.optional(v.number()),
+  })
+    .index("by_tenant_created", ["tenantId", "createdAt"])
+    .index("by_endpoint_event", ["endpointId", "eventId"]),
 
   /**
    * Peran kustom (`rbac.custom`, Phase 4): daftar izin bernama yang ditugaskan
@@ -921,11 +991,13 @@ export default defineSchema({
     address: v.optional(v.string()),
     active: v.boolean(),
     createdAt: v.number(),
-  }).index("by_tenant", ["tenantId"]),
+  })
+    .index("by_tenant", ["tenantId"])
+    /** Pemilih toko API (`?storeCode=`): kode unik di dalam satu workspace. */
+    .index("by_tenant_code", ["tenantId", "code"]),
 
-  /**
-   * Kategori produk (`category.manage`). Namanya menentukan kode tengah SKU
-   * (`PBB-<KATEGORI>-<nomor>`, lihat lib/productSku.ts) dan tab filter POS.
+  /**   * Kategori produk (`category.manage`). Namanya menentukan tab filter POS; SKU
+   * produk (`PBB-<nomor urut>`, lihat lib/productSku.ts) tidak memuatnya.
    *
    * `active` sengaja **opsional**: baris kategori dibuat sebelum kolom ini ada
    * (mis. kategori bawaan tenant lama), dan kategori tanpa nilai itu diperlakukan
@@ -946,9 +1018,9 @@ export default defineSchema({
    * mis. “Semen & Mortar › Semen Portland”.
    *
    * Sengaja tabel sendiri, bukan baris `categories` ber-`parentId`: kategori
-   * menentukan kode di tengah SKU (`PBB-<KATEGORI>-<nomor>`) dan tab POS,
-   * sedangkan subkategori **tidak** menyentuh keduanya — ia bagian katalog yang
-   * ikut disinkronkan (API & webhook). Produk menunjuk `subcategoryId`, jadi ganti
+   * menentukan susunan tab POS, sedangkan subkategori tidak menyentuh tab maupun
+   * SKU (`PBB-<nomor urut>`) — ia bagian katalog yang ikut disinkronkan (API &
+   * webhook). Produk menunjuk `subcategoryId`, jadi ganti
    * nama subkategori tidak menulis ulang apa pun; hapus subkategori melepas
    * produknya tanpa menghapus produk atau mengubah SKU-nya.
    */
@@ -1061,6 +1133,13 @@ export default defineSchema({
   products: defineTable({
     tenantId: v.id("tenants"),
     sku: v.string(),
+    /**
+     * Kode tambahan yang dipindai kasir (barcode pabrik atau QR pemasok).
+     * Kosong = kasir hanya mencocokkan SKU. Satu kode per produk; tidak wajib.
+     */
+    barcode: v.optional(v.string()),
+    /** Jenis kode untuk label & pratinjau: Code 39 (`barcode`) atau QR (`qr`). */
+    barcodeType: v.optional(v.union(v.literal("barcode"), v.literal("qr"))),
     name: v.string(),
     categoryId: v.optional(v.id("categories")),
     /**
@@ -1136,7 +1215,9 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index("by_tenant", ["tenantId"])
-    .index("by_tenant_code", ["tenantId", "code"]),
+    .index("by_tenant_code", ["tenantId", "code"])
+    /** Urutan & rentang tanggal untuk `GET /api/v1/customers`. */
+    .index("by_tenant_created", ["tenantId", "createdAt"]),
 
   /**
    * Member pelanggan (`member.discount`; modul UMKM). Sengaja **terpisah** dari
@@ -1154,7 +1235,9 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index("by_tenant", ["tenantId"])
-    .index("by_tenant_code", ["tenantId", "code"]),
+    .index("by_tenant_code", ["tenantId", "code"])
+    /** Urutan & rentang tanggal untuk `GET /api/v1/members`. */
+    .index("by_tenant_created", ["tenantId", "createdAt"]),
 
   /**
    * Piutang per nota (satu baris per penjualan yang belum lunas). `paidAmount`
@@ -1308,6 +1391,8 @@ export default defineSchema({
   })
     .index("by_tenant", ["tenantId"])
     .index("by_tenant_store", ["tenantId", "storeId"])
+    /** Rentang tanggal berhalaman untuk `GET /api/v1/purchases`. */
+    .index("by_tenant_store_created", ["tenantId", "storeId", "createdAt"])
     .index("by_order", ["orderId"]),
 
   /**
@@ -1602,6 +1687,8 @@ export default defineSchema({
      */
     .index("by_tenant_created", ["tenantId", "createdAt"])
     .index("by_idempotency", ["idempotencyKey"])
+    /** Pencarian nomor struk untuk pembatalan lewat API (`POST /api/v1/sales/void`). */
+    .index("by_tenant_number", ["tenantId", "number"])
     .index("by_table", ["tableId"]),
 
   saleItems: defineTable({
@@ -1740,6 +1827,299 @@ export default defineSchema({
     detail: v.optional(v.string()),
     at: v.number(),
   }).index("by_at", ["at"]),
+
+  /**
+   * Pairing workspace ke **satu vendor** di marketplace pusatbahanbangunan.com.
+   *
+   * Dibuat dari halaman Pengaturan oleh **pemilik** saja. Satu workspace hanya
+   * punya satu baris; melepas pairing menghapus barisnya, bukan menandainya
+   * nonaktif — supaya token snapshot lama benar-benar berhenti bekerja.
+   *
+   * `contact` disimpan sudah dinormalkan (email huruf kecil / WA berawalan 62),
+   * sedangkan `contactMasked` adalah bentuk yang aman ditampilkan ke anggota
+   * lain. `syncToken` rahasia: dipakai marketplace untuk menarik snapshot, dan
+   * hanya dikirim ke pemilik lewat query status.
+   */
+  marketplacePairings: defineTable({
+    tenantId: v.id("tenants"),
+    vendorId: v.string(),
+    vendorName: v.string(),
+    contactKind: v.union(v.literal("email"), v.literal("whatsapp")),
+    contact: v.string(),
+    contactMasked: v.string(),
+    /** Marketplace sudah mencocokkan kontak ini dengan vendornya. */
+    contactVerified: v.boolean(),
+    /** Kode yang dibaca manusia (`PBB-XXXX-XXXX`), bukan rahasia. */
+    pairingCode: v.string(),
+    /** Token rahasia untuk `GET /api/marketplace/snapshot`. */
+    syncToken: v.string(),
+    /**
+     * Rahasia **penanda tangan** kiriman MesinPOS → marketplace.
+     *
+     * Nilainya harus sama dengan “rahasia endpoint” yang diisi di Pengaturan
+     * marketplace. Disimpan apa adanya (bukan hash) karena MesinPOS yang
+     * menghitung HMAC-nya, sama seperti rahasia webhook keluar. Empat karakter
+     * terakhir disimpan terpisah untuk ditampilkan tanpa membocorkan rahasianya.
+     */
+    pushSecret: v.optional(v.string()),
+    pushSecretLastFour: v.optional(v.string()),
+    pairedAt: v.number(),
+    pairedBy: v.id("users"),
+    /** Kunjungan terakhir marketplace ke endpoint snapshot. */
+    lastPullAt: v.optional(v.number()),
+    lastPullCounts: v.optional(
+      v.object({
+        products: v.number(),
+        sales: v.number(),
+        purchases: v.number(),
+        payables: v.number(),
+      }),
+    ),
+    /** Percobaan dorong terakhir (kalau marketplace menyediakan endpoint tulis). */
+    lastSyncAt: v.optional(v.number()),
+    lastSyncStatus: v.optional(
+      v.union(v.literal("delivered"), v.literal("failed"), v.literal("ready")),
+    ),
+    lastSyncNote: v.optional(v.string()),
+    /**
+     * Dorongan **katalog produk** terakhir. Dipisah dari `lastSync*` karena
+     * katalog dikirim dengan tombol sendiri: seluruh field produk + gambar + pohon
+     * kategori, upsert per SKU. Yang dilaporkan marketplace (dibuat/diperbarui/
+     * field baru) disimpan apa adanya, bukan ditebak dari jumlah yang dikirim.
+     */
+    lastProductSyncAt: v.optional(v.number()),
+    lastProductSyncStatus: v.optional(
+      v.union(v.literal("delivered"), v.literal("failed"), v.literal("ready")),
+    ),
+    lastProductSyncNote: v.optional(v.string()),
+    lastProductSyncCounts: v.optional(
+      v.object({
+        products: v.number(),
+        created: v.number(),
+        updated: v.number(),
+        skipped: v.number(),
+        fieldsCreated: v.number(),
+      }),
+    ),
+    /**
+     * Tarikan **katalog marketplace → MesinPOS** terakhir (tombol “Impor
+     * katalog”). Dipisah dari `lastProductSync*` karena arahnya berlawanan:
+     * kategori/subkategori/produk dibaca dari marketplace, sedangkan stok & modal
+     * tetap milik POS.
+     */
+    lastCatalogAt: v.optional(v.number()),
+    lastCatalogStatus: v.optional(
+      v.union(
+        v.literal("imported"),
+        v.literal("empty"),
+        v.literal("failed"),
+      ),
+    ),
+    lastCatalogNote: v.optional(v.string()),
+    lastCatalogCounts: v.optional(
+      v.object({
+        products: v.number(),
+        created: v.number(),
+        updated: v.number(),
+        unchanged: v.number(),
+        skipped: v.number(),
+        categories: v.number(),
+        subcategories: v.number(),
+        images: v.number(),
+        /**
+         * Produk yang saldo stok lokasi jualnya disesuaikan. Opsional supaya
+         * baris pairing yang sempat menyimpan hasil impor versi lama (tanpa
+         * stok) tetap sah dibaca; tampilan memakai `0` bila kosong.
+         */
+        stock: v.optional(v.number()),
+        /**
+         * Produk yang barcode/QR kasirnya disimpan dari marketplace. Opsional
+         * dengan alasan yang sama seperti `stock`: baris hasil impor versi lama
+         * tetap sah dibaca, tampilan memakai `0` bila kosong.
+         */
+        barcodes: v.optional(v.number()),
+        /** Kode marketplace yang dilewati karena sudah dipakai produk lain. */
+        barcodeConflicts: v.optional(v.number()),
+      }),
+    ),
+    /**
+     * Dorongan **stok otomatis** terakhir — bukan tombol.
+     *
+     * Setiap pergerakan stok (penjualan, pembatalan, penerimaan barang, opname,
+     * penyesuaian) mengantre produknya, lalu satu kiriman berangkat sesudah jeda
+     * singkat. Dipisah dari `lastProductSync*` supaya dorongan otomatis tidak
+     * menimpa catatan tombol “Sinkronkan produk” — dan sebaliknya.
+     */
+    lastStockSyncAt: v.optional(v.number()),
+    lastStockSyncStatus: v.optional(
+      v.union(v.literal("delivered"), v.literal("failed")),
+    ),
+    lastStockSyncNote: v.optional(v.string()),
+    lastStockSyncCounts: v.optional(
+      v.object({
+        products: v.number(),
+        created: v.number(),
+        updated: v.number(),
+        skipped: v.number(),
+        fieldsCreated: v.number(),
+      }),
+    ),
+    /**
+     * Dorongan **penjualan otomatis** terakhir — nota selesai dan pembatalan,
+     * beserta stok SKU yang tersentuh. Dipisah dari `lastStockSync*` karena satu
+     * kiriman penjualan memperbarui dua hal sekaligus (nota + stok).
+     */
+    lastSalesSyncAt: v.optional(v.number()),
+    lastSalesSyncStatus: v.optional(
+      v.union(v.literal("delivered"), v.literal("failed")),
+    ),
+    lastSalesSyncNote: v.optional(v.string()),
+    lastSalesSyncCounts: v.optional(
+      v.object({
+        sales: v.number(),
+        items: v.number(),
+        stock: v.number(),
+      }),
+    ),
+    /**
+     * **Pemeriksaan selisih stok** terakhir (cron harian atau tombol “Periksa
+     * sekarang”). Isinya hanya hasil baca: rekonsiliasi tidak menulis stok ke
+     * mana pun — yang menulis tetap penjualan, pembelian, opname, dan impor.
+     */
+    lastReconcileAt: v.optional(v.number()),
+    lastReconcileStatus: v.optional(
+      v.union(v.literal("checked"), v.literal("failed")),
+    ),
+    lastReconcileNote: v.optional(v.string()),
+    lastReconcileCounts: v.optional(
+      v.object({
+        pos: v.number(),
+        marketplace: v.number(),
+        matched: v.number(),
+        differing: v.number(),
+        posOnly: v.number(),
+        marketplaceOnly: v.number(),
+        truncated: v.boolean(),
+      }),
+    ),
+    /**
+     * **Sinkron barcode otomatis** terakhir — cron harian, arah marketplace →
+     * POS, **hanya** kolom `barcode`/`barcodeType` produk. Produk baru tidak
+     * dibuat dan field lain tidak disentuh; lihat `planMarketplaceBarcodeSync`.
+     */
+    lastBarcodeSyncAt: v.optional(v.number()),
+    lastBarcodeSyncStatus: v.optional(
+      v.union(v.literal("synced"), v.literal("failed")),
+    ),
+    lastBarcodeSyncNote: v.optional(v.string()),
+    lastBarcodeSyncCounts: v.optional(
+      v.object({
+        products: v.number(),
+        changed: v.number(),
+        unchanged: v.number(),
+        conflicts: v.number(),
+        missing: v.number(),
+      }),
+    ),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_token", ["syncToken"]),
+
+  /**
+   * Baris laporan **selisih stok per SKU** hasil pemeriksaan terakhir.
+   *
+   * Ditulis ulang setiap pemeriksaan (bukan ditumpuk), jadi tabel ini selalu
+   * menggambarkan keadaan terakhir — bukan riwayat yang menumpuk tanpa dibaca.
+   * `posStock`/`marketplaceStock` boleh `null`: SKU yang hanya ada di satu sisi
+   * justru temuan yang paling perlu terlihat (mis. sisa SKU lama setelah rename).
+   */
+  marketplaceStockDiffs: defineTable({
+    tenantId: v.id("tenants"),
+    sku: v.string(),
+    name: v.string(),
+    posStock: v.union(v.number(), v.null()),
+    marketplaceStock: v.union(v.number(), v.null()),
+    /** marketplace − POS; `null` kalau salah satu sisi tidak punya SKU-nya. */
+    delta: v.union(v.number(), v.null()),
+    kind: v.union(
+      v.literal("both"),
+      v.literal("pos_only"),
+      v.literal("marketplace_only"),
+    ),
+    detectedAt: v.number(),
+  }).index("by_tenant", ["tenantId"]),
+
+  /**
+   * Antrean **stok otomatis** ke marketplace.
+   *
+   * Ditulis di dalam transaksi yang mengubah stok (`applyStockChange`), jadi
+   * penjualan yang batal tidak meninggalkan antrean. Satu baris per tenant;
+   * id produknya digabung & dibuang duplikatnya, lalu satu action mengambil
+   * baris-baris ini, mengirim stoknya sebagai upsert per SKU, dan menghapusnya.
+   * `pushAll` dipakai kalau antreannya melewati batas — yang dikirim seluruh
+   * katalog, karena kehilangan perubahan lebih buruk daripada kiriman besar.
+   *
+   * `catalog` menandai antrean yang lahir dari **perubahan kategori atau
+   * subkategori**: yang perlu dikirim pohon katalog terbaru (bukan sekadar saldo
+   * stok), jadi kirimannya memakai event katalog `product.updated` dan dicatat
+   * di `lastProductSync*`. Tanpa nilai ini, antrean diperlakukan sebagai
+   * perubahan stok seperti biasa.
+   */
+  marketplaceStockQueue: defineTable({
+    tenantId: v.id("tenants"),
+    productIds: v.array(v.id("products")),
+    pushAll: v.boolean(),
+    catalog: v.optional(v.boolean()),
+    createdAt: v.number(),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_created", ["createdAt"]),
+
+  /**
+   * Antrean **penjualan otomatis** ke marketplace.
+   *
+   * Ditulis di dalam transaksi penjualan/pembatalan, jadi penjualan yang batal
+   * tidak meninggalkan antrean. Satu baris per tenant berisi id nota yang belum
+   * terkirim; action mengambilnya, mengirim nota + stok terbaru SKU-nya, lalu
+   * menghapus barisnya. Nota yang muncul lagi (pembatalan) digabung, bukan
+   * menjadi antrean kedua.
+   */
+  marketplaceSaleQueue: defineTable({
+    tenantId: v.id("tenants"),
+    saleIds: v.array(v.id("sales")),
+    createdAt: v.number(),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_created", ["createdAt"]),
+
+  /**
+   * Riwayat **pesanan marketplace → MesinPOS** (`POST /api/marketplace/orders`).
+   *
+   * Satu baris per kiriman marketplace, dengan `orderId` dari marketplace sebagai
+   * kunci idempotensi: kiriman ulang setelah timeout dijawab `duplicate` tanpa
+   * membuat penjualan kedua. `saleNumber` menunjuk nota MesinPOS yang lahir dari
+   * pesanan itu — itulah yang dikirim balik ke marketplace supaya pembatalan
+   * (`sale.voided`) bisa menyebut nomornya. Baris `rejected` menyimpan sebabnya
+   * apa adanya, supaya “pesanan tidak masuk” punya alasan yang bisa dibaca.
+   */
+  marketplaceInboundOrders: defineTable({
+    tenantId: v.id("tenants"),
+    pairingId: v.id("marketplacePairings"),
+    orderId: v.string(),
+    event: v.string(),
+    status: v.union(
+      v.literal("applied"),
+      v.literal("rejected"),
+      v.literal("duplicate"),
+    ),
+    message: v.optional(v.string()),
+    saleNumber: v.optional(v.string()),
+    payload: v.string(),
+    createdAt: v.number(),
+    appliedAt: v.optional(v.number()),
+  })
+    .index("by_pairing_order", ["pairingId", "orderId"])
+    .index("by_tenant_created", ["tenantId", "createdAt"]),
 
   /** Per-tenant monotonic sequences (sale numbers, invoice numbers). */
   counters: defineTable({

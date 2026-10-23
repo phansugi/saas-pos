@@ -20,22 +20,27 @@ Halaman **publik tanpa sesi** untuk pengembang platform mitra (mis. **pusatbahan
 - **mulai cepat** (buat kunci → simpan rahasia → panggil `GET /api/v1/ping`),
 - **autentikasi & scope** (header `Authorization: Bearer mp_…` atau `x-api-key`, tabel scope yang
 ditawarkan beserta endpoint dan jenisnya),
-- **referensi tiap endpoint** (`GET /api/v1/ping`, `GET /api/v1/sales`, `POST /api/v1/sales`,
-`GET /api/v1/products`, `GET /api/v1/payables`, `GET /api/v1/purchases`) dengan parameter query
-(`days`, `since`, `limit`, `cursor`), arti field balasan — termasuk **kategori & subkategori katalog**
-pada `products` — contoh permintaan, contoh balasan, dan catatannya,
-- **webhook keluar** (14 event, header `x-mesinpos-*`, HMAC-SHA256 atas `timestamp.body`,
+- **referensi tiap endpoint** (18 endpoint: baca katalog/penjualan/pembelian/hutang/pelanggan/member,
+  tulis produk & stok, buat pelanggan/member, pesanan masuk, pembatalan penjualan, dan pengelolaan
+  webhook masuk) dengan parameter query (`days`, `since`, `from`, `to`, `limit`, `cursor`, `status`,
+  `storeCode`), arti field balasan — termasuk **kategori, subkategori & modifier katalog** pada
+  `products` — contoh permintaan, contoh balasan, dan catatannya,
+- **webhook keluar** (15 event, header `x-mesinpos-*`, HMAC-SHA256 atas `timestamp.body`,
 contoh verifikasi Node.js, jadwal percobaan ulang 1 · 5 · 30 · 120 · 720 menit),
-- **sinkronisasi berkelanjutan**: tabel kepemilikan data (MesinPOS sumber utama), langkah salinan awal →
-webhook realtime → rekonsiliasi berkala, dan aturan “MesinPOS menang” supaya harga/stok tidak saling menimpa.
-- **kode status 200/201/400/401/403/404/409** beserta penyebab yang biasa,
-- **batas v1** (`limit` 1–100, `days` 1–30, 20 kunci hidup, 50 baris/pesanan, satu toko utama)
+- **webhook masuk** (4 event dari platform: `order.created`, `stock.adjusted`, `product.updated`,
+`sale.voided`; URL bertoken, tanda tangan HMAC yang sama, `id` peristiwa sebagai kunci idempotensi),
+- **sinkronisasi berkelanjutan**: tabel kepemilikan data (MesinPOS memegang data operasional), langkah
+salinan awal → webhook realtime → rekonsiliasi berkala, dan aturan bahwa platform hanya menulis lewat
+endpoint/peristiwa yang disepakati — supaya harga/stok tidak saling menimpa.
+- **kode status 200/201/202/400/401/403/404/409/410/413** beserta penyebab yang biasa,
+- **batas v1** (`limit` 1–100, `days` 1–30, 20 kunci hidup, 50 baris/pesanan, 5 endpoint webhook masuk)
   dan daftar jujur hal yang **belum** tersedia lewat API,
 - **rencana integrasi pusatbahanbangunan.com**: katalog dua tingkat (kategori + subkategori) dari
-`GET /products`, pesanan
-  lewat `POST /sales` dengan `idempotencyKey` = ID pesanan platform, webhook `sale.completed` /
-  `purchase.received` / `stock.changed` / `product.updated` untuk perubahan realtime, serta
-  `GET /sales`, `GET /purchases`, dan `GET /payables` dengan `since` untuk rekonsiliasi.
+`GET /products`, pesanan lewat `POST /sales` (atau webhook masuk `order.created`) dengan
+  `idempotencyKey` = ID pesanan platform, perubahan harga/stok lewat `PATCH /products` &
+  `POST /stock/adjust`, pembatalan lewat `POST /sales/void`, webhook `sale.completed` /
+  `purchase.received` / `stock.changed` / `product.created` / `product.updated` untuk perubahan realtime, serta
+  `GET /sales`, `GET /purchases`, dan `GET /payables` dengan `from`/`to` untuk rekonsiliasi.
 
 Isi halaman dibaca dari **`src/lib/apiDocs.ts`**, yang menurunkan method/path/scope tiap endpoint dari
 `API_RESOURCES` (`src/convex/lib/apiKeys.ts`) dan katalog event dari `WEBHOOK_EVENTS`
@@ -48,6 +53,264 @@ bun scripts/verify-api-docs.mjs   # memeriksa halaman tetap publik, semua endpoi
                                   # dan setiap contoh JSON benar-benar bisa diuraikan (termasuk parseExternalOrder)
 bun scripts/verify-platform-sync.mjs   # sinkronisasi platform: event harga/stok/pembelian, pemicunya di jalur
                                       # tulis domain, endpoint tarik bertahap, dan aturan “MesinPOS sumber utama”
+```
+
+## Pairing vendor marketplace `pusatbahanbangunan.com`
+
+Halaman **Pengaturan** (`/app/settings`) punya kartu **Pairing vendor marketplace**. Pemilik
+memilih satu vendor dari direktori publik marketplace, mengonfirmasi **email atau nomor WA** yang
+terdaftar di sana, lalu workspace terpasang ke vendor itu. Kartunya **hanya ditampilkan untuk akun
+pemilik yang memegang izin pengaturan workspace (`billing.manage`) dan untuk bisnis yang sudah
+mengatur API** — setidaknya satu kunci API aktif di halaman API & Webhook. Manajer, keuangan, kasir,
+staf gudang, dan workspace yang belum menyiapkan integrasi API tidak melihat kartu maupun status
+pairing-nya; server tetap menolak aksi non-pemilik lewat `ownerOnlyReason` walau dipanggil langsung.
+
+Alurnya:
+
+- **Pencarian kontak lebih dulu, direktori sebagai jalan keluar.** Pemilik mengetik email/WA di
+langkah 1, dan langkah 2 hanya menampilkan **vendor yang terkait dengan kontak itu** — bukan
+seluruh direktori. Kalau kontak itu belum cocok dengan vendor mana pun (misalnya endpoint
+pencocokan marketplace belum aktif), kartu **membuka direktori secara otomatis** sesudah pencarian
+beserta alasannya, dan kontak yang diketik langsung terisi di langkah 3 sebagai klaim pemilik — jadi
+alurnya tidak berhenti di layar kosong. Pemilik juga tetap bisa membuka direktori sendiri lewat
+tombol “Tampilkan direktori toko”.
+- **Direktori** dibaca dari query publik marketplace (`vendor:listVendors`, alamat deployment bisa
+diganti lewat `PUSATBAHANBANGUNAN_QUERY_URL`). Isinya hanya yang memang publik: nama toko, kota,
+keterangan, jumlah produk, dan tanggal bergabung. Bentuk balasannya disaring dulu
+(`parseMarketplaceVendorRows`), jadi deployment marketplace yang berubah bentuk tidak merusak halaman.
+- **Kontak** dinormalkan dengan aturan yang sama di form, server, dan harness: email huruf kecil;
+WA `08…`, `+62…`, `628…`, atau `8…` menjadi satu bentuk `628…`. Di layar hanya bentuk terlindungi
+yang tampil (`o***@toko.id`, `62812••••890`); bentuk lengkapnya disimpan untuk pairing dan ikut ke
+snapshot bertoken supaya marketplace bisa mencocokkannya dengan akun vendornya.
+- **Pencocokan kontak otomatis** memakai endpoint marketplace bila tersedia
+(`PUSATBAHANBANGUNAN_PAIRING_LOOKUP_URL`, dengan token opsional
+`PUSATBAHANBANGUNAN_PAIRING_LOOKUP_TOKEN`) dan hanya mengembalikan vendor yang cocok. Selama
+endpoint itu belum ada, kartu mengatakan kontaknya belum cocok lalu menampilkan direktori otomatis;
+kontak yang dipilih dari direktori dicatat sebagai **klaim pemilik** sampai marketplace
+mencocokkannya. Ini disebut apa adanya di kartu, bukan disembunyikan.
+- **Sinkronisasi** satu arah: POS sumber utama. Setiap pairing membuat token rahasia `mp_…` dan
+  tautan `GET /api/marketplace/snapshot?token=…` yang bisa ditarik marketplace. Snapshot memuat
+  identitas usaha, katalog + stok lokasi jual, penjualan 30 hari terakhir beserta item, penerimaan
+  barang, dan hutang supplier yang terbuka. Tiap bagian dibatasi (1.000 produk, 200 nota, 20 item
+  per nota, 200 penerimaan/hutang) dan menandai `truncated`/`itemsTruncated` bila terpotong. Token
+  **tidak** ikut di badan snapshot, dan tautannya hanya dikirim ke pemilik.
+- **Katalog dikirim utuh, termasuk gambar.** Tiap baris `products` membawa **seluruh** field tabel
+  produk MesinPOS — `sku`, `name`, `barcode`, `barcodeType`, `category`, `subcategory`, `price`,
+  `cost`, `unit`, `stock` (lokasi jual), `active`, `trackStock`, `tiers`, `units`, `modifiers`,
+  `images` (URL gambar bertanda tangan), `imageCount`, dan `createdAt`. `barcode` ditulis dalam
+  **format marketplace** (`code39:<kode>` atau `qr:<kode>`) supaya kolom barcode di sana tetap bisa
+  digambar dan dipindai. `categories` membawa pohon kategori +
+  subkategori sumber, `productFields` mendaftar field yang dikirim, dan `sync` menyatakan
+  `mode: "upsert"`, `upsertKey: "sku"`, `createMissing: true` — field, produk, atau kategori yang
+  belum ada di marketplace **dibuat mengikuti sumbernya**, bukan ditolak. Batasnya jelas:
+  1.500 URL gambar per susunan (maksimal 8 gambar/produk) dan penanda `truncated.images` bila
+  terpotong. URL gambar bertanda tangan punya masa berlaku, jadi marketplace perlu menyimpannya
+  saat menarik/menerima katalog.
+- **Impor katalog dari marketplace** berjalan ke arah sebaliknya. Tombol ini membaca query publik
+  `marketplace:getProducts` **untuk vendor yang dipasangkan saja**, lalu: kategori dan subkategori yang
+  belum ada dibuat di MesinPOS; produk di-upsert **berdasarkan SKU** (nama, harga, satuan, kategori, dan
+  status aktif mengikuti marketplace; kategori yang tidak disebut marketplace tidak mengosongkan kategori
+  lokal; **barcode/QR kasir** ikut disalin, sedangkan kode yang sudah dipakai produk lain dilewati dan
+  dihitung sebagai bentrok, bukan membuat produknya batal diimpor); **jumlah stok ikut disalin** ke saldo lokasi jual toko utama, dan setiap selisih dicatat sebagai
+  pergerakan stok `adjustment` sehingga saldo baru bisa diaudit; harga modal tetap milik POS karena
+  marketplace tidak mengirimkannya. Gambar marketplace diunduh ke penyimpanan MesinPOS untuk produk baru
+  atau produk lokal yang belum punya gambar (maksimal 3 gambar/produk, anggaran 150 unduhan sekali impor).
+  Batasnya 500 produk sekali tarik; hasilnya menyebut jumlah produk dibuat/diperbarui/tidak berubah/
+  dilewati, kategori, subkategori, gambar, barcode/QR yang disimpan, dan stok yang disesuaikan, lalu
+  disimpan di baris pairing (`lastCatalog*`). Hanya **pemilik** yang boleh menjalankannya; kasir/manajer ditolak server. Impor ulang
+  tidak menggandakan produk maupun gambar, dan tidak menggeser stok yang sudah sama.
+- **Tombol Sinkronkan produk** mendorong katalog itu ke `PUSATBAHANBANGUNAN_PRODUCTS_URL` (atau
+  `PUSATBAHANBANGUNAN_SYNC_URL` bila endpoint khusus produk belum ada), `Authorization: Bearer
+  <token pairing>`. Balasan yang memuat `created`/`updated`/`skipped`/`fieldsCreated` ditampilkan
+  apa adanya; balasan tanpa angka ditulis “diterima tanpa laporan”, bukan ditebak. Tanpa kedua
+  endpoint, hasilnya jujur `ready` — katalog tetap bisa ditarik dari tautan snapshot. Hanya pemilik
+  yang boleh; manajer/kasir ditolak server. Hasil terakhir disimpan di baris pairing
+  (`lastProductSync*`) dan tampil di kartu.
+- **Kategori & subkategori ikut tersinkron sendiri.** Setiap perubahan di halaman Produk & Stok —
+  tambah, ganti nama, aktif/nonaktif, hapus, dan penyemaian kategori bisnis — menitipkan satu baris
+  `marketplaceStockQueue` bertanda `catalog: true` di dalam transaksi yang sama. Kirimannya adalah
+  **katalog penuh** (pohon kategori + produk, karena nama kategori hidup di baris produk) dengan event
+  `product.updated` dan `trigger: "category"`, ke endpoint katalog yang sama dengan tombol Sinkronkan
+  produk (`PRODUCTS_URL` → `SYNC_URL` → `STOCK_URL`), sesudah jeda ± 2 detik. Hasilnya dicatat di
+  `lastProductSync*` — bukan `lastStockSync*` — supaya dorongan kategori tidak tertukar dengan
+  dorongan stok. Perubahan stok dan kategori yang berdekatan digabung menjadi satu kiriman; tanpa
+  endpoint atau tanpa pairing, tidak ada antrean yang ditumpuk.
+- **Barcode/QR otomatis (hanya kolom kode).** Sekali sehari pukul 03:00 UTC — sesudah
+  rekonsiliasi stok — cron `marketplace.syncAllBarcodes` menjadwalkan satu pekerja per workspace
+  terpasang. Pekerja itu membaca katalog vendor, mencocokkan **SKU**, lalu menulis **hanya**
+  `products.barcode` + `products.barcodeType` lewat `planMarketplaceBarcodeSync` (aturan murni): nama,
+  harga, stok, kategori, gambar, dan status aktif tidak pernah disentuh, dan produk yang belum ada di
+  POS **tidak** dibuat. Kode yang sudah dipakai produk lain dilewati dan dihitung bentrok; kode lokal
+  tidak dihapus hanya karena marketplace berhenti menyebutkannya. Hasilnya tersimpan di
+  `lastBarcodeSync*` dan tampil di kartu Pengaturan (“Barcode/QR otomatis”); pemilik juga bisa
+  memicunya lebih awal lewat action `marketplace.syncBarcodesNow` (tanpa tombol di kartu). Batasnya
+  500 SKU marketplace sekali tarik (batas impor) dan 2.000 produk lokal sekali pindai.
+- **Stok otomatis sesudah transaksi.** Setiap pergerakan stok **lokasi jual** — penjualan,
+  pembatalan, penerimaan barang, opname, penyesuaian, dan perpindahan dari/ke gudang — menitipkan
+  produknya ke antrean `marketplaceStockQueue` **di dalam transaksi yang sama** (batalnya penjualan
+  membatalkan kirimannya juga), lalu satu action mengirimkannya ke `PUSATBAHANBANGUNAN_STOCK_URL`
+  (jatuh ke `PUSATBAHANBANGUNAN_PRODUCTS_URL`, lalu `PUSATBAHANBANGUNAN_SYNC_URL`) sesudah jeda
+  ± 2 detik. Isinya katalog dengan bentuk **sama** seperti dorongan produk — upsert per SKU, pohon
+  kategori ikut — hanya barisnya dibatasi ke SKU yang baru bergerak (`skus`), jadi marketplace yang
+  sudah menerima tombol Sinkronkan produk tidak perlu jalur baru. Satu nota menjadi satu kiriman;
+  antrean yang lebih besar dari 200 produk berubah menjadi kiriman seluruh katalog, dan cron 5 menit
+  menyapu antrean yang tertinggal. Kasir tidak pernah menunggu jaringan: kegagalan kiriman dicatat
+  apa adanya di `lastStockSync*` (terpisah dari `lastProductSync*`), lalu perubahan stok berikutnya
+  mencobanya lagi. Tanpa endpoint yang diisi, tidak ada klaim “tersinkron” — kartu menulis
+  “belum aktif” dan menyebut kunci yang harus diisi.
+- **Penjualan otomatis ke marketplace.** Setiap nota selesai (kasir, KDS, maupun
+  `POST /api/v1/sales`) dan setiap pembatalan menitipkan nota itu ke antrean `marketplaceSaleQueue`
+  di dalam transaksinya, lalu satu action mengirim **nota + stok terbaru SKU-nya** ke
+  `PUSATBAHANBANGUNAN_SALES_URL` (jatuh ke `STOCK_URL`, `PRODUCTS_URL`, lalu `SYNC_URL`) setelah jeda
+  ± 2 detik. Badannya `upsertKey: "number"` — kiriman ulang karena percobaan gagal tidak menjadi
+  penjualan kedua — berisi nomor, status (`completed`/`void`), subtotal/diskon/pajak/total, metode
+  bayar, kode pelanggan/member, item (SKU, nama, kuantitas, harga, label modifier), dan saldo stok
+  lokasi jual tiap SKU. Hasil terakhir dicatat di `lastSalesSync*` dan tampil di kartu; tanpa
+  endpoint yang diisi, statusnya gagal dengan sebab yang bisa dibaca (bukan “tersinkron”).
+  Snapshot tetap bisa dibaca marketplace, tetapi snapshot hanya memuat penjualan **selesai** —
+  pembatalan hanya sampai lewat dorongan ini atau webhook `sale.voided`.
+- **Pesanan marketplace masuk sendiri ke MesinPOS.** Arah balik ini sebelumnya tidak ada: penjualan
+  yang terjadi di `pusatbahanbangunan.com` tidak pernah menjadi penjualan MesinPOS, sehingga nota,
+  laba, dan pengurangan stoknya hanya terlihat besok sebagai selisih. Sekarang marketplace memanggil
+  **`POST /api/marketplace/orders`** dengan `Authorization: Bearer <token pairing>` (token yang sama
+  dengan tautan snapshot) dan badan `{ id, event, data }`:
+  - `event: "order.created"` — `data` berisi `lines` (`sku`, `quantity`, opsional `unitCode`/`modifiers`),
+    `payment` (`method`, opsional `amount`/`provider`/`providerRef`), `discount`, `customerCode`,
+    `memberCode`, dan `storeCode` bila workspace punya lebih dari satu toko. Nota dicatat lewat
+    `pos.createSale`, jadi harga, PPN, diskon member, stok, piutang, dan audit dihitung server —
+    angka dari marketplace tidak dipercaya mentah-mentah.
+  - `event: "sale.voided"` — `data` berisi `number` nota MesinPOS yang dikembalikan balasan
+    `order.created` beserta `reason`. Stok kembali dan piutang yang belum dibayar ikut batal.
+  - **`id` pesanan marketplace adalah kunci idempotensi.** Kiriman ulang (timeout atau percobaan
+    berikutnya) dijawab `200` dengan `duplicate: true` dan nomor nota yang sama, bukan penjualan kedua.
+  - Tanda tangan HMAC (`x-mesinpos-timestamp` + `x-mesinpos-signature`, rahasia penanda tangan pairing
+    yang sama dengan arah keluar) **opsional**: bila dikirim, ia wajib sah; bila tidak, token pairing
+    yang membuktikan pengirimnya.
+  - Balasan `201` menyebut `number`, `total`, dan `saleNumber`; riwayat 5 pesanan terakhir tampil di
+    kartu Pengaturan, termasuk yang ditolak beserta sebabnya. Nota yang lahir dari marketplace **tidak**
+    dikirim balik sebagai penjualan baru (marketplace sudah punya pesanan itu) — stoknya tetap menyusul
+    lewat dorongan stok otomatis.
+  - Alamat penerimaan ikut di setiap snapshot (`pairing.inbound.url`), jadi marketplace tidak perlu
+    menunggu pemilik menyalin tautan.
+  - **Jalur API yang sudah ada juga dikenali.** Kalau marketplace memilih mengirim lewat
+    `POST /api/v1/sales` yang sudah dipakai untuk katalog, kunci idempotensinya membawa penanda
+    `pbb-order-<id>`. Nota seperti itu dibaca langsung dari tabel penjualan dan ditampilkan di kartu
+    (5 nota terakhir) sebagai bukti “sudah masuk”, dan endpoint langsung memakai bentuk kunci yang
+    sama sehingga memakai kedua jalur tidak melahirkan nota atau pengurangan stok kedua.
+  - **Kiriman khas marketplace diterima apa adanya.** Pesanan bertanda `pbb-order-…` disiapkan dulu
+    sebelum diperiksa: field tambahan dari marketplace (nama & harga baris, catatan, ongkir, status
+    pembayaran mereka) dibuang — bukan menolak seluruh pesanan; **baris kembar digabung** (kuantitas
+    dijumlahkan); angka berbentuk teks (`"2"`) dibaca sebagai angka; dan nama metode bayar dipetakan
+    (`bank_transfer`/`va`/`transfer_bank` → `transfer`, `cod`/`tunai` → `cash`, `kartu`/`debit` →
+    `card`). Metode yang benar-benar tidak dikenal tetap ditolak 400 dengan daftar metode yang sah.
+    Kontrak ketat `/api/v1/sales` tidak berubah untuk pemanggil lain.
+  - **SKU yang bergeser dicocokkan lewat nama.** Bila SKU tidak ditemukan, baris boleh membawa `name`
+    dan server mencocokkan **nama yang persis sama dan unik**. Ini menutup kasus nyata marketplace
+    yang mengurutkan ulang SKU katalog sementara nama produknya tetap; nama kembar tetap ditolak supaya
+    server tidak menebak produk yang salah.
+  - **Penolakan lewat jalur API tidak lagi senyap.** Kalau pesanan bertanda `pbb-order-…` ditolak di
+    `POST /api/v1/sales`, sebabnya dicatat sebagai baris `rejected` di riwayat pesanan marketplace —
+    ikut tampil di kartu Pengaturan beserta nomor pesanan dan pesannya. Jadi “belum masuk” punya alasan
+    yang bisa dibaca dari MesinPOS, bukan hanya dari antrean marketplace.
+  - **Tombol Catat ulang sesudah produknya diperbaiki.** Setiap baris `rejected` di kartu punya tombol
+    **Catat ulang**: isi pesanan yang sudah tersimpan diterapkan ulang lewat jalur penjualan yang sama
+    (`marketplace.retryMarketplaceOrder`), jadi nota langsung terbit begitu SKU didaftarkan atau nama
+    produknya disamakan — tanpa menunggu marketplace mengirim lagi. Tombol ini **tidak** menghubungi
+    marketplace: pesanan itu sudah ada di sana, dan kunci idempotensinya sama sehingga percobaan
+    berikutnya dari marketplace hanya dijawab `duplicate` dengan nota yang sama. Menekannya dua kali
+    juga tidak membuat nota kedua.
+  - **Batasnya jelas:** pesanan baru sampai setelah marketplace mengirimnya (lewat endpoint langsung
+    atau lewat `POST /api/v1/sales`), dan marketplace hanya mengirim pesanan yang sudah **lunas** serta
+    hanya selama integrasinya tidak dijeda. MesinPOS tidak menarik pesanan dari marketplace karena tidak
+    ada API pesanan publik yang bisa dibaca dari sini; pesanan yang tertahan beserta sebabnya terlihat di
+    marketplace → Integrasi POS → “Pesanan lunas yang belum masuk MesinPOS”.
+- **Rekonsiliasi stok harian.** Sekali sehari (02.30 UTC) MesinPOS membaca katalog vendor yang
+  dipasangkan lalu membandingkannya dengan saldo **lokasi jual** per SKU. Yang disimpan di tabel
+  `marketplaceStockDiffs` adalah **selisihnya**: SKU dengan saldo berbeda, SKU yang hanya ada di POS,
+  dan SKU yang hanya ada di marketplace (biasanya sisa SKU lama setelah rename). Daftarnya dibatasi 50
+  baris terburuk dan ditandai `truncated` bila lebih, lalu tampil sebagai tabel di kartu Pengaturan —
+  SKU, produk, saldo POS, saldo marketplace, dan selisih (`marketplace − POS`). Pemeriksaan yang sama
+  bisa dipicu pemilik lewat tombol **Periksa sekarang**.
+- **Rekonsiliasi melapor, bukan menimpa.** Pemeriksaannya sendiri tidak mengubah stok siapa pun.
+  Arah penimpaan tetap keputusan pemilik: **Impor katalog** menyalin angka marketplace ke POS,
+  **Sinkronkan produk** mengirim seluruh katalog POS ke marketplace. Menimpa otomatis akan menghapus
+  penjualan yang baru terjadi di sisi lain, jadi tidak dilakukan. Kegagalan membaca katalog dicatat
+  `failed` beserta sebabnya dan **tidak** menghapus laporan terakhir.
+- **Dua arah, hanya untuk SKU yang berbeda.** Di samping laporan ada dua tombol yang bekerja pada
+  **baris yang saldonya berbeda** (`kind: both`) — bukan seluruh katalog, jadi angka yang sudah cocok
+  dan penjualan yang belum tampil di laporan tidak tersentuh:
+  - **Kirim stok N SKU** — menulis saldo lokasi jual POS ke marketplace lewat jalur dorongan stok
+    otomatis (upsert per SKU, amplop `stock.changed`, bertanda tangan, tercatat di `lastStockSync*`),
+    dibatasi 200 SKU sekali tekan. Mati saat endpoint dorong belum diisi.
+  - **Tarik angka N SKU** — menyalin angka marketplace ke lokasi jual POS. Angkanya dibaca **ulang**
+    dari katalog vendor saat tombol ditekan (bukan angka tabel yang bisa basi), setiap selisih dicatat
+    sebagai pergerakan `adjustment` (`note` “Tarik stok dari laporan selisih marketplace”) sehingga
+    bisa diaudit, dan SKU yang sudah hilang dari marketplace dihitung `missing` — bukan dipaksa nol.
+
+  Baris `hanya di MesinPOS`/`hanya di marketplace` **tidak** ikut kedua tombol: yang pertama akan
+  membuat produk baru di marketplace, yang kedua tidak punya produk POS untuk dikirim. Keduanya bekerja
+  atas **laporan terakhir**, jadi tekan **Periksa sekarang** dulu bila laporannya sudah lama; setelah
+  aksi diterima, laporan langsung diperiksa ulang. Tanpa selisih, keduanya menolak dengan alasan yang
+  bisa dibaca, bukan diam-diam mengirim sesuatu.
+- **Kiriman bertanda tangan.** Marketplace mitra menolak kiriman tanpa tanda tangan (HTTP 401:
+  “Header x-mesinpos-timestamp tidak ada”). Karena itu setiap dorongan katalog, stok, dan penjualan
+  membawa `x-mesinpos-timestamp` + `x-mesinpos-signature` = `sha256=HMAC(rahasia, timestamp + "." +
+  badan)` — skema yang sama dengan webhook keluar — serta `Authorization: Bearer <token pairing>` dan
+  `x-mesinpos-pairing`. Rahasianya diisi pemilik di kartu Pengaturan dan **harus sama persis** dengan
+  “rahasia endpoint” di Pengaturan marketplace; server hanya menampilkan empat karakter terakhirnya.
+  Penolakan marketplace (mis. “Tanda tangan tidak cocok”) ikut ditulis di catatan status, bukan
+  sekadar “HTTP 401”.
+- **Amplop peristiwa di setiap kiriman.** Marketplace mitra menolak kiriman tanpa `id`/`event`
+  (HTTP 400: “Event MesinPOS tidak menyebut `id` atau `event`”), jadi ketiga dorongan membawa
+  amplop yang sama dengan webhook keluar: `id` unik per kiriman (`evt_<waktu>_<event>_<penanda>`)
+  dan `event` yang menyebut isinya — `product.updated` (tombol Sinkronkan produk),
+  `stock.changed` (stok otomatis), `sale.completed` / `sale.voided` (nota selesai / pembatalan).
+  Penerima memakai `id` itu untuk membuang kiriman kembar; badan lamanya tidak diubah.
+- **Jejak tarikan** dicatat di baris pairing (`lastPullAt`, jumlah baris). Kartu menampilkan kapan
+  marketplace terakhir mengambil data — bukan sekadar “tombol sudah ditekan”. Melepas pairing
+  menghapus barisnya, jadi token lama langsung ditolak (HTTP 401).
+- **Dorong opsional**: bila marketplace menyediakan endpoint tulis, isi
+  `PUSATBAHANBANGUNAN_SYNC_URL` (snapshot penuh) dan/atau `PUSATBAHANBANGUNAN_PRODUCTS_URL`
+  (katalog saja); keduanya mengirim `Authorization: Bearer <token>`. Tanpa endpoint itu hasilnya
+  ditulis jujur sebagai “siap ditarik”. `PUSATBAHANBANGUNAN_STOCK_URL` boleh diisi kalau stok
+  otomatis ingin memakai jalur terpisah; kalau kosong, dorongan itu memakai endpoint produk lalu
+  snapshot. `PUSATBAHANBANGUNAN_SALES_URL` boleh diisi kalau penjualan otomatis ingin memakai jalur
+  terpisah; kalau kosong, dorongan penjualan memakai endpoint stok, lalu produk, lalu snapshot.
+
+```bash
+bun scripts/verify-marketplace-sales.mjs     # 34/34: endpoint, bentuk badan & tanda tangan kiriman
+                                             # per nomor nota + stok), penggabungan antrean, kalimat
+                                             # status; lalu jalur nyata di deployment: penjualan →
+                                             # antrean otomatis → catatan pairing, snapshot marketplace
+                                             # memuat nota + stok 8, pembatalan mengembalikan stok 10,
+                                             # pesanan marketplace masuk → nota + stok 9, kiriman ulang
+                                             # dijawab duplicate, pembatalan dari marketplace → stok 10,
+                                             # dua jalur tidak menggandakan nota, kartu membaca nota
+                                             # marketplace dari jalur API, token salah ditolak
+bun scripts/verify-marketplace-pairing.mjs   # 191/191: normalisasi email/WA, direktori, kode pairing,
+                                             # cakupan seluruh field produk + gambar, parse balasan
+                                             # dorong katalog, parse/impor katalog marketplace (SKU,
+                                             # kategori, subkategori, gambar), antrean + endpoint
+                                             # dorongan stok otomatis, antrean kategori/subkategori
+                                             # otomatis, aturan rekonsiliasi selisih stok
+                                             # (kunci SKU, arah selisih, SKU sepihak, batas laporan),
+                                             # pemilihan SKU yang boleh dikirim, alamat & kalimat
+                                             # pesanan marketplace masuk, kunci pesanan kanonik untuk
+                                             # dua jalur, wiring kartu/endpoint/idempotensi/
+                                             # backend/cron
+MARKETPLACE_E2E=1 bun scripts/verify-marketplace-pairing.mjs
+                                             # 226/226 terhadap deployment: direktori marketplace nyata,
+                                             # unggah gambar → snapshot memuat URL & seluruh field,
+                                             # dorong katalog, impor katalog vendor → kategori/produk/
+                                             # gambar/stok masuk, stok produk lama dipulihkan saat
+                                             # impor, penjualan langsung memotong stok yang dibaca
+                                             # marketplace, tanpa endpoint tidak ada klaim
+                                             # “tersinkron”, kasir ditolak, impor ulang tidak
+                                             # menggandakan & tidak menggeser stok, rekonsiliasi
+                                             # menemukan selisih 1 SKU, kirim stok hanya membawa
+                                             # 1 SKU itu, tarik angka menyamakan saldo POS dengan
+                                             # marketplace & meninggalkan jejak adjustment, token mati
+bun run bersih:uji                           # WAJIB sesudah uji E2E (akun @mesinpos.test)
 ```
 
 ## Kategori utama bisnis: dipilih pemilik sekali, lalu dikunci permanen
@@ -232,9 +495,11 @@ halaman **Produk & Stok**:
   beli, satuan dasar, dan **stok awal** dalam satu form. Stok awal
   ditulis server sebagai pergerakan beralasan `adjustment` (catatan “Stok awal”), jadi angka
   pertamanya punya jejak ledger.
-- **Sesuaikan stok** (`products.adjustStock`, izin `stock.adjust`): penyesuaian per baris produk
-  dengan jumlah positif/negatif dan catatan; saldo negatif ditolak server dengan pesan yang menyebut
-  stok tersedia, dan stok yang jadi ditampilkan sebelum disimpan.
+- **Sesuaikan stok** (`products.adjustStock`, izin `stock.adjust`): penyesuaian dengan jumlah
+  positif/negatif dan catatan, dibuka dari tombol **Sesuaikan stok** di baris produk. Formnya satu
+  kartu di atas daftar — pola yang sama dengan form **Produk baru** — dengan stok saat ini sebagai
+  bacaan, pratinjau **Stok jadi**, dan tombol keputusan di bawah; saldo negatif ditolak server
+  dengan pesan yang menyebut stok tersedia.
 
 Dua jalur itu melengkapi jalur ketiga yang sudah ada: **penerimaan barang (GRN)** di halaman
 Pembelian (`purchase.receive`), tempat stok masuk dari supplier ke lokasi yang dipilih. Ringkasan
@@ -263,53 +528,146 @@ kanalnya belum tersambung (tautan `wa.me` yang membawa isi struknya, **Bagikan g
 kartunya menyebut bahwa ringkasan yang sama ada di PDF sebagai **bagian 18** — jadi isi halaman dan berkas
 PDF-nya tidak bisa berbeda diam-diam.
 
-## SKU otomatis (`PBB-<KATEGORI>-<nomor urut>`)
+## SKU otomatis (`PBB-<nomor urut>`)
 
 Kolom SKU di form **Produk baru** boleh dibiarkan **kosong**: yang membuat kodenya adalah store atau
-server, bukan tebakan halaman. Formatnya `PBB-<KATEGORI>-<nomor urut>`, contoh `PBB-SAN-000042`:
+server, bukan tebakan halaman. Formatnya `PBB-<nomor urut>`, contoh `PBB-0000042`:
 
 - `PBB` prefix tetap perusahaan (satu konstanta, `PRODUCT_SKU_PREFIX`),
-- `SAN` tiga huruf dari nama kategori ("Sanitasi" → `SAN`); produk tanpa kategori memakai `UMU`,
-- `000042` nomor urut enam digit yang berjalan **sekali untuk seluruh tenant**, jadi dua kategori
-  berbeda tidak pernah menerima nomor yang sama.
+- `0000042` nomor urut tujuh digit yang berjalan **sekali untuk seluruh tenant**, jadi satu nomor tidak
+  pernah dipakai dua produk.
+
+Kategori **tidak** ikut di dalam SKU. Dulu kode kategori tiga huruf diselipkan di tengah
+(`PBB-SAN-000042`), tetapi itu berarti memindahkan produk ke kategori lain harus mengubah SKU yang
+mungkin sudah tercetak di label. Sekarang mengganti kategori tidak pernah menyentuh SKU.
 
 Di sebelah kolom SKU ada tombol **Buat otomatis**. Tombol itu mengisi kolomnya lebih dulu — dari
 SKU yang sudah ada, memakai aturan yang sama (`suggestProductSku`) — supaya pemilik toko bisa
-melihat & mengubahnya sebelum menyimpan. Tombolnya mati selama kolomnya terisi: SKU yang diketik
-pemilik toko dipakai **apa adanya** (huruf dan spasinya tidak diubah).
+melihat & mengubahnya sebelum menyimpan. Aturan tombolnya mengikuti kolomnya:
 
-**Kategori menentukan kode di tengah SKU, jadi mengganti kategori mengganti kodenya.** Di form
-Produk baru, selama isi kolom SKU berasal dari tombol **Buat otomatis**, memilih Kategori lain
-langsung memperbarui SKU-nya (nomor urutnya tidak berubah); begitu kolomnya diketik sendiri, isi itu
-tidak pernah ditimpa.
+- **Produk baru:** tombol mati selama kolomnya terisi; kolom kosong berarti “buatkan”, dan SKU yang
+  diketik pemilik toko dipakai **apa adanya** (huruf dan spasinya tidak diubah).
+- **Ubah produk:** tombol selalu hidup karena kolomnya memang sudah berisi SKU lama. Menekannya
+  **tidak langsung menimpa**: muncul konfirmasi berisi SKU lama & nomor barunya, dengan tombol
+  **Ya, ganti SKU** dan **Batal** (mengetik SKU sendiri juga menutup konfirmasi itu). Setelah
+  dikonfirmasi, isi kolom berganti dan perubahannya baru tersimpan setelah **Simpan perubahan** —
+  kalau dibatalkan, SKU lama tidak tersentuh.
 
-Untuk produk yang **sudah ada**, kategori diubah dari kolom **Kategori** di kartu **Atur harga**
-(tersimpan bersama tombol Simpan harga). `products.setCategory` lalu menyesuaikan SKU lewat
-`recodeProductSku`: kode kategorinya diganti, nomornya dipertahankan selama bebas — kalau nomor itu
-sudah dipakai di kategori tujuan, nomor berikutnya yang bebas dipakai supaya perubahan kategori tidak
-pernah gagal — dan SKU yang **diketik pemilik toko** (di luar format `PBB-…`, mis. `KOPI-01`) tidak
-disentuh sama sekali. Halaman memberi tahu apa yang terjadi dari balikan server (`PBB-SAN-000042` →
-`PBB-MAK-000042`, atau “SKU diketik sendiri, jadi tidak ikut berubah”).
+Untuk produk yang **sudah ada**, kategori diubah dari kolom **Kategori** di kartu **Ubah produk**
+(tersimpan bersama tombol Simpan perubahan). SKU-nya tetap sama — `products.setCategory` hanya memindahkan
+kategori & subkategori. SKU berformat lama (`PBB-SAN-000042`) dan SKU yang diketik pemilik toko
+(mis. `KOPI-01`) juga tidak pernah ditulis ulang.
 
 Nomor final selalu datang dari pihak yang menyimpan. `products.create` memakai counter per tenant
 (`counters`, jenis `product.sku`) yang naik sekali per produk, lalu mencocokkan hasilnya dengan SKU
-yang sudah ada — SKU manual berformat sama (mis. `PBB-SAN-000042` yang diketik sendiri) tidak
-ditabrak, counter-nya hanya maju. Notis setelah menyimpan menyebut SKU final itu, bukan tebakan
-klien. Mode demo memakai aturan yang sama di `createProduct` (`src/lib/store/demo.tsx`).
+yang sudah ada — SKU manual berformat sama (mis. `PBB-0000042` yang diketik sendiri) tidak ditabrak,
+counter-nya hanya maju. Notis setelah menyimpan menyebut SKU final itu, bukan tebakan klien. Mode
+demo memakai aturan yang sama di `createProduct` (`src/lib/store/demo.tsx`).
 
 Aturannya murni dan dipakai bersama di `src/convex/lib/productSku.ts` (halaman Produk & Stok, kedua
 store, backend, harness).
 
 ```bash
-bun scripts/verify-product-sku.mjs            # 39/39: format, kode kategori dari nama, nomor urut, recode saat kategori berganti (murni)
-bun scripts/verify-render.mjs                 # 984/984: tombol Buat otomatis, simpan dengan kolom SKU kosong & SKU ikut kategori (form + kartu edit) diklik di DOM tiruan
-VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 837/837: SKU otomatis & pindah kategori di server — counter naik, bentrok dilewati, SKU manual utuh
+bun scripts/verify-product-sku.mjs            # 20/20: format PBB-<nomor urut>, nomor urut, SKU di luar format (murni)
+bun scripts/verify-render.mjs                 # 1120/1120: tombol Buat otomatis di form Produk baru & kartu Ubah produk (dengan konfirmasi sebelum menimpa SKU lama), simpan dengan kolom SKU kosong & SKU tetap saat kategori diganti diklik di DOM tiruan
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 960/960: SKU otomatis & pindah kategori di server — counter naik, bentrok dilewati, SKU tetap saat kategori berubah
 ```
+
+## Barcode / QR Code produk & pemindai kasir
+
+Setiap produk punya **SKU** dan boleh punya **satu kode tambahan** untuk kasir — barcode pabrik
+(EAN/UPC/Code 39) atau QR dari pemasok. Kolomnya ada di form **Produk baru** dan kartu **Ubah produk**:
+
+- pilihan jenis **Barcode** atau **QR Code**;
+- **Buat Barcode/QR Code otomatis** dari SKU — Code 39 untuk jenis Barcode, QR Code untuk jenis QR;
+- **Galeri** dan **Kamera** untuk membaca kode dari foto label; fotonya hanya dibaca menjadi teks,
+tidak disimpan sebagai gambar;
+- kolom ketik manual untuk kode eksternal yang tidak terbaca, atau untuk peramban tanpa
+`BarcodeDetector`;
+- pratinjau kode yang benar-benar akan dipindai, plus tombol melepas kode.
+
+Nilai yang disimpan hanya `products.barcode` + `products.barcodeType`; tidak wajib, dan satu kode
+unik per tenant. Server menolak kode yang sudah dipakai produk lain **atau** yang menabrak SKU produk
+lain, karena satu hasil scan tidak boleh menunjuk dua barang. Aturan, validasi, gambar Code 39, dan
+pembuatan kode dari SKU ada di `src/convex/lib/productBarcode.ts` (diteruskan `src/lib/productBarcode.ts`),
+dipakai halaman, store demo, backend, dan harness.
+
+Hasil scan dicocokkan **persis** — tanpa membedakan huruf besar/kecil dan setelah spasi pinggir
+dirapikan — ke `products.sku` lebih dulu, lalu ke `products.barcode`. Bukan “mengandung”: barcode `899`
+tidak boleh membuka produk `899123` yang kebetulan berawalan sama. Prefix simbologi marketplace
+(`code39:`, `qr:`), penanda Code 39 (`*…*`), dan **pemisah** yang tidak dikirim pemindai
+(`PBB-0000005` ↔ `PBB0000005`) tidak membuat kode dianggap berbeda.
+
+Sebagai jalan **terakhir**, kode yang terbaca meleset karena karakter yang sering tertukar
+(`B`↔`8`, `O`↔`0`, deretan nol terlewat — mis. label `PBB-0000005` terbaca `PB800005`) tetap
+dicocokkan ke produk yang **tunggal**; kalau kandidatnya lebih dari satu, kode dianggap belum
+dipastikan dan kasir memilih dari daftar **usulan** (maksimal tiga, tidak pernah masuk keranjang
+sendiri). Produk yang cocok kira-kira tetap diberi catatan bahwa kodenya tidak sama persis, jadi
+nama & harganya diperiksa dulu. Aturannya murni di `src/lib/barcode.ts` dan dipakai kedua halaman
+serta harness.
+
+**Tombol pemindai ada di dua tempat**, keduanya membuka dialog yang sama
+(`src/components/BarcodeScanDialog.tsx`):
+
+- **Kasir (`/app/pos`)** — tombol **Scan** di samping kolom pencarian. Hasil scan mencari produk aktif
+  lewat SKU atau barcode/QR-nya, lalu **langsung memasukkannya ke keranjang** — tidak ada tombol
+  perantara, jadi memindai sepuluh barang cukup sepuluh kali scan. Panel hasil yang muncul hanya
+  mengonfirmasi nama, SKU, barcode (kalau ada), harga, stok, dan berapa yang sekarang ada di keranjang;
+  kalau stoknya tidak cukup atau shiftnya belum dibuka, panel itu yang menyebut sebabnya (barang tidak
+  masuk). Kode yang hanya **mirip** dengan satu produk (salah baca pemindai) juga langsung masuk keranjang
+  beserta catatan bahwa kodenya tidak sama persis; kalau kandidatnya beberapa, daftar **usulan**
+  ditampilkan lebih dulu dan usulan yang dipilih baru masuk keranjang. Kode yang sudah terdaftar tetapi
+  produknya **nonaktif** dijawab apa adanya (tidak bisa dijual; arahkan ke Produk & Stok). Kode yang
+  **belum terdaftar** menawarkan **Daftarkan sebagai produk** ke `/app/products?sku=<kode>` — hanya untuk
+  akun yang memegang `product.manage` **dan** bisa membuka Produk & Stok (`stock.adjust`).
+- **Produk & Stok (`/app/products`)** — tombol **Scan barcode / QR** di header. Kode yang sudah terdaftar
+  (termasuk produk nonaktif) langsung membuka kartu **Ubah produk**-nya; kode baru mengisi kolom
+  **SKU** di form **Produk baru** dan membukanya, jadi nama & harga tinggal dilengkapi. Halaman ini
+  juga membaca `?sku=<kode>` dari tautan Kasir: efeknya menunggu store siap, membuka produk yang
+  cocok, atau mengisi form produk baru, lalu parameter itu dibuang dari URL.
+
+**Empat jalur pembacaan, berurutan sesuai perangkat:** kamera + `BarcodeDetector` bawaan peramban
+(Chrome/Edge/Android; format QR, EAN-13/8, UPC-A/E, Code 128/39/93, ITF, Codabar, Data Matrix, PDF417,
+Aztec; frame diminta **1920×1080** supaya cukup piksel untuk kode yang dicetak kecil di layar,
+yang sering tidak terlihat oleh frame 640×480 bawaan), **galeri /
+tangkapan layar** (berkas dibaca dengan `readBarcodeFromImage` pada resolusi perangkat, jadi barcode
+yang hanya tampil di layar dan tidak sanggup dibaca kamera tetap bisa diambil kodenya), kamera tanpa
+pembaca kode (gambar tetap tampil, kode diketik), dan **kolom ketik manual** yang selalu tersedia —
+dipakai juga oleh pemindai USB yang mengetik seperti keyboard. Izin kamera yang ditolak atau peramban
+tanpa `BarcodeDetector` (mis. Safari/Firefox saat ini) dijelaskan di dialog, bukan dibiarkan layar hitam. Tombol **Galeri** dan **Kamera** di kolom barcode produk memakai
+`BarcodeDetector` yang sama untuk membaca foto label; kalau peramban tidak punya pembaca itu, kodenya
+diketik manual. Kolom pencarian Kasir juga ikut mencocokkan SKU dan barcode, sehingga pemindai USB
+yang mengetik ke kolom itu langsung menyaring katalog ke barangnya.
+
+Kode yang sama juga **ikut tersinkron dengan marketplace pairing**: setiap baris katalog yang dikirim
+(dorongan tombol, dorongan stok otomatis, dan snapshot bertoken) membawa `barcode` + `barcodeType`,
+dan **Impor katalog** menyimpan barcode/QR dari marketplace ke produk lokal sehingga kolomnya sama
+dengan yang ada di marketplace. Selain itu, pekerja harian **Barcode/QR otomatis** menyalin kolom
+kode saja tanpa menunggu tombol (lihat butir “Barcode/QR otomatis” di atas). Satu beda bentuk diselesaikan otomatis: marketplace menyimpan kode
+sebagai `code39:PBB-0000005` / `qr:https://…`, sedangkan MesinPOS menyimpan **teks kodenya** +
+jenisnya. Jadi `code39:` dibaca sebagai Barcode, `qr:` sebagai QR, prefix yang tidak dikenal (mis.
+bagian dari URL) tidak dibuang, dan saat kode dikirim balik ke marketplace dipakai prefix yang sama
+(`code39:`/`qr:`) — hasil scan di kedua sisi menunjuk barang yang sama. Satu hasil scan tetap hanya
+boleh menunjuk satu barang: kode marketplace yang sudah dipakai produk lain dilewati (dihitung
+sebagai bentrok), sementara produknya tetap diimpor; kode lokal tidak dihapus hanya karena baris
+marketplace belum menyebutkannya. Kode bertipe Barcode yang memuat karakter di luar Code 39 dibaca
+sebagai QR, bukan dibuang.
+
+```bash
+bun scripts/verify-render.mjs   # 1133/1133: aturan SKU & barcode (persis, tanpa beda huruf, spasi dirapikan, prefix marketplace, pemisah, salah baca `PB800005` → `PBB-0000005` pada katalog 3 maupun 11 SKU berurutan), tombol otomatis Code 39/QR, kode eksternal disimpan lalu dipindai untuk membuka produknya, scan manual di Kasir (hasil **langsung masuk keranjang** tanpa tombol, kode mirip → produk yang tepat + peringatan, kode ambigu → usulan yang juga langsung masuk keranjang, kode baru → tautan daftar), jalur **galeri/tangkapan layar** di dialog pemindai (tombol & berkasnya ada, pemilihan berkas menjalankan pembaca kode dan menjawab apa adanya), scan di Produk & Stok (buka Ubah produk / isi SKU produk baru), dan tautan ?sku= dari Kasir
+```
+
+Batasnya jelas: kamera butuh HTTPS (atau `localhost`) dan izin pengguna; `BarcodeDetector` belum ada
+di semua peramban, jadi jalur manual bukan pilihan kedua yang tersembunyi melainkan bagian tetap dari
+dialog dan kolom barcode. Membaca foto hanya menghasilkan **teks kode** — gambar label tidak disimpan.
+Mendaftarkan hasil scan hanya mengisi **SKU** — nama, harga, dan stok awal tetap diisi manusia,
+karena barcode tidak membawa informasi itu.
 
 ## Kategori produk: menambah, mengubah, menonaktifkan, menghapus (`category.manage`)
 
-Kategori bukan sekadar label: namanya menentukan **kode di tengah SKU** dan **susunan tab di kasir**.
-Karena itu pengelolaannya dipegang salah satu izin tersendiri, bukan menempel pada `product.manage`:
+Kategori bukan sekadar label: ia menentukan **susunan tab di kasir** dan menjadi label katalog
+produk. Karena itu pengelolaannya dipegang salah satu izin tersendiri, bukan menempel pada
+`product.manage`:
 
 | Peran | `product.manage` (isi rak) | `category.manage` (struktur katalog) |
 | --- | --- | --- |
@@ -324,32 +682,29 @@ beserta catatan “butuh peran manajer/pemilik” — tombolnya tidak ditawarkan
 tetap menolak kalau URL/aksi dipaksakan (`requirePermission` di `src/convex/categories.ts`).
 
 Letaknya: halaman **Produk & Stok → kartu “Kategori produk”** (di atas tabel produk). Kartu itu
-menampilkan nama, **kode SKU** kategori, jumlah produk yang memakainya, dan status aktif/nonaktifnya.
+menampilkan nama, jumlah produk yang memakainya, dan status aktif/nonaktifnya.
 
 ### Aturannya (satu tempat, `src/convex/lib/categories.ts`)
 
 - **Nama 2–40 karakter, unik per workspace** — pembandingnya mengabaikan huruf besar dan pemisah,
   jadi “Kopi Susu” dan “kopi  susu” adalah kategori yang sama (spasi pinggir & ganda dirapikan).
 - **Nama “Tanpa kategori” ditolak.** Kalimat itu sudah berarti “produk ini tidak punya kategori” di
-  tabel produk, pemilih kategori, dan `productSkuCategoryCode`; kategori bernama itu akan membuat
-  produk tanpa kategori dan produk berkategori itu tidak bisa dibedakan lagi.
+  tabel produk dan pemilih kategori; kategori bernama itu akan membuat produk tanpa kategori dan
+  produk berkategori itu tidak bisa dibedakan lagi.
 - **Maksimal 100 kategori per workspace**, supaya pemilihnya tetap bisa dibaca.
 - **Menonaktifkan ≠ menghapus.** Kategori nonaktif hilang dari pemilih kategori produk baru, dan
   `products.create` / `products.setCategory` **menolak** kategori nonaktif — tetapi produk yang sudah
   memakainya tetap dijual, tetap muncul di tabel produk (ditandai “kategori nonaktif”), tetap ada di
-  kartu **Atur harga**-nya sebagai pilihan bertanda `(nonaktif)`, dan **tabnya tetap ada di POS**
+  kartu **Ubah produk**-nya sebagai pilihan bertanda `(nonaktif)`, dan **tabnya tetap ada di POS**
   (`posCategoryChips` = kategori aktif + kategori yang masih dipakai produk). Menonaktifkan selalu
   bisa dibatalkan dengan satu tombol.
 - **Hapus kategori melepas produknya.** `categories.remove` menghitung dulu berapa produk yang
   memakainya, melepas `products.categoryId`-nya (produk itu menjadi “Tanpa kategori”), lalu menghapus
   baris kategorinya. Produknya **tidak** ikut terhapus dan **SKU-nya tidak ditulis ulang** — jumlah
   produk yang dilepas disebut di konfirmasi sebelum menghapus, di notis sesudahnya, dan di jejak audit.
-- **Ganti nama kategori tidak menulis ulang SKU.** Produk tidak berpindah kategori, jadi SKU-nya tetap
-  sah (nomornya tetap unik). Yang berubah adalah kode untuk produk **berikutnya**: “Sanitasi” →
-  “Sanitasi & Kebersihan” tetap `SAN`, sedangkan “Kopi” → “Pangan” mengubah `KOP` → `PAN`. Halaman
-  mengatakan itu apa adanya (`skuCodeChanged` dari server), bukan mengklaim SKU lama ikut berubah.
-- **Kode SKU yang bentrok diberitahukan, bukan dilarang.** “Makanan” dan “Makmur” sama-sama `MAK`;
-  SKU tetap unik karena nomor urutnya per tenant, tetapi kartu kategori menampilkan peringatan itu.
+- **Ganti nama kategori tidak menulis ulang SKU.** Nama kategori bukan bagian dari SKU
+  (`PBB-<nomor urut>`), jadi SKU produk tetap sah apa pun namanya — dan halaman mengatakannya apa
+  adanya, bukan mengklaim SKU ikut berubah.
 
 Bentuk datanya: `categories` (`tenantId`, `name`, `sortOrder`, `active`, `createdAt`) — `active`
 sengaja **opsional** supaya baris kategori yang dibuat sebelum kolom ini ada tetap sah dan dianggap
@@ -358,28 +713,64 @@ aktif. Mutationnya: `categories.create`, `categories.rename`, `categories.setAct
 pemilih kategori di form produk dan tab POS dipakai semua peran yang bekerja dengan katalog.
 
 ```bash
-bun scripts/verify-categories.mjs              # 35/35: nama terlarang & kembar, kode SKU, kategori nonaktif, tab POS, dampak hapus (murni)
+bun scripts/verify-categories.mjs              # 46/46: nama terlarang & kembar, kategori nonaktif, tab POS, dampak hapus (murni)
 bun scripts/verify-authz.mjs                    # 92/92: izin kategori ada di pemilik/manajer, bukan gudang/kasir/keuangan
-bun scripts/verify-render.mjs                   # 984/984: tambah/ubah/nonaktifkan/hapus kategori benar-benar diklik di DOM tiruan (+ tab POS & gerbang izin staf gudang)
+bun scripts/verify-render.mjs                   # 1078/1078: tambah/ubah/nonaktifkan/hapus kategori benar-benar diklik di DOM tiruan (+ tab POS & gerbang izin staf gudang)
 VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 837/837: CRUD kategori di server — izin ditolak untuk kasir/gudang, kategori nonaktif ditolak produk baru, hapus melepas produk tanpa mengubah SKU
 ```
 
 ## Produk tersimpan: ubah, aktif/nonaktifkan, hapus (`product.manage`)
 
-Produk yang sudah tersimpan bisa dirapikan dari halaman **Produk & Stok**, di kolom **Aksi** baris
-produknya. Tiga hal yang sengaja dipisahkan dari **Atur harga**:
+Produk yang sudah tersimpan bisa dirapikan dari halaman **Produk & Stok**. Kelima alur produk di
+halaman ini sengaja memakai **satu pola**: satu kartu di atas daftar, judul + penjelasan, kolom yang
+tersusun dari atas ke bawah, lalu tombol keputusan di bawah.
 
-- **Ubah identitas** — nama, SKU, dan harga beli disunting di kartu **Atur harga**
-  (`products.update`, izin `product.manage`) dan disimpan bersama tombol **Simpan harga**. Kolom ini
-  **tidak** menyentuh harga jual, konversi satuan, atau modifier: memperbaiki salah ketik nama tidak
-  boleh ikut mengubah harga. SKU tetap unik per workspace, pembandingnya mengabaikan huruf
+| Alur | Dibuka dari | Kartu | Tombol simpan |
+| --- | --- | --- | --- |
+| Produk baru | tombol **Tambah produk** di kanan atas | **Produk baru** | **Simpan produk** |
+| Ubah produk | tombol **Ubah produk** di baris tabel | **Ubah produk** | **Simpan perubahan** |
+| Sesuaikan stok | tombol **Sesuaikan stok** di baris tabel | **Sesuaikan stok** | **Sesuaikan stok** (di dalam kartu) |
+| Modifier produk | tombol **Modifier** di baris tabel | **Modifier produk** | **Simpan modifier** |
+| Hapus produk | tombol **Hapus** di baris tabel | **Hapus produk** | **Hapus produk** (aktif setelah pagar lolos) |
+
+Kelimanya juga tidak pernah tampil bersamaan: membuka satu kartu menutup kartu lainnya. Form
+**Produk baru** yang ditutup membuang gambar yang belum sempat diunggah (produknya belum pernah
+tersimpan), sedangkan kartu **Ubah produk** ikut menutup saat tombol **Hapus produk** di dalamnya
+ditekan — layarnya tidak pernah menampilkan dua form yang bisa tertukar. Tombol baris **Ubah produk**,
+**Sesuaikan stok**, dan **Modifier** berubah menjadi **Tutup** selama kartunya terbuka (tombol
+**Tambah produk** di header menjadi **Tutup form**), sedangkan kartu **Hapus produk** punya tombol
+**Tutup** sendiri karena tombol **Hapus** di baris tetap boleh dibuka ulang.
+
+Kartu **Sesuaikan stok** memuat stok saat ini sebagai bacaan, kolom jumlah (+/−) dan catatan, lalu
+pratinjau **Stok jadi** di sebelahnya. Tombol simpannya di dalam kartu memakai label ARIA sendiri
+(`Simpan penyesuaian stok <nama>`) supaya tidak tertukar dengan tombol pembuka di baris. Kartu
+**Modifier produk** memakai editor yang sama dengan sebelumnya (grup, batas pilihan, opsi) dan
+menyimpan lewat **Simpan modifier**; peringatan modul F&B yang belum aktif tetap tampil di dalamnya.
+
+Form **Produk baru** dan kartu **Ubah produk** memakai komponen kolom yang sama
+(`ProductCoreFields`), jadi urutan **Nama produk → SKU → Kategori → Subkategori → Harga jual →
+Harga beli → Satuan dasar → Stok** tidak bisa berbeda antara keduanya. Bedanya hanya yang memang
+berbeda secara data: produk baru boleh mengosongkan SKU (dibuat otomatis), memakai **Stok awal**,
+dan punya tombol **Buat otomatis**; produk tersimpan menampilkan SKU apa adanya dan **stok saat
+ini** sebagai bacaan — stoknya diubah lewat **Sesuaikan stok** supaya setiap pergerakan tetap punya
+alasan & jejak ledger.
+
+Kartu **Ubah produk** juga memuat bagian gambar yang sama dengan form baru, ditambah bagian khusus
+produk tersimpan: konversi satuan & harga bertingkat, dan tombol **Hapus produk** yang membuka kartu
+hapus. Tiga hal yang sengaja dipisahkan dari tombol simpan:
+
+- **Ubah identitas** — nama, SKU, dan harga beli disunting di kartu **Ubah produk**
+  (`products.update`, izin `product.manage`) dan disimpan bersama tombol **Simpan perubahan**.
+  Memperbaiki salah ketik nama tidak mengubah harga jual selama kolom harganya tidak ikut diubah;
+  konversi satuan dan modifier punya bagiannya sendiri di kartu yang sama. SKU tetap unik per workspace, pembandingnya mengabaikan huruf
   besar-kecil (`kopi-01` dan `KOPI-01` di satu katalog hanya menyesatkan pembaca), dan SKU yang sudah
-  ada dipakai **apa adanya** — hurufnya tidak dipaksa. Kalau tidak ada kolom yang benar-benar berubah,
+  ada dipakai **apa adanya** — hurufnya tidak dipaksa. Menggantinya lewat **Buat otomatis**
+  meminta konfirmasi lebih dulu. Kalau tidak ada kolom yang benar-benar berubah,
   tidak ada audit maupun notis yang ditulis.
 - **Aktif/nonaktifkan** (`products.setActive`, izin `product.manage`). Nonaktif berarti produk itu
   berhenti dijual: `products.listByStore` (katalog kasir) hanya mengembalikan yang aktif, dan
   `pos.createSale` **menolak** produk nonaktif — jadi “nonaktif” bukan sekadar tampilan. Datanya tetap
-  utuh: stok, riwayat penjualan, kartu **Atur harga**, dan tabel produk tetap memuatnya (bertanda
+  utuh: stok, riwayat penjualan, kartu **Ubah produk**, dan tabel produk tetap memuatnya (bertanda
   **Nonaktif**) sehingga bisa diaktifkan kembali kapan saja. Halaman membaca katalog lengkapnya lewat
   `products.listAll` (izin `product.manage`, termasuk yang nonaktif), sedangkan kasir tetap memakai
   `products.listByStore`.
@@ -393,15 +784,16 @@ produknya. Tiga hal yang sengaja dipisahkan dari **Atur harga**:
 
 Bedanya dengan **hapus kategori**: kategori dihapus dengan **melepas** produknya (produk jadi “Tanpa
 kategori”, SKU tidak ditulis ulang), sedangkan produk dihapus hanya kalau tidak ada jejak yang akan
-menggantung. Karena itu halaman menampilkan hasil pemeriksaan server sebelum tombol Hapus ditekan,
-sehingga produk yang sebenarnya hanya berhenti dijual langsung diarahkan ke tombol yang benar.
+menggantung. Karena itu kartu **Hapus produk** menampilkan hasil pemeriksaan server sebelum tombol
+Hapus ditekan, sehingga produk yang sebenarnya hanya berhenti dijual langsung diarahkan ke tombol
+yang benar — **Nonaktifkan saja**.
 
 Aturannya murni dan dipakai bersama di `src/convex/lib/productEdit.ts` (halaman Produk & Stok, kedua
 store, backend, harness).
 
 ```bash
 bun scripts/verify-product-edit.mjs           # 36/36: batas nama, bentuk & kembarnya SKU, harga beli, kalimat aktif/nonaktif, pagar hapus (murni)
-bun scripts/verify-render.mjs                 # 984/984: ubah nama/SKU/harga beli, nonaktifkan/aktifkan, dialog hapus berpagar, dan gambar produk di kartu kasir & keranjang diklik di DOM tiruan
+bun scripts/verify-render.mjs                 # ubah nama/SKU/harga beli lewat kartu Ubah produk, nonaktifkan/aktifkan, kartu Hapus produk berpagar, dan gambar produk di kartu kasir & keranjang diklik di DOM tiruan
 VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 837/837: products.update/setActive/deletionCheck/remove di server — izin, SKU kembar, pagar hapus, produk nonaktif ditolak kasir
 ```
 
@@ -412,8 +804,8 @@ Diatur langsung di **kartu produk** pada halaman Produk & Stok:
 
 - kartu **Produk baru** punya bagian **Gambar** — berkas yang dipilih ditahan dulu (beserta pratinjaunya)
   dan diunggah begitu produknya disimpan, karena `products.addImage` butuh id produk;
-- kartu **Atur harga** (edit produk yang sudah ada) punya bagian yang sama, dan di sana unggahan serta
-  penghapusan gambar **langsung** tersimpan tanpa menekan “Simpan harga”;
+- kartu **Ubah produk** (edit produk yang sudah ada) punya bagian yang sama, dan di sana unggahan serta
+  penghapusan gambar **langsung** tersimpan tanpa menekan “Simpan perubahan”;
 - kolom **Gambar** di tabel produk menampilkan thumbnail gambar utama beserta lencana `n/8`;
 - **kasir** (`/app/pos`) menampilkan gambar utama sebagai thumbnail di kartu produk dan di baris
   keranjang — produk yang namanya mirip jadi gampang dibedakan di depan pembeli. Produk yang belum
@@ -445,10 +837,24 @@ berlaku sama di kedua mode karena keduanya memakai `src/convex/lib/productImages
 
 ```bash
 bun scripts/verify-product-images.mjs          # 25/25: batas 8, tipe & ukuran berkas, label slot (murni)
-bun scripts/verify-product-sku.mjs             # 39/39: format SKU otomatis PBB-<KATEGORI>-<nomor urut> + recode saat kategori berganti (murni)
-bun scripts/verify-render.mjs                  # 984/984: unggah/hapus gambar, SKU otomatis & SKU ikut kategori diklik di DOM tiruan (kartu Produk baru & Atur harga), plus gambar produk di kartu kasir & baris keranjang
+bun scripts/verify-product-sku.mjs             # 20/20: format SKU otomatis PBB-<nomor urut> (murni)
+bun scripts/verify-render.mjs                  # unggah/hapus gambar, SKU otomatis & SKU tetap saat kategori diganti diklik di DOM tiruan (kartu Produk baru & Ubah produk), plus gambar produk di kartu kasir & baris keranjang
 VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 837/837: unggah sungguhan ke penyimpanan, batas 8 di server, berkas terhapus (404), SKU otomatis & pindah kategorinya
 ```
+
+## Halaman Pengaturan hanya menampilkan setelan yang fiturnya ada di paket
+
+Kartu setelan workspace mengikuti **paket & modul yang benar-benar hidup**, bukan daftar tetap:
+kartu **Pajak & pungutan F&B** hanya muncul saat modul F&B aktif (paket Starter tidak memuatnya),
+dan kartu **Struk belanja** hanya muncul bila paket memuat `peripheral.escpos` — semua paket saat
+ini memuatnya, dan gerbangnya disiapkan untuk paket berikutnya. Aturannya murni di
+`src/lib/settingsVisibility.ts`, dipakai halaman Pengaturan, kedua store, dan harness.
+
+Satu pengecualian yang disengaja: profil pajak F&B yang **masih memungut** (PBJT, biaya layanan,
+atau kewajiban pajak pusat) tetap menampilkan kartunya walau modulnya sudah mati, supaya workspace
+yang turun paket masih bisa menghentikan pungutan yang berjalan di setiap struk. Setelan yang
+tersembunyi **tidak dihapus** dan tetap berlaku sampai diubah — yang hilang hanya jalan masuknya
+dari layar ini; nilai tersimpan tetap dibaca kasir, struk, dan laporan.
 
 ## PPN workspace: tarif bisa diatur & bisa dimatikan (`billing.manage`)
 
@@ -1414,7 +1820,7 @@ Aturannya ada di `src/convex/lib/wholesale.ts` (dipakai server, klien, dan harne
   dihitung dari kuantitas dalam satuan dasar (2 PAK = 12 PCS bisa kena tier 12+),
 - harga tier tidak boleh lebih mahal dari harga dasar, dan faktornya minimal 2.
 
-Diatur dari halaman **Produk → Atur harga** (`products.setPricing`, izin `product.manage`);
+Diatur dari halaman **Produk → Ubah produk** (`products.setPricing`, izin `product.manage`);
 mengosongkan `tiers`/`units` selalu boleh, bahkan setelah modul Grosir dimatikan. Saat kasir
 memilih satuan besar, `pos.createSale` memakai perhitungan yang sama — `unitCode` dikonversi dulu,
 lalu tier diterapkan atas kuantitas dasar.
@@ -1436,23 +1842,24 @@ bun scripts/verify-fnb.mjs                     # 124/124: denah meja + antrean d
 bun scripts/verify-modifiers.mjs               # 46/46: modifier item + harga tambahan (murni)
 bun scripts/verify-analytics.mjs               # 81/81: analitik lanjutan report.advanced + proyeksi akhir periode & analisis keranjang (murni)
 bun scripts/verify-rbac.mjs                    # 45/45: peran kustom rbac.custom (murni)
-bun scripts/verify-api.mjs                     # 225/225: kunci API, webhook, pekerja retry & pemicu event/kalender (murni)
+bun scripts/verify-api.mjs                     # 316/316: kunci API, webhook dua arah, pekerja retry, parser tulis, kursor/rentang tanggal (murni)
 bun scripts/verify-support.mjs                 # 61/61: dukungan khusus support.dedicated + kanal keluarnya (murni)
 bun scripts/verify-scale.mjs                   # 42/42: skala franchise scale.franchise (murni)
 bun scripts/verify-payments.mjs                # 72/72: pembayaran digital payment.digital (murni)
 bun scripts/verify-sync.mjs                    # 47/47: sinkronisasi real-time sync.realtime (murni)
 bun scripts/verify-otp.mjs                     # 79/79: kode OTP masuk tanpa kata sandi (murni)
-bun scripts/verify-render.mjs                  # 984/984: beranda + 21 halaman dirender di klien + alur aksi (termasuk alur OTP, pembatalan pesanan tamu, serta tambah/ubah/hapus/geser meja dan impor denah) + header beranda tetap di atas saat digulir + shell /app/pos terbuka sungguhan (shell setinggi layar, satu area gulir, header & sidebar di luarnya, permukaan sidebar gelapnya terpasang) + lencana sumber data & catatan halaman pemilik toko menyebut “server”, bukan merek backend + notis kegagalan sambung-tenant + baris “Workspace saya” di backstage + tombol naik paket yang benar-benar pindah paket + alur isi stok yang benar-benar diklik (Tambah produk dengan stok awal & Sesuaikan stok) + unggah/hapus gambar produk dari kartu Produk baru & Atur harga sampai batas 8 + tombol Buat otomatis, simpan dengan kolom SKU kosong, serta SKU yang ikut kategori baru dari form & dari kartu Atur harga
+bun scripts/verify-render.mjs                  # 1078/1078: beranda + 21 halaman dirender di klien + alur aksi (termasuk alur OTP, pembatalan pesanan tamu, serta tambah/ubah/hapus/geser meja dan impor denah) + header beranda tetap di atas saat digulir + shell /app/pos terbuka sungguhan (shell setinggi layar, satu area gulir, header & sidebar di luarnya, permukaan sidebar gelapnya terpasang) + lencana sumber data & catatan halaman pemilik toko menyebut “server”, bukan merek backend + notis kegagalan sambung-tenant + baris “Workspace saya” di backstage + tombol naik paket yang benar-benar pindah paket + alur isi stok yang benar-benar diklik (Tambah produk dengan stok awal & Sesuaikan stok) + unggah/hapus gambar produk dari kartu Produk baru & Ubah produk sampai batas 8 + tombol Buat otomatis di form Produk baru & kartu Ubah produk (konfirmasi sebelum menimpa SKU lama, Batal & ketikan sendiri membatalkannya), simpan dengan kolom SKU kosong, serta SKU yang tidak berubah saat kategori diganti dari form & dari kartu Ubah produk + kartu Ubah produk, Sesuaikan stok, Modifier produk & Hapus produk memakai pola kartu yang sama dengan Produk baru
 bun scripts/verify-product-images.mjs          # 25/25: gambar produk — batas 8, tipe & ukuran berkas, label slot (murni)
-bun scripts/verify-product-sku.mjs             # 39/39: SKU otomatis — format, kode kategori, nomor urut per tenant, recode saat kategori berganti (murni)
+bun scripts/verify-product-sku.mjs             # 20/20: SKU otomatis — format PBB-<nomor urut>, nomor urut per tenant, SKU di luar format tidak dianggap buatan sistem (murni)
 bun scripts/verify-menus.mjs                   # 406/406: setiap menu sidebar × setiap peran — menu yang tampil, halaman yang terbuka, penolakan URL langsung & gerbang modul
 bun scripts/verify-theme.mjs                   # 50/50: tema terang/gelap — aturan, paritas palet, permukaan sidebar (gelap + beda nyata dari latar + teks terang), bootstrap index.html, tombol di DOM
 bun scripts/verify-pwa.mjs                     # 1527/1527: manifest display fullscreen (termasuk rujukan diri untuk menanyakan “sudah terpasang?” & ikon raster didahulukan), ikon dibaca sampai piksel, service worker dieksekusi, ajakan install 10 detik + tombol di header, perangkat yang sudah memasang tidak ditawari lagi, dan peringatan “alamat sementara”
 bun scripts/verify-version.mjs                 # 44/44: ajakan “Versi baru tersedia — muat ulang” — aturan murni (berkas mana yang dihitung bundel, kapan ajakan ditahan), perilaku DOM (jadwal, muat ulang, “Nanti” per tab), jalur diam (luring/galat/mode dev/tab tersembunyi), dan pemasangan di shell /app/pos sungguhan
 bun scripts/verify-qr.mjs                      # 11/11: payload QRIS → kode QR → dibaca ulang pemindai (murni)
 bun scripts/verify-impersonation.mjs           # 52/52: sesi pendampingan platform & jejak auditnya (murni)
-VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 837/837 (termasuk pembatalan pesanan tamu dari ponselnya, tagihan QR meja yang dibatalkan kasir melepas pagar hapus meja, ubah/hapus meja beserta pagar hapusnya, serta urutan denah & impor sekaligus, pemicu event nyata, kalender, kode OTP tanpa kata sandi, akun platform & pendampingan, kontrak hasil pindah paket, unggah gambar produk sungguhan ke penyimpanan — batas 8 & berkas terhapus jadi 404, serta SKU otomatis PBB-<KATEGORI>-<nomor urut>, bentroknya dengan SKU manual, dan pindah kategori produk yang ikut mengganti kode SKU-nya)
-VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-webhook-retries.mjs   # 6/6 (tunggu ~2 menit)
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-backend.mjs   # 960/960 (termasuk pembatalan pesanan tamu dari ponselnya, tagihan QR meja yang dibatalkan kasir melepas pagar hapus meja, ubah/hapus meja beserta pagar hapusnya, serta urutan denah & impor sekaligus, pemicu event nyata, kalender, kode OTP tanpa kata sandi, akun platform & pendampingan, kontrak hasil pindah paket, unggah gambar produk sungguhan ke penyimpanan — batas 8 & berkas terhapus jadi 404, serta SKU otomatis PBB-<nomor urut>, bentroknya dengan SKU manual, dan pindah kategori produk yang tidak mengubah SKU-nya)
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-webhook-retries.mjs   # 8/8 (tunggu ~2 menit; termasuk rahasia dari penerima ditolak/diterima server)
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-api-writes.mjs   # 42/42: endpoint tulis API v1 lewat HTTP sungguhan (produk, stok, pelanggan, member, pembatalan, kursor & from/to, webhook masuk) — bersihkan akun uji dengan `bun run bersih:uji`
 ```
 
 ### Modul F&B: denah meja & antrean dapur (KDS)
@@ -2468,24 +2875,46 @@ Kunci API:
 - **Scope tidak boleh melebihi izin pembuatnya**, dan pagar itu hidup: kunci buatan anggota yang
   ditugaskan ke peran kustom hanya boleh memuat scope yang dipunyai peran itu, dan **kunci ikut
   menyempit begitu izin pembuatnya dicabut** — tanpa perlu mencabut kunci satu per satu.
+- **Mencabut kunci berarti menghapusnya.** `apiAccess.revokeKey` menghapus baris `apiKeys` (bukan
+  menandainya mati): kunci yang sudah dicabut tidak bisa dipulihkan, nama lamanya bebas dipakai lagi,
+  dan daftar kunci tidak menyimpan baris mati. Jejak siapa mencabut kunci apa & kapan tetap ada di
+  **log audit** (`apiKey.revoke`) tanpa menyimpan hash rahasianya. Baris peninggalan cara lama
+  (`active: false`) **dibersihkan otomatis** begitu halaman API & Webhook dibuka oleh pemegang
+  `api.manage`; tombol **Hapus kunci dicabut** tetap ada sebagai cadangan. Kunci yang hanya
+  **kedaluwarsa** tidak ikut dihapus.
 - **Verifikasi memeriksa bentuk dulu, status kemudian, baru rahasianya** (dibandingkan
   waktu-konstan), sehingga kunci yang salah bentuk tidak pernah menyentuh hash dan pesan
-  penolakannya bisa ditindaklanjuti (dicabut / kedaluwarsa / bukan milik tenant ini).
+  penolakannya bisa ditindaklanjuti (tidak dikenal/dihapus / kedaluwarsa / bukan milik tenant ini).
 - Scope yang boleh dipilih diturunkan dari endpoint yang benar-benar dilayani (`API_RESOURCES`),
   jadi tidak ada scope yang ditawarkan di halaman tapi tidak dipakai siapa pun.
 
-Endpoint HTTP yang dilayani: `GET /api/v1/ping`, `/api/v1/sales`, `/api/v1/products`, dan
-`/api/v1/payables`, plus satu endpoint tulis `POST /api/v1/sales`; dibaca/ditulis dengan header
-`Authorization: Bearer mp_…` di domain `<deployment>.convex.site`. Urutannya penting: tanpa kunci →
-401, resource asing → 404, scope kurang → 403, dan tidak ada data tenant yang tersentuh sebelum
-kuncinya sah (di jalur tulis pun kuncinya diperiksa **sebelum** badan pesan diurai).
+Endpoint HTTP yang dilayani (semua di domain `<deployment>.convex.site`, daftar lengkapnya di
+`API_RESOURCES`): `GET /api/v1/ping`, `GET|POST /api/v1/sales`, `POST /api/v1/sales/void`,
+`GET|PATCH|DELETE /api/v1/products`, `POST /api/v1/stock/adjust`, `GET|POST /api/v1/customers`,
+`GET|POST /api/v1/members`, `GET /api/v1/payables`, `GET /api/v1/purchases`,
+`GET|POST|DELETE /api/v1/webhooks`, dan `POST /api/v1/webhooks/incoming/<token>`. Endpoint berkunci
+dibaca/ditulis dengan header `Authorization: Bearer mp_…`; endpoint `incoming` justru diverifikasi
+tanda tangan HMAC endpoint, bukan kunci. Urutannya penting: tanpa kunci → 401, resource asing → 404,
+scope kurang → 403, dan tidak ada data tenant yang tersentuh sebelum kuncinya sah (di jalur tulis pun
+kuncinya diperiksa **sebelum** badan pesan diurai).
+
+Pemilih toko, rentang tanggal, dan kursor:
+
+- **`?storeCode=`** memilih toko selain toko pertama workspace. Kodenya dibaca dari `GET /api/v1/ping`
+  (`stores[]`); kode yang tidak dikenal dijawab 404 — bukan diam-diam memakai toko pertama.
+- **`from`/`to`** (epoch milidetik atau ISO 8601) adalah rentang eksplisit: `from` inklusif, `to`
+  eksklusif, dan `from` harus lebih awal. Nilai yang tidak bisa diurai ditolak 400, bukan dijepit.
+- **`cursor`/`nextCursor`** adalah paginasi keyset (`waktu|kunci`), bukan offset: baris yang lahir pada
+  milidetik yang sama dipecah oleh nomor struk/GRN/kode pelanggan, jadi tidak ada baris terlewat atau
+  terkirim dua kali saat halaman bergeser.
 
 Pesanan masuk dari sistem luar (aturan murni di `src/convex/lib/apiOrders.ts`):
 
 - **Produk ditunjuk dengan `sku`**, bukan id Convex — sistem luar tidak pernah melihat id internal,
   dan pencocokannya tidak peka huruf besar-kecil (`kopi-susu` = `KOPI-SUSU`). `unitCode` boleh diisi
-  untuk satuan besar modul Grosir; `modifiers` belum didukung dan ditolak dengan penjelasan, bukan
-  diabaikan diam-diam.
+  untuk satuan besar modul Grosir; `modifiers` (level pedas, topping) diterima sebagai kode grup & opsi
+  yang sama dengan yang dikirim `GET /api/v1/products`, lalu dijalankan `applyModifiers` — aturan
+  wajib/batas pilihan tetap milik jalur kasir.
 - **Harga tidak pernah diterima dari luar.** Harga, harga bertingkat, diskon member, dan PPN dihitung
   server lewat jalur yang sama dengan kasir (`pos.createSale`), jadi `payment.amount` boleh
   **dihilangkan** — artinya “tagih tepat sebesar total yang kamu hitung”. Field harga apa pun di
@@ -2503,8 +2932,8 @@ Pesanan masuk dari sistem luar (aturan murni di `src/convex/lib/apiOrders.ts`):
 Webhook keluar:
 
 - **Hanya event katalog yang bisa dilanggan** (`sale.completed`, `sale.voided`, `stock.low`,
-  `opname.posted`, `payable.due`, `receivable.overdue`), ditulis `objek.aksi` supaya namanya stabil
-  walau labelnya berubah.
+  `opname.posted`, `product.created`, `product.updated`, `payable.due`, `receivable.overdue`), ditulis
+  `objek.aksi` supaya namanya stabil walau labelnya berubah.
 - **URL wajib HTTPS dan host publik.** Webhook ke `http://`, ke `localhost`/`10.x`/`192.168.x`, atau
   ke nama mesin tunggal ditolak dengan alasan yang terbaca — itu cara termudah membocorkan data
   penjualan.
@@ -2515,6 +2944,21 @@ Webhook keluar:
 - **Kegagalan dijadwalkan lalu berhenti:** jeda percobaan dihitung aturan murni (1 → 5 → 30 → 120
   → 720 menit, ± 14,6 jam) dan setelah percobaan kelima statusnya `failed` yang kelihatan di halaman
   — bukan antrean tak berujung.
+- **Alasan dari penerima ikut disimpan.** Balasan non-2xx yang memuat pesan (mis. “Tanda tangan tidak
+  cocok — pastikan rahasia endpoint … sama dengan yang diisi di Pengaturan.”) ditulis ke riwayat
+  sebagai `Penerima menjawab 401. Pesan penerima: …` — bukan hanya kode statusnya, supaya pemilik
+  tahu apa yang harus diperbaiki tanpa menebak.
+- **Satu kiriman bisa dikirim ulang dari riwayat** (tombol di kolom **Aksi**, izin `api.manage`):
+  baris yang menunggu atau menyerah dikembalikan ke antrean lalu dikirim seketika, **tanpa** mengubah
+  badan kirimannya — `id` di dalamnya tetap sama, jadi penerima mengenalinya sebagai kiriman yang sama
+  (bukan penjualan kedua). Ini jalur penyembuhan setelah penerimanya diperbaiki; yang sudah
+  `delivered` ditolak. Gerbang fiturnya sengaja tidak dipakai, sama seperti pekerja percobaan ulang.
+- **Rahasia penanda tangan bisa disamakan dengan milik penerima.** Kalau penerima yang lebih dulu
+  memegang rahasianya (itulah yang terjadi saat penerima menjawab “tanda tangan tidak cocok”),
+  rahasia itu bisa **diketik** di kartu endpoint — aturan murni `validateWebhookSecret` menolak nilai
+  < 16 karakter, > 128 karakter, atau yang memuat spasi/karakter non-ASCII (tanda hubung tipografi
+  hasil salin-tempel). Rahasia yang dibuat MesinPOS tetap bisa diputar seperti sebelumnya; rahasia
+  yang diketik pemilik tidak ditampilkan ulang (nilainya sudah ada padanya).
 - **Jadwal itu benar-benar dijalankan pekerja terjadwal.** `src/convex/crons.ts` menjalankan
   `apiAccess.retryDueDeliveries` tiap 1 menit: ia mengambil kiriman `pending` yang jadwalnya sudah
   lewat lewat indeks `by_status_next_attempt` (bukan memindai riwayat), mengirim ulang dengan tanda
@@ -2527,8 +2971,10 @@ Webhook keluar:
 - **Event transaksi benar-benar berangkat.** Penjualan selesai (`sale.completed` — termasuk pesanan
   F&B yang baru di-finalize dan pesanan masuk lewat `POST /api/v1/sales`), pembatalan
   (`sale.voided`), stok yang **baru menembus** ambang kritis (`stock.low` — sekali per kejadian,
-  bukan tiap penjualan selama stoknya masih rendah), dan opname yang diposting (`opname.posted`)
-  menulis kiriman ke semua endpoint aktif yang melanggannya. Barisnya ditulis **di dalam transaksi**
+  bukan tiap penjualan selama stoknya masih rendah), opname yang diposting (`opname.posted`), dan
+  produk yang baru dibuat (`product.created` — sekali per produk, berdampingan dengan
+  `product.updated` yang sudah dipakai platform) menulis kiriman ke semua endpoint aktif yang
+  melanggannya. Barisnya ditulis **di dalam transaksi**
   (penjualan yang batal tidak meninggalkan kiriman), sedangkan pengirimannya lewat pekerja yang
   sama: satu putaran dipanggil begitu transaksinya tersimpan, dengan cron sebagai jaring pengaman.
 - **Event berbasis kalender punya pekerja hariannya sendiri.** `payable.due` dan
@@ -2543,9 +2989,60 @@ Webhook keluar:
   tempo kelaparan. Penandanya ditulis **sejak dokumen lahir**: indeks Convex hanya memuat baris yang
   kolomnya memang bernilai `false`, jadi baris tanpa kolom itu tidak akan pernah ditemukan pekerja.
 
+Endpoint tulis lain (semuanya memakai jalur aplikasi yang sama, mengirim webhook perubahan, dan menulis
+audit atas nama pembuat kunci — tidak ada jalur pintas):
+
+- **`PATCH /api/v1/products`** (scope `product.manage`) mengubah nama, harga, satuan, modal, atau
+  status aktif satu produk yang ditunjuk SKU. Harga harus bilangan bulat rupiah; field asing ditolak;
+  minimal satu perubahan harus ada.
+- **`DELETE /api/v1/products`** menghapus produk yang **belum dipakai** transaksi/stok/dokumen — pagar
+  `productDeletionCheck` yang sama dengan halaman Produk. Produk yang sudah dipakai ditolak 409 dengan
+  alasan per bagian; jawabannya menonaktifkan, bukan menghapus riwayat.
+- **`POST /api/v1/stock/adjust`** (scope `stock.adjust`) menyesuaikan stok **lokasi jual** dengan
+  `delta` bertanda atau `quantity` mutlak (salah satu, tidak keduanya). Ledger stok dan webhook
+  `stock.changed` tetap ditulis oleh `applyStockChange`.
+- **`POST /api/v1/customers`** & **`POST /api/v1/members`** membuat pelanggan B2B/member baru dan
+  mengembalikan kodenya, sehingga platform bisa mendaftarkan pembeli baru lalu langsung memakainya di
+  `customerCode`/`memberCode`. Kode yang dikirim dihormati; kode kosong dibuat server (`lib/ar.ts` /
+  `lib/loyalty.ts`), dan limit kredit tetap butuh modul Grosir.
+- **`POST /api/v1/sales/void`** (scope `pos.void`) membatalkan penjualan lewat nomor struk memakai
+  `pos.voidSale`: stok kembali, piutang yang belum dibayar ikut batal, piutang yang **sudah menerima
+  uang** menolak pembatalan, dan `sale.voided` terkirim. Pembatalan yang sudah batal dijawab 200
+  (`alreadyVoided`) — idempoten. Aplikasi kasir memakai aturan yang sama; endpoint ini jalur lain ke
+  aturan itu, bukan cara menghindarinya.
+- **`?storeCode=`** berlaku untuk baca maupun tulis. Toko dipilih lewat **kode** (dibaca dari
+  `GET /api/v1/ping`), bukan id internal; kode yang tidak dikenal dijawab 404 beserta daftar kode yang ada.
+
+Webhook **masuk** (arah platform mitra → MesinPOS) hidup di tabel `inboundWebhookEndpoints`:
+
+- **`POST /api/v1/webhooks`** (scope `api.manage`, fitur `api.access`) mendaftarkan endpoint dengan
+  nama, daftar event, dan toko bawaan; balasannya memuat **URL lengkap** dan rahasia HMAC — rahasia
+  hanya tampil sekali. `GET /api/v1/webhooks` menampilkan endpoint (tanpa rahasia) dan 20 peristiwa
+  terakhir beserta status/alasan, `DELETE /api/v1/webhooks` menghapusnya.
+- **`POST /api/v1/webhooks/incoming/<token>`** adalah alamat yang dipanggil mitra. Token di URL hanya
+  menunjuk endpoint; **tanda tangan HMAC** (`x-mesinpos-timestamp` + `x-mesinpos-signature`, skema yang
+  sama dengan webhook keluar, toleransi 5 menit) yang membuktikan kiriman. Badan mentah dibaca sebelum
+  diurai, jadi HMAC dihitung atas teks persis yang dikirim.
+- Event yang dijalankan: `order.created` (pesanan → `pos.createSale`, termasuk modifier), `stock.adjusted`
+  (`products.adjustStock`), `product.updated` (jalur `PATCH` yang sama), dan `sale.voided`
+  (`pos.voidSale`). Operasinya berjalan **sebagai pembuat endpoint**, jadi izin orang itu yang berlaku.
+- **`id` peristiwa dari mitra adalah kunci idempotensi** (`by_endpoint_event`): kiriman ulang dijawab
+  200 `duplicate: true` tanpa menjalankan operasinya dua kali. Peristiwa baru dijawab **202**, event di
+  luar langganan **400** dengan daftar yang dilanggan, tanda tangan salah/basi **401**, dan endpoint
+  yang dihapus/dinonaktifkan **404/410**. Setiap peristiwa — diterapkan maupun ditolak — dicatat di
+  `inboundWebhookEvents` supaya mitra bisa ditunjukkan apa yang salah tanpa membuka log server.
+
 Isi kiriman tidak berubah antar-percobaan: id di dalam badan kiriman tetap sama, jadi penerima bisa
 mengenali percobaan ulang sebagai **kiriman yang sama** (bukan penjualan kedua) walau cap waktu &
-tanda tangannya selalu baru. `id`-nya memuat penanda kejadian (nomor struk, SKU, nomor opname),
+tanda tangannya selalu baru.
+
+**Tanda tangan yang selalu sama dengan HMAC standar.** `signWebhookPayload` memakai SHA-256/HMAC murni
+di `src/convex/lib/hash.ts` (harness mencocokkannya dengan `node:crypto` dan vektor NIST/RFC 4231).
+Padding bloknya pernah salah untuk panjang pesan `≡ 55 (mod 64)`: satu blok nol tambahan membuat digest
+menyimpang, sehingga tanda tangan ditolak penerima sebagai “Tanda tangan tidak cocok” padahal rahasianya
+benar — dan itu hanya terjadi pada **sebagian** badan kiriman (mis. `sale.completed` 297 byte gagal,
+`stock.changed` 343 byte diterima). Sekarang panjang pesan 0–320 disapu di harness, jadi kelas panjang
+mana pun tidak bisa lolos lagi. `id`-nya memuat penanda kejadian (nomor struk, SKU, nomor opname),
 sehingga dua penjualan pada milidetik yang sama tidak pernah berbagi id — penerima yang memakai id
 untuk menolak kiriman kembar tidak membuang penjualan yang sah.
 
@@ -2553,17 +3050,20 @@ Halaman **API & Webhook** (`/app/api`, izin `api.manage`) menampilkan kunci bese
 masa berlaku & pemakaian terakhir; daftar endpoint webhook beserta langganan event-nya; riwayat 20
 kiriman terakhir dengan jadwal percobaan berikutnya; serta dokumentasi endpoint `/api/v1` dan contoh
 `curl`. Rahasia kunci dan rahasia webhook hanya tampil **sekali** saat dibuat (dan bisa diputar),
-karena yang disimpan server memang bukan rahasianya. Gerbangnya mengikuti pola slice sebelumnya:
+karena yang disimpan server memang bukan rahasianya — atau bisa **disamakan dengan milik penerima**
+lewat tombol kunci di baris endpoint, untuk kasus penerima menjawab “tanda tangan tidak cocok”.
+Baris riwayat yang belum sampai menawarkan **Kirim ulang** di kolom Aksi. Gerbangnya mengikuti pola slice sebelumnya:
 **membuat** kunci/endpoint dan **mengubah langganan** butuh fitur `api.access` (paket Enterprise) +
 izin `api.manage`, sedangkan **mencabut kunci**, **mematikan/menghapus endpoint**, dan **melihat
 daflarnya** selalu boleh — mencabut akses tidak boleh ikut terkunci saat paket turun.
 
 ```bash
-bun scripts/verify-api.mjs                     # 225/225: aturan kunci, webhook, pekerja retry & pemicu event/kalender (murni)
+bun scripts/verify-api.mjs                     # 316/316: aturan kunci, webhook dua arah, parser tulis, kursor/from-to, pesan penerima, rahasia bersama, kirim ulang, pekerja retry & pemicu event/kalender (murni), plus SHA-256/HMAC dibandingkan `node:crypto` untuk panjang pesan 0–320
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-api-writes.mjs   # 42/42: endpoint tulis API v1 lewat HTTP sungguhan (produk, stok, pelanggan, member, pembatalan, kursor & from/to, webhook masuk) — bersihkan akun uji dengan `bun run bersih:uji`
 bun scripts/verify-backend.mjs                 # termasuk penjualan nyata lewat POST /api/v1/sales & pemicu kalender
 bun scripts/verify-render.mjs                  # halaman API & Webhook (termasuk endpoint tulis)
 # pekerja terjadwal: menunggu jadwal sungguhan (~2 menit) di deployment Convex
-VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-webhook-retries.mjs   # 6/6
+VITE_CONVEX_URL=https://<deployment>.convex.cloud bun scripts/verify-webhook-retries.mjs   # 8/8
 ```
 
 ## Dukungan khusus: tiket dengan janji tanggap (`support.dedicated`)

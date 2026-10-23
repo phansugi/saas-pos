@@ -1,19 +1,20 @@
 /**
  * Kategori produk — struktur katalog yang diatur peran pengelola (`category.manage`).
  *
- * Kategori bukan sekadar label: namanya menentukan **kode di tengah SKU**
- * (`PBB-<KATEGORI>-<nomor urut>`, lihat lib/productSku.ts) dan menentukan tab
- * filter di POS. Karena itu mengubahnya bukan pekerjaan meja kasir — aturannya
- * ada di sini, dipakai bersama backend (`src/convex/categories.ts`), kedua store,
- * halaman Produk & Stok, dan harness.
+ * Kategori menentukan tab filter di POS dan menjadi label katalog produk. Ia
+ * **tidak** ikut di dalam SKU (formatnya `PBB-<nomor urut>`, lihat
+ * lib/productSku.ts), jadi mengganti, menonaktifkan, atau menghapus kategori tidak
+ * pernah menulis ulang SKU. Karena itu pula mengubahnya bukan pekerjaan meja kasir
+ * — aturannya ada di sini, dipakai bersama backend (`src/convex/categories.ts`),
+ * kedua store, halaman Produk & Stok, dan harness.
  *
  * Empat keputusan yang sengaja diambil:
  *
  * 1. **Nama "Tanpa kategori" tidak boleh dipakai.** Di seluruh aplikasi kalimat
  *    itu berarti “produk ini tidak punya kategori” (tabel Produk, pemilih
- *    kategori, `productSkuCategoryCode`). Kategori dengan nama itu akan membuat
- *    produk tanpa kategori dan produk berkategori itu tidak bisa dibedakan lagi,
- *    jadi namanya ditolak — bukan disimpan lalu ditafsirkan ulang.
+ *    kategori). Kategori dengan nama itu akan membuat produk tanpa kategori dan
+ *    produk berkategori itu tidak bisa dibedakan lagi, jadi namanya ditolak —
+ *    bukan disimpan lalu ditafsirkan ulang.
  * 2. **Menonaktifkan ≠ menghapus.** Kategori nonaktif hilang dari pemilih
  *    kategori produk (jadi tidak ada produk baru yang masuk ke sana), tetapi
  *    produk yang sudah memakainya tetap dijual, tetap muncul di tab POS, dan
@@ -23,15 +24,9 @@
  *    kehilangan kategorinya (jadi “Tanpa kategori”) dan itu diberitahukan lebih
  *    dulu dengan jumlah yang pasti. SKU-nya **tidak** ditulis ulang: SKU adalah
  *    identitas yang mungkin sudah tercetak di label.
- * 4. **Ganti nama kategori tidak menulis ulang SKU.** SKU produk dibuat sekali
- *    mengikuti kategori saat produk itu dibuat/dipindah; mengganti nama kategori
- *    tidak memindahkan produk mana pun, jadi kode lama di SKU-nya tetap sah
- *    (nomornya tetap unik). Halaman memakai `categorySkuCode` untuk memberi tahu
- *    kode baru yang akan dipakai produk berikutnya, bukan mengklaim SKU lama ikut
- *    berubah.
+ * 4. **Ganti nama kategori tidak menulis ulang SKU.** Nama kategori bukan bagian
+ *    dari SKU, jadi SKU produk tetap sah apa pun namanya.
  */
-
-import { productSkuCategoryCode, PRODUCT_SKU_NO_CATEGORY_LABEL } from "./productSku";
 
 export const CATEGORY_NAME_MIN = 2;
 export const CATEGORY_NAME_MAX = 40;
@@ -40,9 +35,9 @@ export const CATEGORY_NAME_MAX = 40;
  * Subkategori: satu tingkat katalog **di dalam** kategori, mis.
  * “Semen & Mortar › Semen Portland”.
  *
- * Bedanya dengan kategori sengaja tegas: kategori menentukan kode di tengah SKU
- * dan tab POS, sedangkan subkategori **tidak** menyentuh keduanya — ia bagian
- * katalog yang ikut disinkronkan (API & webhook). Karena itu subkategori punya
+ * Bedanya dengan kategori sengaja tegas: kategori menentukan tab POS, sedangkan
+ * subkategori **tidak** menyentuh tab maupun SKU — ia bagian katalog yang ikut
+ * disinkronkan (API & webhook). Karena itu subkategori punya
  * barisnya sendiri (`subcategories`, induknya `categoryId`) yang **dibuat di bawah
  * kategori** di halaman Produk & Stok, dan produk menunjuk **id**-nya: ganti nama
  * subkategori tidak menulis ulang apa pun, dan hapus subkategori melepas produknya
@@ -59,6 +54,9 @@ export const MAX_CATEGORIES_PER_TENANT = 100;
 
 /** Label yang dipakai aplikasi untuk “produk tanpa kategori”. */
 export const CATEGORY_NO_CATEGORY_LABEL = "Tanpa kategori";
+
+/** Kunci label itu setelah dirapikan — nama kategori yang memakainya ditolak. */
+const NO_CATEGORY_NAME_KEY = "TANPAKATEGORI";
 
 export interface CategoryLike {
   name: string;
@@ -95,12 +93,7 @@ export function categoryNameKey(raw: string): string {
 /** Benar untuk nama yang berarti “tidak ada kategori” di aplikasi ini. */
 export function isReservedCategoryName(raw: string): boolean {
   const key = categoryNameKey(raw);
-  return key.length === 0 || key === PRODUCT_SKU_NO_CATEGORY_LABEL;
-}
-
-/** Kode tiga huruf kategori di dalam SKU (`Sanitasi` → `SAN`). */
-export function categorySkuCode(name: string): string {
-  return productSkuCategoryCode(name);
+  return key.length === 0 || key === NO_CATEGORY_NAME_KEY;
 }
 
 /**
@@ -184,7 +177,7 @@ export function subcategoryIsActive(row: SubcategoryLike): boolean {
 /**
  * Subkategori yang boleh dipilih untuk sebuah produk: milik kategori itu yang
  * **aktif**, ditambah subkategori yang sedang dipakai produk ini walau sudah
- * nonaktif — kalau tidak, membuka “Atur harga” akan tampak seperti memindahkan
+ * nonaktif — kalau tidak, membuka “Ubah produk” akan tampak seperti memindahkan
  * produknya.
  */
 export function selectableSubcategoryNames(
@@ -222,11 +215,6 @@ export function deleteSubcategorySentence(name: string, productCount: number): s
     return `Subkategori "${name}" tidak dipakai produk mana pun, jadi menghapusnya tidak mengubah katalog.`;
   }
   return `Subkategori "${name}" masih dipakai ${productCount} produk. Menghapusnya tidak menghapus produknya: ${productCount} produk itu kehilangan subkategorinya (kategorinya tetap).`;
-}
-
-/** Benar kalau ganti nama kategori ikut mengubah kode di SKU produk berikutnya. */
-export function renamesSkuCode(previousName: string, nextName: string): boolean {
-  return categorySkuCode(previousName) !== categorySkuCode(nextName);
 }
 
 /** Baris kategori dianggap aktif kecuali ditandai nonaktif (baris lama). */
@@ -322,24 +310,6 @@ export function posCategoryChips(
     chips.push(name);
   }
   return chips;
-}
-
-/**
- * Kode SKU yang dipakai lebih dari satu kategori (mis. “Makanan” & “Makmur” sama-
- * sama `MAK`). Bukan larangan — SKU tetap unik karena nomornya per tenant — tetapi
- * layak diberitahukan: orang membaca kode tengah SKU sebagai nama kategori.
- */
-export function duplicateCategoryCodes(
-  categories: readonly CategoryLike[],
-): { code: string; names: string[] }[] {
-  const byCode = new Map<string, string[]>();
-  for (const row of categories) {
-    const code = categorySkuCode(row.name);
-    byCode.set(code, [...(byCode.get(code) ?? []), row.name]);
-  }
-  return [...byCode.entries()]
-    .filter(([, names]) => names.length > 1)
-    .map(([code, names]) => ({ code, names }));
 }
 
 /**

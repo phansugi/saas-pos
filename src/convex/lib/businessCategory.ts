@@ -81,6 +81,7 @@ export const BUSINESS_CATEGORIES: readonly BusinessCategoryDefinition[] = [
       { key: "fashion", label: "Pakaian & Aksesori" },
       { key: "elektronik", label: "Elektronik & Gadget" },
       { key: "apotek", label: "Apotek & Kesehatan" },
+      { key: "buah-sayur", label: "Buah & Sayur" },
     ],
   },
   {

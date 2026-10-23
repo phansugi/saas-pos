@@ -6,11 +6,12 @@ import {
   MAX_SUBCATEGORIES_PER_CATEGORY,
   validateSubcategoryName,
 } from "./lib/categories";
+import { queueMarketplaceCategoryPush } from "./lib/marketplaceStockQueue";
 
 /**
  * Subkategori produk — satu tingkat katalog **di bawah** kategori.
  *
- * Kategorinya menentukan kode di tengah SKU (`PBB-<KATEGORI>-<nomor>`) dan tab POS,
+ * Kategorinya menentukan susunan tab POS (SKU `PBB-<nomor urut>` tidak memuatnya),
  * jadi yang mengatur subkategori pun peran pengelola yang sama: izin
  * `category.manage`. Yang bisa dilakukan di sini: **tambah** (selalu di bawah
  * sebuah kategori), **ganti nama**, **aktifkan/nonaktifkan**, dan **hapus**.
@@ -107,6 +108,10 @@ export const create = mutation({
       meta: { name: decision.value.name, category: category.name },
     });
 
+    // Pohon kategori di marketplace dibuat dari katalog; subkategori baru ikut
+    // terkirim sesudah tersimpan, bukan menunggu tombol manual.
+    await queueMarketplaceCategoryPush(ctx, { tenantId: args.tenantId });
+
     return {
       subcategoryId,
       categoryId: args.categoryId,
@@ -164,6 +169,8 @@ export const rename = mutation({
       meta: { from: previousName, to: decision.value.name },
     });
 
+    await queueMarketplaceCategoryPush(ctx, { tenantId: args.tenantId });
+
     return {
       subcategoryId: args.subcategoryId,
       name: decision.value.name,
@@ -212,6 +219,8 @@ export const setActive = mutation({
       meta: { name: row.name, active: args.active },
     });
 
+    await queueMarketplaceCategoryPush(ctx, { tenantId: args.tenantId });
+
     return { subcategoryId: args.subcategoryId, name: row.name, active: args.active, changed: true };
   },
 });
@@ -259,6 +268,10 @@ export const remove = mutation({
         skusUnchanged: true,
       },
     });
+
+    // Subkategori yang hilang ikut terkirim dalam pohon katalog terbaru;
+    // marketplace yang memutuskan apakah menyimpan riwayatnya.
+    await queueMarketplaceCategoryPush(ctx, { tenantId: args.tenantId });
 
     return {
       removed: true as const,

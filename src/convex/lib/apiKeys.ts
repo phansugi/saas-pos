@@ -58,8 +58,8 @@ export const API_KEY_SECRET_ALPHABET =
  */
 export interface ApiResource {
   resource: string;
-  /** `GET` membaca, `POST` menulis. Satu path boleh punya keduanya. */
-  method: "GET" | "POST";
+  /** `GET` membaca; `POST`/`PATCH`/`DELETE` menulis. Satu path boleh punya beberapa. */
+  method: "GET" | "POST" | "PATCH" | "DELETE";
   path: string;
   scope: Permission | null;
   label: string;
@@ -69,15 +69,33 @@ export interface ApiResource {
    * dan `http.ts` saat memilih jalur baca/tulis.
    */
   write: boolean;
+  /**
+   * Cara autentikasi endpoint.
+   *
+   * - `key` (bawaan): kunci API tenant lewat header `Authorization: Bearer mp_…`.
+   * - `signature`: dipanggil **platform mitra** dengan tanda tangan HMAC, bukan
+   *   kunci MesinPOS — dipakai hanya oleh webhook masuk. Endpoint seperti ini
+   *   tidak boleh punya scope: yang menjaganya adalah tanda tangan endpoint.
+   */
+  auth?: "key" | "signature";
 }
 
+/**
+ * Tabel endpoint API v1 — sumber kebenaran untuk scope, halaman, dan `http.ts`.
+ *
+ * Scope setiap endpoint tulis adalah **izin domain yang sudah ada**
+ * (`product.manage`, `stock.adjust`, `ar.manage`, …), bukan scope tulis khusus
+ * API. Jadi kunci tidak pernah bisa menulis hal yang perannya sendiri tidak
+ * boleh lakukan (lihat `scopeAllowed`), dan auditnya menunjuk orang yang sama
+ * dengan aplikasi.
+ */
 export const API_RESOURCES: ApiResource[] = [
   {
     resource: "ping",
     method: "GET",
     path: "/api/v1/ping",
     scope: null,
-    label: "Cek kunci & identitas tenant",
+    label: "Cek kunci, identitas workspace & daftar toko",
     write: false,
   },
   {
@@ -85,19 +103,27 @@ export const API_RESOURCES: ApiResource[] = [
     method: "GET",
     path: "/api/v1/sales",
     scope: "report.view",
-    label: "Penjualan selesai terbaru",
+    label: "Penjualan terbaru (berhalaman, bisa disaring tanggal & status)",
     write: false,
   },
   {
-    // Satu-satunya endpoint tulis (Phase 4 lanjutan): pesanan masuk dari sistem
-    // luar. Scope-nya izin domain yang sudah ada (`pos.sell`), bukan scope tulis
-    // khusus API — supaya kunci tidak bisa menulis hal yang perannya sendiri
-    // tidak boleh lakukan (lihat `scopeAllowed`).
     resource: "sales.create",
     method: "POST",
     path: "/api/v1/sales",
     scope: "pos.sell",
     label: "Membuat penjualan dari sistem luar (pesanan masuk)",
+    write: true,
+  },
+  {
+    // Pembatalan lewat API memakai jalur yang sama dengan tombol batal di
+    // aplikasi kasir (`pos.voidSale`): stok kembali, piutang ikut batal, dan
+    // aturan “piutang yang sudah menerima uang tidak boleh dihapus” tetap
+    // berlaku. Scope-nya izin `pos.void`, bukan izin baru.
+    resource: "sales.void",
+    method: "POST",
+    path: "/api/v1/sales/void",
+    scope: "pos.void",
+    label: "Membatalkan penjualan lewat nomor struk",
     write: true,
   },
   {
@@ -107,6 +133,62 @@ export const API_RESOURCES: ApiResource[] = [
     scope: "inventory.view",
     label: "Katalog beserta stok yang bisa dijual",
     write: false,
+  },
+  {
+    resource: "products.update",
+    method: "PATCH",
+    path: "/api/v1/products",
+    scope: "product.manage",
+    label: "Mengubah nama, harga, satuan, atau status produk",
+    write: true,
+  },
+  {
+    resource: "products.delete",
+    method: "DELETE",
+    path: "/api/v1/products",
+    scope: "product.manage",
+    label: "Menghapus produk yang belum dipakai transaksi",
+    write: true,
+  },
+  {
+    resource: "stock.adjust",
+    method: "POST",
+    path: "/api/v1/stock/adjust",
+    scope: "stock.adjust",
+    label: "Menyesuaikan stok lokasi jual (delta atau angka pasti)",
+    write: true,
+  },
+  {
+    resource: "customers",
+    method: "GET",
+    path: "/api/v1/customers",
+    scope: "ar.view",
+    label: "Pelanggan B2B beserta limit kreditnya",
+    write: false,
+  },
+  {
+    resource: "customers.create",
+    method: "POST",
+    path: "/api/v1/customers",
+    scope: "ar.manage",
+    label: "Membuat pelanggan B2B baru (kode dibuat kalau kosong)",
+    write: true,
+  },
+  {
+    resource: "members",
+    method: "GET",
+    path: "/api/v1/members",
+    scope: "member.view",
+    label: "Member pelanggan beserta diskonnya",
+    write: false,
+  },
+  {
+    resource: "members.create",
+    method: "POST",
+    path: "/api/v1/members",
+    scope: "member.manage",
+    label: "Membuat member baru (kode dibuat kalau kosong)",
+    write: true,
   },
   {
     resource: "payables",
@@ -127,11 +209,53 @@ export const API_RESOURCES: ApiResource[] = [
     label: "Penerimaan barang (GRN) terbaru",
     write: false,
   },
+  {
+    resource: "inboundWebhooks",
+    method: "GET",
+    path: "/api/v1/webhooks",
+    scope: "api.manage",
+    label: "Endpoint webhook masuk & peristiwa terakhir",
+    write: false,
+  },
+  {
+    resource: "inboundWebhooks.create",
+    method: "POST",
+    path: "/api/v1/webhooks",
+    scope: "api.manage",
+    label: "Membuat endpoint webhook masuk (mitra → MesinPOS)",
+    write: true,
+  },
+  {
+    resource: "inboundWebhooks.delete",
+    method: "DELETE",
+    path: "/api/v1/webhooks",
+    scope: "api.manage",
+    label: "Menghapus endpoint webhook masuk",
+    write: true,
+  },
+  {
+    // Dipanggil **platform mitra**, bukan pemilik workspace: yang menjaga
+    // endpoint ini adalah tanda tangan HMAC endpoint itu sendiri. Karena itu
+    // `scope: null` dan `auth: "signature"`; `http.ts` mendaftarkannya dengan
+    // prefiks path (token ada di URL) dan tidak memakai jalur kunci API.
+    resource: "inboundWebhooks.receive",
+    method: "POST",
+    path: "/api/v1/webhooks/incoming/{token}",
+    scope: null,
+    label: "Menerima peristiwa dari platform mitra (bertanda tangan)",
+    write: true,
+    auth: "signature",
+  },
 ];
 
 /** Endpoint tulis; dipakai halaman untuk menandai & mendokumentasikan. */
 export const API_WRITE_RESOURCES: ApiResource[] = API_RESOURCES.filter(
   (resource) => resource.write,
+);
+
+/** Endpoint yang diverifikasi tanda tangan (webhook masuk), bukan kunci API. */
+export const API_SIGNATURE_RESOURCES: ApiResource[] = API_RESOURCES.filter(
+  (resource) => resource.auth === "signature",
 );
 
 /** Resource untuk sebuah `method` + `path`; null kalau tidak ada yang cocok. */
@@ -181,7 +305,23 @@ export const API_SCOPE_OPTIONS: ApiScopeOption[] = API_RESOURCES.filter(
   write: row.write,
 }));
 
-export const API_SCOPES: Permission[] = API_SCOPE_OPTIONS.map(
+/**
+ * Satu scope bisa muncul di beberapa endpoint (mis. `pos.sell` untuk pesanan
+ * masuk saja), jadi daftar opsi dipadatkan per scope: yang pertama mewakili,
+ * tetapi `write` bernilai benar kalau **ada** endpoint tulis yang memakainya.
+ * Tanpa ini, halaman menampilkan scope yang sama berkali-kali.
+ */
+export const API_SCOPE_OPTIONS_UNIQUE: ApiScopeOption[] = API_SCOPE_OPTIONS.filter(
+  (option, index) =>
+    API_SCOPE_OPTIONS.findIndex((row) => row.permission === option.permission) === index,
+).map((option) => ({
+  ...option,
+  write: API_SCOPE_OPTIONS.some(
+    (row) => row.permission === option.permission && row.write,
+  ),
+}));
+
+export const API_SCOPES: Permission[] = API_SCOPE_OPTIONS_UNIQUE.map(
   (option) => option.permission,
 );
 

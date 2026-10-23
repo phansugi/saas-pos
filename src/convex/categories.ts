@@ -2,13 +2,9 @@ import { v } from "convex/values";
 import { internalMutation, mutation, type MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { requirePermission, writeAuditLog } from "./lib/access";
-import {
-  MAX_CATEGORIES_PER_TENANT,
-  categorySkuCode,
-  renamesSkuCode,
-  validateCategoryName,
-} from "./lib/categories";
+import { MAX_CATEGORIES_PER_TENANT, validateCategoryName } from "./lib/categories";
 import { businessCategoryOf } from "./lib/businessCategory";
+import { queueMarketplaceCategoryPush } from "./lib/marketplaceStockQueue";
 import {
   businessCategoryLabel,
   seedProductCatalogFromBusinessCategory,
@@ -19,10 +15,9 @@ import { productCatalogSeedSentence } from "./lib/productCatalogPresets";
  * Kategori produk — struktur katalog, bukan isi rak.
  *
  * Gerbangnya satu izin: `category.manage` (pemilik & manajer). Staf gudang memang
- * mengelola **produk** (`product.manage`), tetapi kategori menentukan kode di
- * tengah SKU (`PBB-<KATEGORI>-<nomor>`) dan susunan tab di POS, jadi yang
- * mengaturnya adalah peran pengelola — sama seperti `team.manage` dan
- * `api.manage`.
+ * mengelola **produk** (`product.manage`), tetapi kategori menentukan susunan tab
+ * di POS dan label katalog, jadi yang mengaturnya adalah peran pengelola — sama
+ * seperti `team.manage` dan `api.manage`.
  *
  * Yang bisa dilakukan di sini: **tambah**, **ganti nama**, **aktifkan/nonaktifkan**,
  * dan **hapus**. Semuanya lewat aturan murni `lib/categories.ts`, dan tiap aksi
@@ -98,13 +93,16 @@ export const create = mutation({
       action: "category.create",
       entity: "categories",
       entityId: categoryId,
-      meta: { name: decision.value.name, skuCode: categorySkuCode(decision.value.name) },
+      meta: { name: decision.value.name },
     });
+
+    // Workspace yang dipasangkan ke marketplace ikut mengabarkan pohon katalog
+    // barunya — kategori tak berdiri sendiri di sana, jadi yang dikirim katalog.
+    await queueMarketplaceCategoryPush(ctx, { tenantId: args.tenantId });
 
     return {
       categoryId,
       name: decision.value.name,
-      skuCode: categorySkuCode(decision.value.name),
       limit: MAX_CATEGORIES_PER_TENANT,
     };
   },
@@ -113,9 +111,8 @@ export const create = mutation({
 /**
  * Mengganti nama kategori.
  *
- * Nama barunya mengubah kode di SKU **produk berikutnya**, bukan SKU yang sudah
- * ada: produknya tidak berpindah kategori, jadi SKU-nya tetap sah. Balikannya
- * menyebut kode lama & kode baru supaya halaman bisa mengatakannya apa adanya.
+ * SKU produk **tidak** ikut ditulis ulang: nama kategori bukan bagian dari SKU
+ * (`PBB-<nomor urut>`), jadi kode yang sudah tercetak di label tetap sah.
  */
 export const rename = mutation({
   args: {
@@ -143,14 +140,12 @@ export const rename = mutation({
         categoryId: args.categoryId,
         name: previousName,
         previousName,
-        skuCodeChanged: false,
         changed: false,
       };
     }
 
     await ctx.db.patch(args.categoryId, { name: decision.value.name });
 
-    const skuCodeChanged = renamesSkuCode(previousName, decision.value.name);
     await writeAuditLog(ctx, {
       tenantId: args.tenantId,
       actorId: args.actorId,
@@ -160,17 +155,19 @@ export const rename = mutation({
       meta: {
         from: previousName,
         to: decision.value.name,
-        skuCodeFrom: categorySkuCode(previousName),
-        skuCodeTo: categorySkuCode(decision.value.name),
-        skuCodeChanged,
+        // SKU tidak ikut berubah; dicatat supaya jejaknya jelas.
+        skusUnchanged: true,
       },
     });
+
+    // Nama kategori dipakai label produk, jadi kiriman katalog yang membawa
+    // nama barunya ke marketplace.
+    await queueMarketplaceCategoryPush(ctx, { tenantId: args.tenantId });
 
     return {
       categoryId: args.categoryId,
       name: decision.value.name,
       previousName,
-      skuCodeChanged,
       changed: true,
     };
   },
@@ -209,6 +206,9 @@ export const setActive = mutation({
       entityId: args.categoryId,
       meta: { name: category.name, active: args.active },
     });
+
+    // Status aktif ikut menentukan kategori mana yang ditawarkan di marketplace.
+    await queueMarketplaceCategoryPush(ctx, { tenantId: args.tenantId });
 
     return { categoryId: args.categoryId, name: category.name, active: args.active, changed: true };
   },
@@ -279,13 +279,16 @@ export const remove = mutation({
       entityId: args.categoryId,
       meta: {
         name: category.name,
-        skuCode: categorySkuCode(category.name),
         detachedProducts: attached.length,
         removedSubcategories: subcategories.length,
         // SKU sengaja tidak ditulis ulang; dicatat supaya jejaknya jelas.
         skusUnchanged: true,
       },
     });
+
+    // Produk yang dilepas tetap ada tanpa kategori. Pohon terbaru tetap dikirim;
+    // marketplace sendiri yang memutuskan apakah kategori lama disimpan.
+    await queueMarketplaceCategoryPush(ctx, { tenantId: args.tenantId });
 
     return {
       removed: true as const,
@@ -435,6 +438,9 @@ export const syncFromBusinessCategory = mutation({
           skippedCategories: seeded.skippedCategoryNames,
         },
       });
+
+      // Master kategori baru dari pilihan bisnis ikut dikirim ke marketplace.
+      await queueMarketplaceCategoryPush(ctx, { tenantId: args.tenantId });
     }
 
     return {

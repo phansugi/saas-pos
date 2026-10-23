@@ -30,6 +30,12 @@ import {
 } from "../src/convex/lib/webhooks.ts";
 import { parseExternalOrder } from "../src/convex/lib/apiOrders.ts";
 import {
+  INBOUND_EVENT_KEYS,
+  INBOUND_HEADERS,
+  INBOUND_WEBHOOK_EVENTS,
+  parseInboundEnvelope,
+} from "../src/convex/lib/inboundWebhooks.ts";
+import {
   API_BASE_PLACEHOLDER,
   API_DOC_ENDPOINTS,
   API_DOC_ERRORS,
@@ -37,6 +43,7 @@ import {
   API_DOC_LIMITS,
   API_DOC_NOT_YET,
   API_DOC_VERSION,
+  INBOUND_WEBHOOK_DOC,
   SAMPLE_ORDER_BODY,
   SYNC_DOC,
   WEBHOOK_DOC,
@@ -100,10 +107,16 @@ for (const resource of API_RESOURCES) {
 }
 
 check(
-  "endpoint tulis punya contoh permintaan, endpoint baca tidak",
-  API_DOC_ENDPOINTS.filter((row) => row.requestExample).map((row) => row.resource).join(",") ===
-    "sales.create",
-  API_DOC_ENDPOINTS.filter((row) => row.requestExample)
+  "setiap endpoint tulis punya contoh permintaan, endpoint baca tidak",
+  API_DOC_ENDPOINTS.filter((row) => Boolean(row.requestExample))
+    .map((row) => row.resource)
+    .sort()
+    .join(",") ===
+    API_RESOURCES.filter((row) => row.write)
+      .map((row) => row.resource)
+      .sort()
+      .join(","),
+  API_DOC_ENDPOINTS.filter((row) => Boolean(row.requestExample))
     .map((row) => row.resource)
     .join(","),
 );
@@ -164,6 +177,55 @@ check(
   writeDoc.requestExample === JSON.stringify(SAMPLE_ORDER_BODY, null, 2),
   "contoh permintaan disusun ulang",
 );
+
+// ------------------------------------------------------- webhook masuk
+{
+  const receive = docByResource.get("inboundWebhooks.receive");
+  check(
+    "endpoint webhook masuk terdokumentasi dengan path bertoken",
+    Boolean(receive) && receive.path.includes("{token}") && receive.method === "POST",
+    receive?.path,
+  );
+  check(
+    "seluruh event webhook masuk terdokumentasi",
+    INBOUND_WEBHOOK_DOC.events.length === INBOUND_WEBHOOK_EVENTS.length &&
+      INBOUND_EVENT_KEYS.every((key) =>
+        INBOUND_WEBHOOK_DOC.events.some((event) => event.key === key),
+      ),
+    INBOUND_WEBHOOK_DOC.events.map((event) => event.key).join(", "),
+  );
+  check(
+    "header webhook masuk yang didokumentasikan sama dengan yang dibaca server",
+    INBOUND_WEBHOOK_DOC.headers.map((header) => header.name).join(",") ===
+      [INBOUND_HEADERS.timestamp, INBOUND_HEADERS.signature, INBOUND_HEADERS.event, INBOUND_HEADERS.eventId].join(","),
+    INBOUND_WEBHOOK_DOC.headers.map((header) => header.name).join(", "),
+  );
+  check(
+    "contoh badan peristiwa lolos parser penerimanya",
+    (() => {
+      const parsed = JSON.parse(INBOUND_WEBHOOK_DOC.payloadExample);
+      const envelope = parseInboundEnvelope(
+        JSON.stringify(parsed),
+        { timestamp: "1", signature: "x", event: parsed.event, eventId: null },
+      );
+      return envelope.ok;
+    })(),
+    "contoh badan peristiwa tidak sah",
+  );
+  check(
+    "catatan webhook masuk menjelaskan idempotensi & izin pelaku",
+    INBOUND_WEBHOOK_DOC.notes.some((note) => note.includes("idempotensi")) &&
+      INBOUND_WEBHOOK_DOC.notes.some((note) => note.includes("pembuat endpoint")),
+    INBOUND_WEBHOOK_DOC.notes.join(" | "),
+  );
+  check(
+    "dokumentasi menyebut endpoint pengelola webhook masuk",
+    ["inboundWebhooks", "inboundWebhooks.create", "inboundWebhooks.delete"].every((resource) =>
+      docByResource.has(resource),
+    ),
+    "endpoint pengelola webhook masuk tidak terdokumentasi",
+  );
+}
 
 // ------------------------------------------------------ webhook terdokumentasi
 check(
@@ -268,16 +330,22 @@ check(
   API_DOC_LIMITS.map((row) => `${row.label}: ${row.value}`).join(" | "),
 );
 check(
-  "dokumentasi menyebut batasan satu toko utama",
-  API_DOC_LIMITS.some((row) => row.note.includes("satu toko utama")),
-  "batasan toko tidak disebut",
+  "dokumentasi menjelaskan pemilih toko, rentang tanggal, dan kursor",
+  API_DOC_LIMITS.some((row) => row.label.includes("storeCode")) &&
+    API_DOC_LIMITS.some((row) => row.label.includes("from") && row.label.includes("to")) &&
+    API_DOC_LIMITS.some(
+      (row) => row.label.includes("cursor") || row.label.includes("bertanggal") || row.note.includes("cursor"),
+    ),
+  API_DOC_LIMITS.map((row) => row.label).join(" | "),
 );
 const notYet = API_DOC_NOT_YET.join(" | ").toLowerCase();
 check(
-  "daftar hal yang belum tersedia terisi",
-  API_DOC_NOT_YET.length >= 5 &&
-    notYet.includes("modifier") &&
-    notYet.includes("toko pertama"),
+  "daftar hal yang belum tersedia masih terisi dan tidak menyebut fitur baru",
+  API_DOC_NOT_YET.length >= 3 &&
+    notYet.includes("produk") &&
+    notYet.includes("antrean ulang") &&
+    !notYet.includes("toko pertama") &&
+    !notYet.includes("webhook masuk dari platform mitra"),
   API_DOC_NOT_YET.join(" | "),
 );
 check(

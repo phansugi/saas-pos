@@ -1,6 +1,7 @@
-import { Fragment, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import {
+  ArrowUpDown,
   Boxes,
   Images,
   ImageUp,
@@ -12,12 +13,16 @@ import {
   PowerOff,
   Puzzle,
   Save,
+  ScanBarcode,
   ShieldAlert,
   Sparkles,
   Trash2,
   X,
 } from "lucide-react";
+import { BarcodeScanDialog } from "@/components/BarcodeScanDialog";
+import { ProductBarcodeField } from "@/components/ProductBarcodeField";
 import { ErrorNotice } from "@/components/ErrorNotice";
+import { findProductByScannedCode, normalizeScannedCode } from "@/lib/barcode";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,10 +42,8 @@ import {
 } from "@/lib/modifiers";
 import {
   categoryNameKey,
-  categorySkuCode,
   deleteCategorySentence,
   deleteSubcategorySentence,
-  duplicateCategoryCodes,
   selectableCategoryNames,
   selectableSubcategoryNames,
   subcategoryIsActive,
@@ -65,6 +68,7 @@ import {
   productCatalogPresetFor,
 } from "@/lib/productCatalogPresets";
 import { PRODUCT_SKU_PREFIX, suggestProductSku } from "@/lib/productSku";
+import type { ProductBarcodeType } from "@/lib/productBarcode";
 import { productStatusSentence } from "@/lib/productEdit";
 import type { StoreCategory, StoreProduct, StoreSubcategory } from "@/lib/store";
 import type { ProductDeletionInfo } from "@/lib/store";
@@ -78,9 +82,13 @@ interface Draft {
   name: string;
   /** SKU (dipakai apa adanya, unik per workspace). */
   sku: string;
+  /** Kode tambahan untuk kasir; kosong = hanya SKU yang dipindai. */
+  barcode: string;
+  /** Jenis kode yang dipilih: Code 39 atau QR. */
+  barcodeType: ProductBarcodeType;
   /** Harga beli per satuan dasar; dipakai menghitung margin di laporan. */
   cost: string;
-  /** Kategori produk; kosong = tanpa kategori. Mengubahnya ikut mengubah SKU. */
+  /** Kategori produk; kosong = tanpa kategori. Tidak mengubah SKU. */
   category: string;
   /** Label katalog di dalam kategori; kosong = tanpa subkategori. */
   subcategory: string;
@@ -258,6 +266,8 @@ function ModifierEditor({
 interface NewProductDraft {
   name: string;
   sku: string;
+  barcode: string;
+  barcodeType: ProductBarcodeType;
   category: string;
   subcategory: string;
   price: string;
@@ -269,6 +279,8 @@ interface NewProductDraft {
 const EMPTY_PRODUCT: NewProductDraft = {
   name: "",
   sku: "",
+  barcode: "",
+  barcodeType: "barcode",
   category: "",
   subcategory: "",
   price: "",
@@ -290,6 +302,8 @@ function draftFrom(product: StoreProduct): Draft {
   return {
     name: product.name,
     sku: product.sku,
+    barcode: product.barcode ?? "",
+    barcodeType: product.barcodeType ?? "barcode",
     cost: String(product.cost ?? 0),
     category: kategoriDraft(product.category),
     subcategory: product.subcategory ?? "",
@@ -301,6 +315,349 @@ function draftFrom(product: StoreProduct): Draft {
       price: String(t.price),
     })),
   };
+}
+
+/**
+ * Nilai inti yang dipakai bersama form **Produk baru** dan kartu **Ubah produk**.
+ * Semuanya teks: kolom angka tidak boleh dipaksa jadi angka saat diketik.
+ */
+interface ProductCoreValues {
+  name: string;
+  sku: string;
+  category: string;
+  subcategory: string;
+  price: string;
+  cost: string;
+  unit: string;
+}
+
+/** Id kategori dari namanya (halaman memakai nama; store memakai id). */
+function coreCategoryId(categories: StoreCategory[], name: string): string | undefined {
+  const wanted = name.trim();
+  return wanted.length === 0
+    ? undefined
+    : categories.find((row) => row.name === wanted)?.id;
+}
+
+/** Benar kalau subkategori ini ada tetapi sedang nonaktif — tetap ditawarkan. */
+function coreSubcategoryInactive(
+  subcategories: StoreSubcategory[],
+  categoryId: string | undefined,
+  name: string,
+): boolean {
+  if (!categoryId) return false;
+  return subcategories.some(
+    (row) =>
+      row.categoryId === categoryId &&
+      !subcategoryIsActive(row) &&
+      subcategoryNameKey(row.name) === subcategoryNameKey(name),
+  );
+}
+
+/**
+ * Kolom inti produk — **satu tata letak** untuk membuat dan mengubah produk.
+ *
+ * Sebelumnya form Produk baru dan kartu Ubah produk punya susunan sendiri-sendiri:
+ * urutan kolomnya berbeda, kolom harganya tidak berlabel sama, dan stok hanya ada
+ * saat membuat. Komponen ini memakai urutan yang sama (nama → SKU → kategori →
+ * subkategori → harga jual → harga beli → satuan → stok) di kedua mode, jadi
+ * pemilik toko tidak perlu belajar dua form.
+ *
+ * Bedanya hanya yang memang berbeda secara data:
+ *  - produk **baru** boleh mengosongkan SKU (server membuat nomornya) dan memakai
+ *    **Stok awal**;
+ *  - produk **tersimpan** menampilkan SKU apa adanya dan **stok saat ini** sebagai
+ *    bacaan — stoknya diubah lewat tombol “Sesuaikan stok”, bukan form ini.
+ */
+function ProductCoreFields({
+  mode,
+  productLabel,
+  values,
+  onChange,
+  categories,
+  subcategories,
+  kategoriNonaktif,
+  kategoriAktif,
+  stock,
+  skuSuggestion,
+}: {
+  mode: "create" | "edit";
+  /** Nama produk, dipakai di `aria-label` saat mengubah produk tersimpan. */
+  productLabel?: string;
+  values: ProductCoreValues;
+  onChange: (patch: Partial<ProductCoreValues>) => void;
+  categories: StoreCategory[];
+  subcategories: StoreSubcategory[];
+  kategoriNonaktif: Set<string>;
+  kategoriAktif: number;
+  /** Stok awal (boleh diubah) atau stok saat ini (hanya dibaca). */
+  stock: { value: string; onChange?: (value: string) => void };
+  /**
+   * Saran SKU dari daftar SKU yang sudah ada. Dipakai form Produk baru **dan**
+   * kartu Ubah produk.
+   *
+   * Di kartu Ubah produk kolomnya sudah berisi SKU lama, jadi tombolnya tidak
+   * menimpa begitu saja: ia menampilkan konfirmasi berisi SKU lama & nomor baru,
+   * dan isi kolom baru berganti setelah “Ya, ganti SKU” ditekan — perubahannya pun
+   * masih menunggu “Simpan perubahan”.
+   */
+  skuSuggestion?: { disabled: boolean; suggest: () => string };
+}) {
+  const categoryId = coreCategoryId(categories, values.category);
+  /** Label mode “baru” tetap memakai nama kolom yang sudah dikenal harness. */
+  const aria = (createLabel: string, editLabel: string) =>
+    mode === "create" ? createLabel : `${editLabel} ${productLabel ?? ""}`.trim();
+  const stokBisaDiubah = typeof stock.onChange === "function";
+  /**
+   * SKU yang menunggu konfirmasi penggantian: SKU lama & nomor barunya. Hanya
+   * terpakai di kartu Ubah produk — di form Produk baru kolomnya memang kosong.
+   */
+  const [gantiSku, setGantiSku] = useState<{ from: string; to: string } | null>(null);
+  /** Konfirmasi hanya berlaku selama kolomnya masih berisi SKU lama yang sama. */
+  const konfirmasiSku = gantiSku && gantiSku.from === values.sku ? gantiSku : null;
+
+  return (
+    <div className="grid gap-3 md:grid-cols-3">
+      <label className="space-y-1 text-xs text-muted-foreground">
+        Nama produk
+        <Input
+          value={values.name}
+          placeholder="Kopi Susu Gula Aren"
+          aria-label={aria("Nama produk baru", "Nama produk")}
+          onChange={(e) => onChange({ name: e.target.value })}
+        />
+      </label>
+
+      <label className="space-y-1 text-xs text-muted-foreground">
+        SKU {mode === "create" && <span className="font-normal">(opsional)</span>}
+        <div className="flex items-center gap-2">
+          <Input
+            className="font-mono"
+            value={values.sku}
+            data-testid={mode === "create" ? "produk-sku-baru" : "produk-sku-ubah"}
+            placeholder={`${PRODUCT_SKU_PREFIX}-0000042`}
+            aria-label={aria("SKU produk baru", "SKU produk")}
+            onChange={(e) => {
+              // Mengetik sendiri membatalkan usulan tombol: yang tampil harus yang
+              // diketik, bukan sisa konfirmasi sebelumnya.
+              setGantiSku(null);
+              onChange({ sku: e.target.value });
+            }}
+          />
+          {skuSuggestion && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="shrink-0"
+              aria-label="Buat SKU otomatis"
+              title={
+                skuSuggestion.disabled
+                  ? "Kosongkan kolom SKU lebih dulu untuk memakai tombol ini"
+                  : mode === "create"
+                    ? "Isi kolom SKU dari daftar SKU yang sudah ada"
+                    : "Tawarkan nomor berikutnya — SKU lama baru diganti setelah dikonfirmasi"
+              }
+              disabled={skuSuggestion.disabled}
+              onClick={() => {
+                const saran = skuSuggestion.suggest();
+                // Produk tersimpan sudah punya SKU: jangan menimpanya diam-diam.
+                if (
+                  mode === "edit" &&
+                  values.sku.trim().length > 0 &&
+                  values.sku.trim() !== saran
+                ) {
+                  setGantiSku({ from: values.sku, to: saran });
+                  return;
+                }
+                setGantiSku(null);
+                onChange({ sku: saran });
+              }}
+            >
+              <Sparkles className="size-3.5" /> Buat otomatis
+            </Button>
+          )}
+        </div>
+        <span className="block text-[11px] font-normal text-muted-foreground">
+          {mode === "create" ? (
+            <>
+              Kosongkan dan simpan untuk dibuat otomatis &amp; unik — format{" "}
+              <span className="font-mono">{PRODUCT_SKU_PREFIX}-&lt;nomor urut&gt;</span> (contoh{" "}
+              <span className="font-mono">{PRODUCT_SKU_PREFIX}-0000042</span>). Tombol{" "}
+              <strong>Buat otomatis</strong> mengisi kolomnya dari daftar SKU yang sudah ada,
+              selama kolomnya belum diubah manual.
+            </>
+          ) : (
+            <>
+              SKU dipakai apa adanya dan unik per workspace. Tombol{" "}
+              <strong>Buat otomatis</strong> menawarkan nomor berikutnya dari daftar SKU yang sudah ada
+              dan <strong>meminta konfirmasi</strong> sebelum mengganti isi kolom; perubahannya baru
+              tersimpan setelah <strong>Simpan perubahan</strong>. Mengubah SKU membuat label atau
+              catatan lama yang menyebut SKU sebelumnya tidak cocok lagi.
+            </>
+          )}
+        </span>
+      </label>
+
+      {/*
+        Konfirmasi penggantian SKU. Sengaja muncul tepat di bawah baris kolom, bukan
+        dialog melayang, supaya SKU lama dan nomor barunya bisa dibandingkan tanpa
+        kehilangan konteks form. Dua tombolnya tetap di dalam form: “Ya, ganti SKU”
+        hanya mengisi kolom, sedangkan penyimpanan tetap lewat “Simpan perubahan”.
+      */}
+      {konfirmasiSku && (
+        <div
+          role="group"
+          aria-label="Konfirmasi ganti SKU"
+          className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-foreground md:col-span-3"
+        >
+          <p>
+            SKU <span className="font-mono">{konfirmasiSku.from}</span> akan diganti menjadi{" "}
+            <span className="font-mono">{konfirmasiSku.to}</span>. Label atau catatan lama yang
+            menyebut SKU sebelumnya tidak ikut berubah.
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              aria-label={`Konfirmasi ganti SKU produk ${productLabel ?? ""}`.trim()}
+              onClick={() => {
+                onChange({ sku: konfirmasiSku.to });
+                setGantiSku(null);
+              }}
+            >
+              <Sparkles className="size-3.5" /> Ya, ganti SKU
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              aria-label={`Batal ganti SKU produk ${productLabel ?? ""}`.trim()}
+              onClick={() => setGantiSku(null)}
+            >
+              Batal
+            </Button>
+          </div>
+        </div>
+      )}
+
+      <label className="space-y-1 text-xs text-muted-foreground">
+        Kategori
+        <select
+          className="w-full rounded border border-border bg-background px-2 py-2 text-sm text-foreground"
+          value={values.category}
+          aria-label={aria("Kategori produk baru", "Kategori produk")}
+          onChange={(e) => {
+            const category = e.target.value;
+            onChange({
+              category,
+              // Subkategori hanya berlaku di dalam kategori; pindah kategori
+              // mengosongkannya supaya labelnya tidak menggantung.
+              subcategory: category === values.category ? values.subcategory : "",
+            });
+          }}
+        >
+          <option value="">Tanpa kategori</option>
+          {/**
+            Kategori aktif, ditambah pilihan yang sedang terpilih walau baru saja
+            dinonaktifkan di tempat lain — supaya layarnya tidak diam-diam
+            menampilkan kategori lain dari yang akan disimpan.
+          */}
+          {selectableCategoryNames(categories, values.category).map((nama) => (
+            <option key={nama} value={nama}>
+              {nama}
+              {kategoriNonaktif.has(categoryNameKey(nama)) ? " (nonaktif)" : ""}
+            </option>
+          ))}
+        </select>
+        <span className="block text-[11px] font-normal text-muted-foreground">
+          {kategoriAktif < categories.length
+            ? `${categories.length - kategoriAktif} kategori nonaktif tidak ditawarkan di sini — aktifkan dulu di kartu “Kategori produk”.`
+            : "Kategori diatur di kartu “Kategori produk” di bawah daftar."}
+        </span>
+      </label>
+
+      <label className="space-y-1 text-xs text-muted-foreground">
+        Subkategori (opsional)
+        <select
+          className="w-full rounded border border-border bg-background px-2 py-2 text-sm text-foreground disabled:opacity-60"
+          value={values.subcategory}
+          aria-label={aria("Subkategori produk baru", "Subkategori produk")}
+          disabled={values.category.trim().length === 0}
+          onChange={(e) => onChange({ subcategory: e.target.value })}
+        >
+          <option value="">Tanpa subkategori</option>
+          {/**
+            Hanya subkategori **di bawah kategori ini**; yang sedang dipakai tetap
+            tampil walau sudah nonaktif — kalau tidak, membuka form akan tampak
+            seperti memindahkan produknya.
+          */}
+          {selectableSubcategoryNames(subcategories, categoryId, values.subcategory).map(
+            (nama) => (
+              <option key={nama} value={nama}>
+                {nama}
+                {coreSubcategoryInactive(subcategories, categoryId, nama) ? " (nonaktif)" : ""}
+              </option>
+            ),
+          )}
+        </select>
+        <span className="block text-[11px] font-normal text-muted-foreground">
+          Dibuat di bawah kategorinya di kartu “Kategori produk”. Ikut dikirim ke API &amp;
+          webhook, tetapi tidak mengubah SKU maupun tab kasir.
+        </span>
+      </label>
+
+      <label className="space-y-1 text-xs text-muted-foreground">
+        Harga jual
+        <Input
+          inputMode="numeric"
+          value={values.price}
+          placeholder="22000"
+          aria-label={aria("Harga jual produk baru", "Harga jual")}
+          onChange={(e) => onChange({ price: e.target.value })}
+        />
+      </label>
+
+      <label className="space-y-1 text-xs text-muted-foreground">
+        Harga beli (opsional)
+        <Input
+          inputMode="numeric"
+          value={values.cost}
+          placeholder="12000"
+          aria-label={aria("Harga beli produk baru", "Harga beli")}
+          onChange={(e) => onChange({ cost: e.target.value })}
+        />
+      </label>
+
+      <label className="space-y-1 text-xs text-muted-foreground">
+        Satuan dasar
+        <Input
+          value={values.unit}
+          placeholder="PCS"
+          aria-label={aria("Satuan dasar produk baru", "Satuan dasar")}
+          onChange={(e) => onChange({ unit: e.target.value })}
+        />
+      </label>
+
+      <label className="space-y-1 text-xs text-muted-foreground">
+        {mode === "create" ? "Stok awal" : "Stok saat ini"}
+        <Input
+          className="font-mono"
+          inputMode="numeric"
+          value={stock.value}
+          placeholder="0"
+          aria-label={aria("Stok awal produk baru", "Stok produk")}
+          disabled={!stokBisaDiubah}
+          onChange={(e) => stock.onChange?.(e.target.value)}
+        />
+        {!stokBisaDiubah && (
+          <span className="block text-[11px] font-normal text-muted-foreground">
+            Stok diubah lewat tombol “Sesuaikan stok” di daftar; form ini tidak menyimpannya.
+          </span>
+        )}
+      </label>
+    </div>
+  );
 }
 
 /** Satu gambar yang tampil di editor: `id` untuk menghapus, `url` untuk pratinjau. */
@@ -321,7 +678,7 @@ interface PendingProductImage {
  *
  * Dipakai di **dua tempat**: form **Produk baru** (gambar masih tertahan di state,
  * karena `products.addImage` butuh id produk yang baru ada setelah disimpan) dan
- * panel **Atur harga** (gambar langsung ditautkan ke produk yang sudah ada).
+ * kartu **Ubah produk** (gambar langsung ditautkan ke produk yang sudah ada).
  * Komponennya sengaja tidak tahu soal store — yang menentukan arti “tambah” dan
  * “hapus” adalah pemanggilnya — jadi satu tampilan melayani dua alur tanpa
  * bercabang, dan batasnya tetap satu angka yang sama.
@@ -439,9 +796,11 @@ function ProductImageEditor({
 export function ProductsPage() {
   const {
     catalogProducts,
+    ready,
     categories,
     modules,
     setPricing,
+    setProductBarcode,
     setCategory,
     updateProduct,
     setProductActive,
@@ -476,13 +835,12 @@ export function ProductsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [newProduct, setNewProduct] = useState<NewProductDraft>(EMPTY_PRODUCT);
-  /**
-   * Benar kalau isi kolom SKU datang dari tombol **Buat otomatis** (bukan dari
-   * ketikan pemilik toko). Selama itu, mengganti Kategori ikut mengganti SKU-nya —
-   * `PBB-<KATEGORI>-<nomor urut>` harus mengikuti kategori yang dipilih. Begitu
-   * kolomnya diketik sendiri, `skuAuto` mati dan ketikan itu tidak pernah ditimpa.
-   */
-  const [skuAuto, setSkuAuto] = useState(false);
+  /** Pemindai barcode/QR kamera, dipakai untuk mencari SKU atau mendaftarkannya. */
+  const [scanOpen, setScanOpen] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
+  /** SKU yang datang dari tautan Kasir (`/app/products?sku=…`). */
+  const scannedSkuParam = searchParams.get("sku");
+  const handledScanParam = useRef<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [adjusting, setAdjusting] = useState<string | null>(null);
   const [adjustDraft, setAdjustDraft] = useState({ quantity: "", note: "" });
@@ -496,7 +854,7 @@ export function ProductsPage() {
   /** Produk yang sedang dinyalakan/dimatikan (id), supaya tombolnya menunggu. */
   const [togglingStatus, setTogglingStatus] = useState<string | null>(null);
   /**
-   * Dialog hapus: produk yang dipilih beserta pagar dari server. Pagarnya diambil
+   * Kartu hapus: produk yang dipilih beserta pagar dari server. Pagarnya diambil
    * **sebelum** tombol Hapus aktif, supaya yang terlihat adalah hitungan sungguhan
    * (stok, penjualan, pergerakan stok, dokumen pembelian, opname) dan produk yang
    * sudah dipakai diarahkan ke “nonaktifkan saja”, bukan gagal setelah diklik.
@@ -505,14 +863,50 @@ export function ProductsPage() {
   const [pagarHapus, setPagarHapus] = useState<ProductDeletionInfo | null>(null);
   const [memeriksaHapus, setMemeriksaHapus] = useState(false);
   const [menghapusProduk, setMenghapusProduk] = useState(false);
+  /** Kartu Ubah/Ubah produk di atas daftar — digulir ke layar saat dibuka. */
+  const editorCardRef = useRef<HTMLDivElement | null>(null);
+  /** Form Produk baru: digulir ke layar, termasuk saat dibuka dari hasil scan. */
+  const createCardRef = useRef<HTMLDivElement | null>(null);
+  /** Kartu Hapus produk, juga di atas daftar (pola yang sama dengan form baru). */
+  const deleteCardRef = useRef<HTMLDivElement | null>(null);
+  /** Kartu Sesuaikan stok & Modifier produk — dua alur lain dengan pola kartu yang sama. */
+  const adjustCardRef = useRef<HTMLDivElement | null>(null);
+  const modifierCardRef = useRef<HTMLDivElement | null>(null);
 
   // Tiga izin berbeda: membuat produk & menetapkan harga adalah `product.manage`,
   // menambah/mengurangi stok adalah `stock.adjust`, dan **kategori** (struktur
-  // katalog yang menentukan kode SKU & tab kasir) diatur `category.manage` — jadi
-  // staf gudang tetap bisa membuat produk, tetapi tidak mengubah kategorinya.
+  // katalog yang menentukan tab kasir) diatur `category.manage` — jadi staf gudang
+  // tetap bisa membuat produk, tetapi tidak mengubah kategorinya.
   const canCreate = can("product.manage");
   const canAdjust = can("stock.adjust");
   const canManageCategories = can("category.manage");
+
+  /**
+   * SKU dari tautan Kasir (`/app/products?sku=…`). Efeknya menunggu `ready`:
+   * katalog Convex tiba sesudah render pertama, dan memutuskan “belum terdaftar”
+   * sebelum katalognya ada akan membuka form produk baru untuk SKU yang
+   * sebenarnya sudah dipakai — penolakan “SKU sudah dipakai” yang membingungkan.
+   */
+  useEffect(() => {
+    if (!scannedSkuParam) {
+      // Parameter sudah dibuang sesudah dipakai; kode yang sama boleh datang
+      // lagi lewat tautan berikutnya.
+      handledScanParam.current = null;
+      return;
+    }
+    if (!ready) return;
+    if (handledScanParam.current === scannedSkuParam) return;
+    handledScanParam.current = scannedSkuParam;
+    terapkanHasilScan(scannedSkuParam);
+    // Parameternya dibuang sesudah dipakai supaya refresh tidak membuka form yang
+    // sama lagi; riwayat peramban tetap bisa kembali ke halaman Kasir.
+    const next = new URLSearchParams(searchParams);
+    next.delete("sku");
+    setSearchParams(next, { replace: true });
+    // `terapkanHasilScan` sengaja tidak jadi dependensi: ia membaca katalog saat
+    // efek berjalan, dan katalog yang berubah sesudahnya tidak boleh memicu
+    // pemrosesan ulang kode yang sama.
+  }, [ready, scannedSkuParam]);
 
   /**
    * Keadaan pengelolaan kategori: form tambah, baris yang sedang diubah namanya,
@@ -594,8 +988,6 @@ export function ProductsPage() {
       nama,
     };
   }, [rencanaKatalog]);
-  /** Kode SKU yang dipakai lebih dari satu kategori — cukup diberitahukan. */
-  const kodeBentrok = useMemo(() => duplicateCategoryCodes(categories), [categories]);
   /** Nama kategori nonaktif, untuk menandai produk yang masih memakainya. */
   const kategoriNonaktif = useMemo(
     () => new Set(categories.filter((c) => !c.active).map((c) => categoryNameKey(c.name))),
@@ -606,6 +998,52 @@ export function ProductsPage() {
     () => catalogProducts.filter((product) => product.active).length,
     [catalogProducts],
   );
+  /** Produk yang sedang diubah; `null` kalau form edit belum dibuka. */
+  const editingProduct = useMemo(
+    () =>
+      editing ? catalogProducts.find((product) => product.id === editing) ?? null : null,
+    [catalogProducts, editing],
+  );
+  /** Produk yang stoknya sedang disesuaikan atau modifier-nya sedang disunting. */
+  const adjustingProduct = useMemo(
+    () =>
+      adjusting ? catalogProducts.find((product) => product.id === adjusting) ?? null : null,
+    [catalogProducts, adjusting],
+  );
+  const modifierProduct = useMemo(
+    () =>
+      editingModifiers
+        ? catalogProducts.find((product) => product.id === editingModifiers) ?? null
+        : null,
+    [catalogProducts, editingModifiers],
+  );
+
+  // Kelima kartu produk hidup di atas daftar, bukan menempel di baris tabel:
+  // membuka salah satunya langsung menggulir ke kartunya, seperti form Produk baru.
+  useEffect(() => {
+    if (!editing) return;
+    editorCardRef.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  }, [editing]);
+
+  useEffect(() => {
+    if (!hapusProduk) return;
+    deleteCardRef.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  }, [hapusProduk]);
+
+  useEffect(() => {
+    if (!showCreate) return;
+    createCardRef.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  }, [showCreate]);
+
+  useEffect(() => {
+    if (!adjusting) return;
+    adjustCardRef.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  }, [adjusting]);
+
+  useEffect(() => {
+    if (!editingModifiers) return;
+    modifierCardRef.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  }, [editingModifiers]);
 
   function gagalKategori(cause: unknown) {
     setError(cause);
@@ -632,7 +1070,7 @@ export function ProductsPage() {
       const dibuat = await createCategory({ name: keputusan.value.name });
       setKategoriBaru("");
       setNotice(
-        `Kategori ${dibuat.name} ditambahkan — kode SKU-nya ${categorySkuCode(dibuat.name)}. Produk baru yang memakai kategori ini memakai kode itu, mis. ${PRODUCT_SKU_PREFIX}-${categorySkuCode(dibuat.name)}-000042.`,
+        `Kategori ${dibuat.name} ditambahkan dan kini bisa dipilih untuk produk baru. SKU tidak ikut berubah: formatnya ${PRODUCT_SKU_PREFIX}-<nomor urut>.`,
       );
     } catch (cause) {
       gagalKategori(cause);
@@ -687,12 +1125,8 @@ export function ProductsPage() {
         name: keputusan.value.name,
       });
       setKategoriUbah(null);
-      const kodeLama = categorySkuCode(hasil.previousName);
-      const kodeBaru = categorySkuCode(hasil.name);
       setNotice(
-        hasil.skuCodeChanged
-          ? `Kategori ${hasil.previousName} menjadi ${hasil.name}. Kode SKU kategori ini ${kodeLama} → ${kodeBaru}; SKU yang sudah ada tidak ditulis ulang, jadi ${hasil.previousName} tetap terbaca di tabel sampai produknya dipindah atau dibuat ulang.`
-          : `Kategori ${hasil.previousName} menjadi ${hasil.name}. Kode SKU-nya tidak berubah (${kodeBaru}), jadi SKU yang sudah ada tetap cocok.`,
+        `Kategori ${hasil.previousName} menjadi ${hasil.name}. SKU produk tidak ditulis ulang — nama kategori bukan bagian dari SKU, jadi kode yang sudah tercetak di label tetap sah.`,
       );
     } catch (cause) {
       gagalKategori(cause);
@@ -748,25 +1182,6 @@ export function ProductsPage() {
   /** Subkategori milik satu kategori — urut seperti dibaca store. */
   function subkategoriDari(categoryId: string): StoreSubcategory[] {
     return subcategories.filter((row) => row.categoryId === categoryId);
-  }
-
-  /** Id kategori dari namanya (halaman memakai nama; store memakai id). */
-  function kategoriIdDari(nama: string): string | undefined {
-    const wanted = nama.trim();
-    return wanted.length === 0
-      ? undefined
-      : categories.find((row) => row.name === wanted)?.id;
-  }
-
-  /** Benar kalau subkategori ini ada tapi sedang nonaktif — hanya ditandai, tetap terbaca. */
-  function subkategoriNonaktif(categoryId: string | undefined, nama: string): boolean {
-    if (!categoryId) return false;
-    return subcategories.some(
-      (row) =>
-        row.categoryId === categoryId &&
-        !subcategoryIsActive(row) &&
-        subcategoryNameKey(row.name) === subcategoryNameKey(nama),
-    );
   }
 
   /**
@@ -941,12 +1356,11 @@ export function ProductsPage() {
   }
 
   /**
-   * Saran SKU untuk kategori yang sedang dipilih. Dipakai tombol **Buat otomatis**
-   * dan saat kategori diganti selama kolom SKU masih berasal dari tombol itu.
+   * Saran SKU untuk tombol **Buat otomatis** — nomor berikutnya dari daftar SKU
+   * yang sudah ada. Kategori tidak ikut menentukan: formatnya `PBB-<nomor urut>`.
    */
-  function saranSkuKategori(category: string): string {
+  function saranSku(): string {
     return suggestProductSku({
-      category,
       // Termasuk produk nonaktif: SKU-nya tetap terpakai, jadi nomor baru tidak
       // boleh menabraknya.
       takenSkus: catalogProducts.map((product) => product.sku),
@@ -971,6 +1385,10 @@ export function ProductsPage() {
         subcategory: newProduct.subcategory.trim() || undefined,
         unit: newProduct.unit.trim() || "PCS",
         openingStock: stock,
+        barcode: newProduct.barcode.trim() || undefined,
+        barcodeType: newProduct.barcode.trim()
+          ? newProduct.barcodeType
+          : undefined,
       });
       // Gambar menyusul setelah produknya ada: `addImage` butuh id produk, dan
       // berkasnya memang dikirim ke penyimpanan, bukan dititipkan ke `create`.
@@ -987,7 +1405,6 @@ export function ProductsPage() {
       setPendingImages([]);
 
       setNewProduct(EMPTY_PRODUCT);
-      setSkuAuto(false);
       setShowCreate(false);
       const imagesNote =
         attached > 0 ? ` ${attached} gambar ikut tersimpan (${productImageSlots(attached)}).` : "";
@@ -1087,11 +1504,27 @@ export function ProductsPage() {
     }
   }
 
+  /**
+   * Buka kartu **Sesuaikan stok**. Seperti keempat alur produk lainnya, hanya satu
+   * kartu terbuka pada satu waktu: form Produk baru, kartu Ubah produk, kartu
+   * Hapus produk, dan kartu Modifier ditutup lebih dulu.
+   */
   function openAdjuster(product: StoreProduct) {
+    setShowCreate(false);
+    setPendingImages([]);
+    closeEditor();
+    tutupHapus();
+    closeModifierEditor();
     setAdjusting(product.id);
     setAdjustDraft({ quantity: "", note: "" });
     setError(null);
     setNotice(null);
+  }
+
+  function tutupAdjuster() {
+    setAdjusting(null);
+    setAdjustDraft({ quantity: "", note: "" });
+    setError(null);
   }
 
   async function submitAdjustment(product: StoreProduct) {
@@ -1125,7 +1558,14 @@ export function ProductsPage() {
   // Modifier item milik modul F&B; mengosongkan daftar tetap boleh walau modul mati.
   const fnbOn = modules.activeVerticals.includes("fnb");
 
+  /** Buka kartu **Modifier produk** — satu kartu pada satu waktu, seperti alur lainnya. */
   function openModifierEditor(product: StoreProduct) {
+    setShowCreate(false);
+    setPendingImages([]);
+    closeEditor();
+    tutupHapus();
+    setAdjusting(null);
+    setAdjustDraft({ quantity: "", note: "" });
     setEditingModifiers(product.id);
     setModifierDraft(
       (product.modifiers ?? []).map((group) => ({
@@ -1191,10 +1631,68 @@ export function ProductsPage() {
     }
   }
 
+  /**
+   * Membuka form Produk baru dengan SKU yang sudah terisi dari hasil scan.
+   *
+   * Nama & harga tetap harus diisi manusia: barcode hanya memberi kode, bukan
+   * nama barang atau harganya. Form yang sama dipakai tombol “Tambah produk”,
+   * jadi tidak ada jalur pembuatan produk kedua yang bisa berbeda aturannya.
+   */
+  function bukaProdukBaruDenganSku(code: string) {
+    setEditing(null);
+    setDraft(null);
+    setShowCreate(true);
+    setNewProduct({ ...EMPTY_PRODUCT, sku: code });
+    setPendingImages([]);
+    setError(null);
+    setNotice(
+      `Kode ${code} belum terdaftar — SKU-nya sudah terisi. Lengkapi nama & harganya, lalu simpan.`,
+    );
+    tutupHapus();
+    setAdjusting(null);
+    setAdjustDraft({ quantity: "", note: "" });
+    closeModifierEditor();
+  }
+
+  /**
+   * Menerapkan satu kode hasil scan di halaman Produk & Stok: produk yang sudah
+   * ada langsung dibuka untuk diubah, kode baru mengisi SKU di form Produk baru.
+   * Akun tanpa izin membuat produk hanya mendapat jawaban apa adanya.
+   */
+  function terapkanHasilScan(raw: string) {
+    const code = normalizeScannedCode(raw);
+    if (code.length === 0) return;
+    const ketemu = findProductByScannedCode(catalogProducts, code);
+    if (ketemu) {
+      openEditor(ketemu);
+      setNotice(
+        `Barcode ${code} cocok dengan SKU ${ketemu.sku} — ${ketemu.name}.`,
+      );
+      return;
+    }
+    if (canCreate) {
+      bukaProdukBaruDenganSku(code);
+      return;
+    }
+    setError(
+      `Belum ada produk dengan SKU/barcode ${code}. Akun ini tidak memegang izin membuat produk — minta pemilik atau manajer mendaftarkannya.`,
+    );
+  }
+
   function openEditor(product: StoreProduct) {
     setEditing(product.id);
     setDraft(draftFrom(product));
     setError(null);
+    // Satu form pada satu waktu: form Produk baru, kartu hapus, kartu stok, dan
+    // kartu modifier ditutup, supaya layar tidak menampilkan dua form yang bisa
+    // tertukar. Gambar yang belum diunggah ikut dibuang, sama seperti saat form
+    // ditutup dari tombol header.
+    setShowCreate(false);
+    setPendingImages([]);
+    tutupHapus();
+    setAdjusting(null);
+    setAdjustDraft({ quantity: "", note: "" });
+    closeModifierEditor();
   }
 
   function closeEditor() {
@@ -1221,6 +1719,26 @@ export function ProductsPage() {
         cost: Number(draft.cost) || 0,
       });
       const pesan: string[] = [];
+      // Barcode/QR punya jalur sendiri (audit sendiri), seperti harga & kategori.
+      // Dialog form sudah memvalidasi, tetapi server tetap memeriksa ulang.
+      const barcodeBaru = draft.barcode.trim();
+      if (
+        barcodeBaru !== (product.barcode ?? "") ||
+        draft.barcodeType !== (product.barcodeType ?? "barcode")
+      ) {
+        const kode = await setProductBarcode({
+          productId,
+          barcode: barcodeBaru,
+          barcodeType: draft.barcodeType,
+        });
+        if (kode.changed) {
+          pesan.push(
+            kode.barcode.length > 0
+              ? `Barcode/QR ${kode.barcode} tersimpan — kasir bisa memindainya selain lewat SKU.`
+              : `Kode tambahan ${identitas.name} dilepas — kasir kembali hanya memakai SKU.`,
+          );
+        }
+      }
       if (identitas.changed.includes("name")) {
         pesan.push(`Nama produk kini “${identitas.name}”.`);
       }
@@ -1245,16 +1763,15 @@ export function ProductsPage() {
           .map((t) => ({ minQty: Number(t.minQty), price: Number(t.price) })),
       });
 
-      // Kategori menentukan kode di tengah SKU, jadi perubahannya lewat jalur
-      // sendiri; SKU sebelum & sesudah datang dari store/server, bukan dihitung
-      // ulang di halaman ini.
+      // Kategori & subkategori punya jalur sendiri; SKU tidak ikut berubah dan
+      // balikannya dipakai apa adanya (bukan dihitung ulang di halaman ini).
       const kategoriBaru = draft.category.trim();
       const subkategoriBaru = draft.subcategory.trim();
       const kategoriBerubah = kategoriBaru !== kategoriDraft(product.category);
       const subkategoriBerubah = (product.subcategory ?? "") !== subkategoriBaru;
       if (kategoriBerubah || subkategoriBerubah) {
-        // Satu panggilan untuk penempatan utuh: kategori (yang menentukan SKU) dan
-        // subkategori (label katalog) tidak pernah tersimpan setengah-setengah.
+        // Satu panggilan untuk penempatan utuh: kategori dan subkategori (label
+        // katalog) tidak pernah tersimpan setengah-setengah.
         const hasil = await setCategory({
           productId,
           category: kategoriBaru,
@@ -1263,9 +1780,7 @@ export function ProductsPage() {
         if (kategoriBerubah) {
           const label = kategoriBaru.length > 0 ? `“${kategoriBaru}”` : "Tanpa kategori";
           pesan.push(
-            hasil.sku === hasil.previousSku
-              ? `Kategori ${identitas.name} kini ${label}; SKU ${hasil.sku} diketik sendiri, jadi tidak ikut berubah.`
-              : `Kategori ${identitas.name} kini ${label} — SKU ikut menyesuaikan dari ${hasil.previousSku} menjadi ${hasil.sku}.`,
+            `Kategori ${identitas.name} kini ${label}; SKU ${hasil.sku} tidak ikut berubah.`,
           );
         }
         if (subkategoriBerubah) {
@@ -1304,7 +1819,7 @@ export function ProductsPage() {
       await setProductActive(product.id, aktifBaru);
       setNotice(productStatusSentence(product.name, aktifBaru, product.stock));
       // Baris yang sedang dibuka ikut menutup kalau produknya dimatikan: panel
-      // “Atur harga” produk nonaktif hanya menyesatkan (harga tidak bisa dijual).
+      // Kartu “Ubah produk” untuk produk nonaktif hanya menyesatkan (tidak dijual).
       if (!aktifBaru && editing === product.id) closeEditor();
     } catch (cause) {
       setError(cause);
@@ -1314,11 +1829,20 @@ export function ProductsPage() {
   }
 
   /**
-   * Buka dialog hapus: pagarnya diambil dari server lebih dulu, jadi yang tampil
+   * Buka kartu hapus: pagarnya diambil dari server lebih dulu, jadi yang tampil
    * adalah hitungan sungguhan dan produk yang sudah dipakai tahu alasannya
    * sebelum tombol Hapus ditekan.
    */
   async function bukaHapus(product: StoreProduct) {
+    // Kartu hapus memakai pola yang sama dengan form Produk baru: satu kartu di
+    // atas daftar, jadi kartu lain yang terbuka ditutup lebih dulu — termasuk
+    // form Produk baru beserta gambar yang belum sempat diunggah.
+    if (editing) closeEditor();
+    setShowCreate(false);
+    setPendingImages([]);
+    setAdjusting(null);
+    setAdjustDraft({ quantity: "", note: "" });
+    closeModifierEditor();
     setHapusProduk(product);
     setPagarHapus(null);
     setMemeriksaHapus(true);
@@ -1377,24 +1901,49 @@ export function ProductsPage() {
             </p>
           </div>
         </div>
-        {canCreate && (
+        <div className="flex flex-wrap items-center gap-2">
+          {/*
+            Pemindai kamera: hasil scan dicocokkan ke SKU (termasuk produk
+            nonaktif) dan kode yang belum terdaftar langsung mengisi SKU di form
+            Produk baru — jadi menambah produk dari barcode tidak perlu menyalin
+            angkanya dengan tangan.
+          */}
           <Button
             type="button"
-            variant={showCreate ? "secondary" : "default"}
-            onClick={() => {
-              setShowCreate((open) => !open);
-              // Menutup form membuang gambar yang belum jadi diunggah — produknya
-              // tidak disimpan, jadi gambar itu memang belum punya tempat.
-              setPendingImages([]);
-              setSkuAuto(false);
-              setError(null);
-              setNotice(null);
-            }}
+            variant="outline"
+            className="gap-2"
+            data-testid="produk-scan"
+            onClick={() => setScanOpen(true)}
           >
-            {showCreate ? <X className="size-4" /> : <Plus className="size-4" />}
-            {showCreate ? "Tutup form" : "Tambah produk"}
+            <ScanBarcode className="size-4" />
+            Scan barcode / QR
           </Button>
-        )}
+          {canCreate && (
+            <Button
+              type="button"
+              variant={showCreate ? "secondary" : "default"}
+              onClick={() => {
+                const membuka = !showCreate;
+                setShowCreate(membuka);
+                // Menutup form membuang gambar yang belum jadi diunggah — produknya
+                // tidak disimpan, jadi gambar itu memang belum punya tempat.
+                setPendingImages([]);
+                setError(null);
+                setNotice(null);
+                if (membuka) {
+                  closeEditor();
+                  tutupHapus();
+                  setAdjusting(null);
+                  setAdjustDraft({ quantity: "", note: "" });
+                  closeModifierEditor();
+                }
+              }}
+            >
+              {showCreate ? <X className="size-4" /> : <Plus className="size-4" />}
+              {showCreate ? "Tutup form" : "Tambah produk"}
+            </Button>
+          )}
+        </div>
       </header>
 
       {/*
@@ -1403,6 +1952,7 @@ export function ProductsPage() {
         halaman Pembelian — dan toko baru belum punya supplier maupun PO.
       */}
       {showCreate && canCreate && (
+        <div ref={createCardRef} className="scroll-mt-4">
         <Card className="border-primary/30">
           <CardContent className="space-y-4 pt-6">
             <div>
@@ -1414,202 +1964,51 @@ export function ProductsPage() {
               </CardDescription>
             </div>
 
-            <div className="grid gap-3 md:grid-cols-3">
-              <label className="space-y-1 text-xs text-muted-foreground">
-                Nama produk
-                <Input
-                  value={newProduct.name}
-                  placeholder="Kopi Susu Gula Aren"
-                  aria-label="Nama produk baru"
-                  onChange={(e) => {
-                    const name = e.target.value;
-                    setNewProduct((current) => ({ ...current, name }));
-                  }}
-                />
-              </label>
-              {/**
-                SKU sengaja **tidak** diisi otomatis dari nama produk: kolom yang
-                dibiarkan kosong berarti “buatkan untuk saya”, dan servernya yang
-                menentukan nomor finalnya. Tombol di sampingnya hanya mengisi kolom
-                lebih dulu (dari daftar SKU yang sudah ada), supaya pemilik toko bisa
-                melihat & mengubahnya sebelum menyimpan — dan selama isinya datang
-                dari tombol itu, mengganti Kategori ikut mengganti kode SKU-nya.
-              */}
-              <label className="space-y-1 text-xs text-muted-foreground">
-                SKU <span className="font-normal">(opsional)</span>
-                <div className="flex items-center gap-2">
-                  <Input
-                    className="font-mono"
-                    value={newProduct.sku}
-                    placeholder={`${PRODUCT_SKU_PREFIX}-SAN-000042`}
-                    aria-label="SKU produk baru"
-                    onChange={(e) => {
-                      // Diketik sendiri = milik pemilik toko; berhenti mengikuti
-                      // kategori sampai tombolnya ditekan lagi.
-                      setSkuAuto(false);
-                      setNewProduct((current) => ({ ...current, sku: e.target.value }));
-                    }}
-                  />
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="shrink-0"
-                    aria-label="Buat SKU otomatis"
-                    title={
-                      newProduct.sku.trim().length > 0
-                        ? "Kosongkan kolom SKU lebih dulu untuk memakai tombol ini"
-                        : "Isi kolom SKU dari daftar SKU yang sudah ada"
-                    }
-                    disabled={newProduct.sku.trim().length > 0}
-                    onClick={() => {
-                      setSkuAuto(true);
-                      setNewProduct((current) => ({
-                        ...current,
-                        sku: saranSkuKategori(current.category),
-                      }));
-                    }}
-                  >
-                    <Sparkles className="size-3.5" /> Buat otomatis
-                  </Button>
-                </div>
-                <span className="block text-[11px] font-normal text-muted-foreground">
-                  Kosongkan dan simpan untuk dibuat otomatis &amp; unik — format{" "}
-                  <span className="font-mono">
-                    {PRODUCT_SKU_PREFIX}-&lt;KATEGORI&gt;-&lt;nomor urut&gt;
-                  </span>{" "}
-                  (contoh <span className="font-mono">{PRODUCT_SKU_PREFIX}-SAN-000042</span>). Tombol{" "}
-                  <strong>Buat otomatis</strong> mengisi kolomnya dari daftar SKU yang sudah ada,
-                  dan selama isinya berasal dari tombol itu, <strong>mengganti Kategori ikut
-                  mengganti kode SKU-nya</strong>.
-                </span>
-              </label>
-              <label className="space-y-1 text-xs text-muted-foreground">
-                Kategori
-                <select
-                  className="w-full rounded border border-border bg-background px-2 py-2 text-sm text-foreground"
-                  value={newProduct.category}
-                  aria-label="Kategori produk baru"
-                  onChange={(e) => {
-                    const category = e.target.value;
-                    setNewProduct((current) => ({
-                      ...current,
-                      category,
-                      // Subkategori hanya berlaku di dalam kategori; pindah
-                      // kategori mengosongkannya supaya labelnya tidak menggantung.
-                      subcategory: category === current.category ? current.subcategory : "",
-                      // SKU dari tombol mengikuti kategori baru; SKU yang diketik
-                      // pemilik toko dibiarkan apa adanya.
-                      sku: skuAuto ? saranSkuKategori(category) : current.sku,
-                    }));
-                  }}
-                >
-                  <option value="">Tanpa kategori</option>
-                  {/**
-                    Hanya kategori aktif untuk produk **baru**; pilihan yang sedang
-                    terpilih ikut ditampilkan walau kategorinya baru saja
-                    dinonaktifkan di tempat lain, supaya layarnya tidak diam-diam
-                    menampilkan kategori lain dari yang akan dikirim.
-                  */}
-                  {selectableCategoryNames(categories, newProduct.category).map((nama) => (
-                    <option key={nama} value={nama}>
-                      {nama}
-                      {kategoriNonaktif.has(categoryNameKey(nama)) ? " (nonaktif)" : ""}
-                    </option>
-                  ))}
-                </select>
-                <span className="block text-[11px] font-normal text-muted-foreground">
-                  {kategoriAktif < categories.length
-                    ? `${categories.length - kategoriAktif} kategori nonaktif tidak ditawarkan di sini — aktifkan dulu di kartu “Kategori produk”.`
-                    : "Kategori diatur di kartu “Kategori produk” di bawah daftar."}
-                </span>
-              </label>
-              <label className="space-y-1 text-xs text-muted-foreground">
-                Subkategori (opsional)
-                <select
-                  className="w-full rounded border border-border bg-background px-2 py-2 text-sm text-foreground disabled:opacity-60"
-                  value={newProduct.subcategory}
-                  aria-label="Subkategori produk baru"
-                  disabled={newProduct.category.trim().length === 0}
-                  onChange={(e) =>
-                    setNewProduct((current) => ({
-                      ...current,
-                      subcategory: e.target.value,
-                    }))
-                  }
-                >
-                  <option value="">Tanpa subkategori</option>
-                  {/**
-                    Subkategori dipilih dari daftar yang dibuat **di bawah** kategori
-                    itu — bukan teks bebas. Yang sedang terpilih tetap ditampilkan
-                    walau subkategorinya baru dinonaktifkan di tempat lain.
-                  */}
-                  {selectableSubcategoryNames(
-                    subcategories,
-                    kategoriIdDari(newProduct.category),
-                    newProduct.subcategory,
-                  ).map((nama) => (
-                    <option key={nama} value={nama}>
-                      {nama}
-                      {subkategoriNonaktif(kategoriIdDari(newProduct.category), nama)
-                        ? " (nonaktif)"
-                        : ""}
-                    </option>
-                  ))}
-                </select>
-                <span className="block text-[11px] font-normal text-muted-foreground">
-                  Dibuat di bawah kategorinya di kartu “Kategori produk”. Ikut dikirim ke API
-                  &amp; webhook, tetapi tidak mengubah SKU maupun tab kasir.
-                </span>
-              </label>
-              <label className="space-y-1 text-xs text-muted-foreground">
-                Harga jual
-                <Input
-                  inputMode="numeric"
-                  value={newProduct.price}
-                  placeholder="22000"
-                  aria-label="Harga jual produk baru"
-                  onChange={(e) =>
-                    setNewProduct((current) => ({ ...current, price: e.target.value }))
-                  }
-                />
-              </label>
-              <label className="space-y-1 text-xs text-muted-foreground">
-                Harga beli (opsional)
-                <Input
-                  inputMode="numeric"
-                  value={newProduct.cost}
-                  placeholder="12000"
-                  aria-label="Harga beli produk baru"
-                  onChange={(e) =>
-                    setNewProduct((current) => ({ ...current, cost: e.target.value }))
-                  }
-                />
-              </label>
-              <label className="space-y-1 text-xs text-muted-foreground">
-                Satuan dasar
-                <Input
-                  value={newProduct.unit}
-                  placeholder="PCS"
-                  aria-label="Satuan dasar produk baru"
-                  onChange={(e) =>
-                    setNewProduct((current) => ({ ...current, unit: e.target.value }))
-                  }
-                />
-              </label>
-              <label className="space-y-1 text-xs text-muted-foreground">
-                Stok awal
-                <Input
-                  inputMode="numeric"
-                  value={newProduct.openingStock}
-                  placeholder="0"
-                  aria-label="Stok awal produk baru"
-                  onChange={(e) =>
-                    setNewProduct((current) => ({ ...current, openingStock: e.target.value }))
-                  }
-                />
-              </label>
-            </div>
+            {/*
+              Kolom inti memakai komponen yang **sama** dengan kartu Ubah produk
+              (`ProductCoreFields`). Urutan nama → SKU → kategori → subkategori →
+              harga jual → harga beli → satuan → stok karena itu tidak bisa berbeda
+              diam-diam antara alur membuat dan mengubah produk; yang berbeda hanya
+              arti kolom stok (stok awal vs stok saat ini) dan tombol SKU otomatis.
+            */}
+            <ProductCoreFields
+              mode="create"
+              values={newProduct}
+              onChange={(patch) =>
+                setNewProduct((current) => ({ ...current, ...patch }))
+              }
+              categories={categories}
+              subcategories={subcategories}
+              kategoriNonaktif={kategoriNonaktif}
+              kategoriAktif={kategoriAktif}
+              stock={{
+                value: newProduct.openingStock,
+                onChange: (value) =>
+                  setNewProduct((current) => ({ ...current, openingStock: value })),
+              }}
+              skuSuggestion={{
+                disabled: newProduct.sku.trim().length > 0,
+                suggest: saranSku,
+              }}
+            />
+
+            {/*
+              Kode tambahan untuk kasir: satu kolom dengan pratinjau, tombol
+              otomatis dari SKU, galeri/kamera, dan kolom ketik manual. Nilainya
+              ikut draf dan baru ditulis saat produk disimpan.
+            */}
+            <ProductBarcodeField
+              fieldId="produk-baru"
+              scope="produk baru"
+              sku={newProduct.sku}
+              value={{
+                barcode: newProduct.barcode,
+                barcodeType: newProduct.barcodeType,
+              }}
+              onChange={(patch) =>
+                setNewProduct((current) => ({ ...current, ...patch }))
+              }
+            />
 
             {/*
               Gambar ikut di sini sejak awal: toko baru biasanya sudah punya foto
@@ -1647,21 +2046,558 @@ export function ProductsPage() {
               <p className="text-xs text-muted-foreground">
                 Gambar yang dipilih di atas ikut tersimpan bersama produknya. Satuan besar (Dus/Pak),
                 harga bertingkat, dan gambar yang sudah tersimpan diatur belakangan lewat tombol{" "}
-                <strong>Atur harga</strong>.
+                <strong>Ubah produk</strong> pada baris produknya.
               </p>
             </div>
           </CardContent>
         </Card>
+        </div>
+      )}
+
+      {/*
+        Kartu **Ubah produk**: sengaja memakai pola yang sama dengan form Produk
+        baru — satu kartu di atas daftar, urutan kolom yang sama, bagian gambar yang
+        sama, dan tombol simpan di bawah. Bedanya hanya hal yang memang hanya milik
+        produk tersimpan: harga bertingkat/konversi satuan dan tombol hapus.
+
+        Stok **tidak** ikut disimpan di sini: ia punya jalur sendiri (Sesuaikan
+        stok) supaya setiap pergerakan stok tetap punya alasan & jejak ledger.
+      */}
+      {editingProduct && draft && (
+        <div ref={editorCardRef} className="scroll-mt-4">
+          <Card className="border-primary/30">
+            <CardContent className="space-y-4 pt-6">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <CardTitle className="text-base">Ubah produk</CardTitle>
+                  <CardDescription className="mt-1">
+                    Perbaiki nama, SKU, kategori, harga, atau gambar{" "}
+                    <strong>{editingProduct.name}</strong>. Formnya sama dengan saat membuat
+                    produk baru; stok diubah lewat tombol “Sesuaikan stok” di daftar.
+                  </CardDescription>
+                </div>
+                <Button type="button" size="sm" variant="ghost" onClick={closeEditor}>
+                  <X className="size-4" /> Tutup
+                </Button>
+              </div>
+
+              <ProductCoreFields
+                mode="edit"
+                productLabel={editingProduct.name}
+                values={draft}
+                onChange={(patch) =>
+                  setDraft((current) => (current ? { ...current, ...patch } : current))
+                }
+                categories={categories}
+                subcategories={subcategories}
+                kategoriNonaktif={kategoriNonaktif}
+                kategoriAktif={kategoriAktif}
+                stock={{ value: String(editingProduct.stock) }}
+                skuSuggestion={{
+                  // Selalu hidup: kolom di kartu edit sudah berisi SKU lama, jadi
+                  // tombol mati selama kolom terisi tidak akan pernah bisa dipakai.
+                  // Menekannya hanya menampilkan konfirmasi; isi kolom berganti
+                  // setelah “Ya, ganti SKU”, dan tersimpan lewat “Simpan perubahan”.
+                  disabled: false,
+                  suggest: saranSku,
+                }}
+              />
+
+              <ProductBarcodeField
+                fieldId="produk-ubah"
+                scope="produk"
+                sku={draft.sku}
+                value={{ barcode: draft.barcode, barcodeType: draft.barcodeType }}
+                onChange={(patch) =>
+                  setDraft((current) => (current ? { ...current, ...patch } : current))
+                }
+              />
+
+              {/*
+                Bagian khusus produk tersimpan: harga bertingkat dan konversi satuan.
+                Form Produk baru menyebut keduanya “diatur belakangan”; di sinilah
+                tempatnya, dengan gaya bagian yang sama seperti bagian gambar.
+              */}
+              <div className="rounded-lg border border-border bg-background p-3">
+                <div className="mb-3">
+                  <p className="text-sm font-medium">Harga lanjutan</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Dipakai modul Grosir: satuan besar (mis. DUS = 24 PCS) dan harga bertingkat
+                    menurut jumlah beli. Biarkan kosong kalau produk ini hanya memakai harga dasar.
+                  </p>
+                </div>
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label>Konversi satuan</Label>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        disabled={!wholesaleOn}
+                        onClick={() =>
+                          setDraft({
+                            ...draft,
+                            units: [...draft.units, { code: "", factor: "" }],
+                          })
+                        }
+                      >
+                        + Satuan
+                      </Button>
+                    </div>
+                    {draft.units.length === 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        Belum ada satuan besar (mis. DUS = 24 Pcs).
+                      </p>
+                    )}
+                    {draft.units.map((unit, index) => (
+                      <div key={index} className="flex items-center gap-2">
+                        <Input
+                          aria-label={`Kode satuan ${index + 1}`}
+                          value={unit.code}
+                          disabled={!wholesaleOn}
+                          placeholder="DUS"
+                          onChange={(e) => {
+                            const units = [...draft.units];
+                            units[index] = { ...unit, code: e.target.value };
+                            setDraft({ ...draft, units });
+                          }}
+                        />
+                        <Input
+                          aria-label={`Faktor satuan ${index + 1}`}
+                          value={unit.factor}
+                          disabled={!wholesaleOn}
+                          inputMode="numeric"
+                          placeholder="24"
+                          onChange={(e) => {
+                            const units = [...draft.units];
+                            units[index] = { ...unit, factor: e.target.value };
+                            setDraft({ ...draft, units });
+                          }}
+                        />
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          disabled={!wholesaleOn}
+                          aria-label={`Hapus satuan ${index + 1}`}
+                          onClick={() =>
+                            setDraft({
+                              ...draft,
+                              units: draft.units.filter((_, i) => i !== index),
+                            })
+                          }
+                        >
+                          <X className="size-3.5" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label>Harga bertingkat</Label>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        disabled={!wholesaleOn}
+                        onClick={() =>
+                          setDraft({
+                            ...draft,
+                            tiers: [...draft.tiers, { minQty: "", price: "" }],
+                          })
+                        }
+                      >
+                        + Tier
+                      </Button>
+                    </div>
+                    {draft.tiers.length === 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        Belum ada tier; semua kuantitas memakai harga dasar.
+                      </p>
+                    )}
+                    {draft.tiers.map((tier, index) => (
+                      <div key={index} className="flex items-center gap-2">
+                        <Input
+                          aria-label={`Kuantitas tier ${index + 1}`}
+                          value={tier.minQty}
+                          disabled={!wholesaleOn}
+                          inputMode="numeric"
+                          placeholder="24"
+                          onChange={(e) => {
+                            const tiers = [...draft.tiers];
+                            tiers[index] = { ...tier, minQty: e.target.value };
+                            setDraft({ ...draft, tiers });
+                          }}
+                        />
+                        <Input
+                          aria-label={`Harga tier ${index + 1}`}
+                          value={tier.price}
+                          disabled={!wholesaleOn}
+                          inputMode="numeric"
+                          placeholder="4500"
+                          onChange={(e) => {
+                            const tiers = [...draft.tiers];
+                            tiers[index] = { ...tier, price: e.target.value };
+                            setDraft({ ...draft, tiers });
+                          }}
+                        />
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          disabled={!wholesaleOn}
+                          aria-label={`Hapus tier ${index + 1}`}
+                          onClick={() =>
+                            setDraft({
+                              ...draft,
+                              tiers: draft.tiers.filter((_, i) => i !== index),
+                            })
+                          }
+                        >
+                          <X className="size-3.5" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <p className="mt-3 text-xs text-muted-foreground">
+                  Tier selalu dihitung dalam satuan dasar
+                  {wholesaleOn
+                    ? " — harga tier tidak boleh lebih mahal dari harga dasar."
+                    : "."}
+                </p>
+              </div>
+
+              {/*
+                Gambar produk ada di kartu ini juga: unggahannya **langsung**
+                tersimpan (tidak menunggu “Simpan perubahan”), karena berkasnya
+                sudah punya tempat di penyimpanan begitu ditautkan ke produk.
+              */}
+              {canCreate && (
+                <div className="rounded-lg border border-border bg-background p-3">
+                  <ProductImageEditor
+                    scope={editingProduct.name}
+                    images={editingProduct.images ?? []}
+                    onAddFiles={(files) => void addImages(editingProduct, files)}
+                    onRemoveImage={(imageId) =>
+                      void removeImage(editingProduct, imageId)
+                    }
+                    busy={uploadingImage}
+                    busyImageId={removingImage}
+                    canEdit
+                    note={
+                      (editingProduct.images ?? []).length === 0
+                        ? `${describeProductImages(0)} — unggah foto produk supaya kasir gampang memastikan barangnya. Unggahan langsung tersimpan, tanpa menekan “Simpan perubahan”.`
+                        : "Gambar pertama dipakai sebagai thumbnail di daftar produk. Unggahan dan penghapusan gambar langsung tersimpan, tanpa menekan “Simpan perubahan”."
+                    }
+                  />
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void save(editingProduct)}
+                >
+                  <Save className="size-4" />
+                  {saving ? "Menyimpan…" : "Simpan perubahan"}
+                </Button>
+                <Button type="button" variant="outline" onClick={closeEditor}>
+                  Batal
+                </Button>
+                {canCreate && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="text-destructive"
+                    aria-label={`Hapus produk ${editingProduct.name} dari form`}
+                    onClick={() => void bukaHapus(editingProduct)}
+                  >
+                    <Trash2 className="size-4" /> Hapus produk
+                  </Button>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  Nama, SKU, harga, dan kategori disimpan bersama. Perubahan harga langsung
+                  dipakai kasir setelah tombol simpan ditekan.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/*
+        Kartu **Sesuaikan stok**: dulu menempel sebagai baris tambahan di dalam
+        tabel, sekarang satu kartu di atas daftar dengan pola yang sama seperti form
+        Produk baru — judul + penjelasan, kolomnya, lalu tombol keputusan di bawah.
+        Stok sengaja tidak ikut disimpan di kartu Ubah produk supaya setiap
+        pergerakan stok punya alasan & jejak ledger; di sinilah jalurnya.
+      */}
+      {adjustingProduct && canAdjust && (
+        <div ref={adjustCardRef} className="scroll-mt-4">
+          <Card className="border-primary/30">
+            <CardContent className="space-y-4 pt-6">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <ArrowUpDown className="size-4 text-primary" /> Sesuaikan stok
+                  </CardTitle>
+                  <CardDescription className="mt-1">
+                    {adjustingProduct.name} ·{" "}
+                    <span className="font-mono">{adjustingProduct.sku}</span> — stok saat ini{" "}
+                    <strong className="font-mono text-foreground">
+                      {adjustingProduct.stock}
+                    </strong>{" "}
+                    {adjustingProduct.unit ?? "PCS"} di lokasi jual.
+                  </CardDescription>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  aria-label="Tutup kartu sesuaikan stok"
+                  onClick={tutupAdjuster}
+                >
+                  <X className="size-4" /> Tutup
+                </Button>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-4">
+                <label className="space-y-1 text-xs text-muted-foreground">
+                  Jumlah penyesuaian
+                  <Input
+                    className="font-mono"
+                    inputMode="numeric"
+                    value={adjustDraft.quantity}
+                    placeholder="12"
+                    aria-label={`Jumlah penyesuaian stok ${adjustingProduct.name}`}
+                    onChange={(e) =>
+                      setAdjustDraft((current) => ({
+                        ...current,
+                        quantity: e.target.value,
+                      }))
+                    }
+                  />
+                  <span className="block text-[11px] font-normal text-muted-foreground">
+                    Pakai angka <strong>negatif</strong> untuk mengurangi (rusak, hilang, salah hitung).
+                  </span>
+                </label>
+                <label className="space-y-1 text-xs text-muted-foreground md:col-span-2">
+                  Catatan (opsional)
+                  <Input
+                    value={adjustDraft.note}
+                    placeholder="Barang datang tanpa PO"
+                    aria-label={`Catatan penyesuaian stok ${adjustingProduct.name}`}
+                    onChange={(e) =>
+                      setAdjustDraft((current) => ({
+                        ...current,
+                        note: e.target.value,
+                      }))
+                    }
+                  />
+                  <span className="block text-[11px] font-normal text-muted-foreground">
+                    Tersimpan bersama penyesuaiannya di ledger stok, jadi bisa ditelusuri nanti.
+                  </span>
+                </label>
+                <div className="flex flex-col justify-center rounded-lg bg-secondary/40 px-3 py-2">
+                  <p className="text-xs text-muted-foreground">
+                    Stok jadi{" "}
+                    <span className="font-mono text-lg font-semibold text-foreground">
+                      {adjustingProduct.stock + Math.trunc(Number(adjustDraft.quantity) || 0)}
+                    </span>
+                  </p>
+                  <p className="text-[11px] text-muted-foreground">
+                    {adjustingProduct.unit ?? "PCS"} di lokasi jual
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  type="button"
+                  aria-label={`Simpan penyesuaian stok ${adjustingProduct.name}`}
+                  disabled={
+                    adjustingStock ||
+                    adjustingProduct.stock + Math.trunc(Number(adjustDraft.quantity) || 0) < 0
+                  }
+                  onClick={() => void submitAdjustment(adjustingProduct)}
+                >
+                  <Save className="size-4" />
+                  {adjustingStock ? "Menyimpan…" : "Sesuaikan stok"}
+                </Button>
+                <Button type="button" variant="outline" onClick={tutupAdjuster}>
+                  Batal
+                </Button>
+                <p className="text-xs text-muted-foreground">
+                  Stok tidak bisa turun di bawah nol; server mencatat perubahan ini beserta alasannya.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/*
+        Kartu **Modifier produk** (modul F&B): juga satu kartu di atas daftar, dengan
+        judul + penjelasan + tombol simpan di bawah — susunan yang sama seperti form
+        Produk baru & kartu Ubah produk, bukan editor yang menempel di baris tabel.
+      */}
+      {modifierProduct && modifierDraft && (
+        <div ref={modifierCardRef} className="scroll-mt-4">
+          <Card className="border-primary/30">
+            <CardContent className="space-y-4 pt-6">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <Sparkles className="size-4 text-primary" /> Modifier produk
+                  </CardTitle>
+                  <CardDescription className="mt-1">
+                    Pilihan tambahan untuk <strong>{modifierProduct.name}</strong> ·{" "}
+                    <span className="font-mono">{modifierProduct.sku}</span>. Isi nama grup, batas
+                    pilihan, dan tambahan harganya; kodenya dibuat otomatis saat disimpan.
+                  </CardDescription>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  aria-label="Tutup kartu modifier produk"
+                  onClick={closeModifierEditor}
+                >
+                  <X className="size-4" /> Tutup
+                </Button>
+              </div>
+
+              <ModifierEditor draft={modifierDraft} onChange={setModifierDraft} moduleOn={fnbOn} />
+
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  type="button"
+                  disabled={savingModifiers}
+                  onClick={() => void saveModifiers(modifierProduct.id)}
+                >
+                  <Save className="size-4" />
+                  {savingModifiers ? "Menyimpan…" : "Simpan modifier"}
+                </Button>
+                <Button type="button" variant="outline" onClick={closeModifierEditor}>
+                  Batal
+                </Button>
+                <p className="text-xs text-muted-foreground">
+                  Harga modifier ditambahkan <strong>per unit yang dijual</strong> (2× pesanan = 2×
+                  tambahan), dan grup bertanda “wajib” harus dipilih kasir sebelum pesanan bisa
+                  disimpan.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/*
+        Kartu **Hapus produk** memakai pola yang sama dengan form Produk baru &
+        kartu Ubah produk: satu kartu di atas daftar, judul + penjelasan, isi dari
+        server (`products.deletionCheck`), lalu tombol keputusan di bawah. Bukan
+        dialog melayang, supaya tiga alur produk terbaca sebagai satu sistem.
+      */}
+      {hapusProduk && (
+        <div ref={deleteCardRef} className="scroll-mt-4">
+          <Card className="border-destructive/40">
+            <CardContent className="space-y-4 pt-6">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <ShieldAlert className="size-4 text-destructive" /> Hapus produk
+                  </CardTitle>
+                  <CardDescription className="mt-1">
+                    {hapusProduk.name} · <span className="font-mono">{hapusProduk.sku}</span>
+                  </CardDescription>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  aria-label="Tutup kartu hapus produk"
+                  onClick={tutupHapus}
+                >
+                  <X className="size-4" /> Tutup
+                </Button>
+              </div>
+
+              {memeriksaHapus || !pagarHapus ? (
+                <p className="rounded-lg bg-secondary/40 px-4 py-3 text-sm text-muted-foreground">
+                  Memeriksa apakah produk ini masih dipakai…
+                </p>
+              ) : (
+                <>
+                  <p className="rounded-lg bg-secondary/40 px-4 py-3 text-sm">
+                    {pagarHapus.sentence}
+                  </p>
+                  {pagarHapus.blockers.length > 0 && (
+                    <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+                      {pagarHapus.blockers.map((alasan) => (
+                        <li key={alasan}>{alasan}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {pagarHapus.canDelete && (
+                    <p className="text-xs text-muted-foreground">
+                      Tindakan ini tidak bisa dibatalkan. Kalau produknya hanya berhenti dijual,
+                      tekan <strong>Nonaktifkan</strong> — produknya hilang dari kasir tanpa
+                      kehilangan data.
+                    </p>
+                  )}
+                </>
+              )}
+
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <Button type="button" variant="outline" onClick={tutupHapus}>
+                  Batal
+                </Button>
+                {pagarHapus && !pagarHapus.canDelete && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={togglingStatus === hapusProduk.id}
+                    aria-label={`Nonaktifkan saja ${hapusProduk.name}`}
+                    onClick={() => {
+                      const produk = hapusProduk;
+                      tutupHapus();
+                      void toggleStatus(produk);
+                    }}
+                  >
+                    <PowerOff className="size-4" /> Nonaktifkan saja
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  variant="accent"
+                  disabled={
+                    menghapusProduk || memeriksaHapus || !pagarHapus || !pagarHapus.canDelete
+                  }
+                  aria-label={`Konfirmasi hapus produk ${hapusProduk.name}`}
+                  onClick={() => void submitHapus(hapusProduk)}
+                >
+                  <Trash2 className="size-4" />
+                  {menghapusProduk ? "Menghapus…" : "Hapus produk"}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       )}
 
       {/*
         Kategori produk (`category.manage`).
 
-        Namanya bukan sekadar label: ia menentukan kode di tengah SKU
-        (`PBB-<KATEGORI>-<nomor urut>`) dan susunan tab di kasir. Karena itu
-        pengelolaannya dipisah dari `product.manage` — peran yang lebih tinggi
-        (pemilik/manajer) yang menambah, mengubah nama, menonaktifkan, dan
-        menghapus; staf gudang tetap memakai kategori yang aktif di form produk.
+        Ia menentukan susunan tab di kasir dan menjadi label katalog — **bukan**
+        bagian dari SKU (`PBB-<nomor urut>`), jadi mengubahnya tidak menulis ulang
+        SKU produk mana pun. Karena itu pengelolaannya dipisah dari
+        `product.manage` — peran yang lebih tinggi (pemilik/manajer) yang menambah,
+        mengubah nama, menonaktifkan, dan menghapus; staf gudang tetap memakai
+        kategori yang aktif di form produk.
       */}
       <Card>
         <CardHeader className="pb-3">
@@ -1673,8 +2609,8 @@ export function ProductsPage() {
               </CardTitle>
               <CardDescription className="mt-1">
                 {canManageCategories
-                  ? `Kategori menentukan kode di tengah SKU (${PRODUCT_SKU_PREFIX}-<kategori>-<nomor>) dan susunan tab di kasir. Subkategori dibuat di bawah kategorinya (tombol “atur” di baris kategori) dan ikut dikirim ke API & webhook tanpa mengubah SKU. Kategori nonaktif tidak bisa dipakai produk baru, tetapi produk yang sudah memakainya tetap dijual.`
-                  : "Kategori menentukan kode SKU dan susunan tab di kasir. Menambah, mengubah, menonaktifkan, atau menghapusnya butuh peran manajer/pemilik."}
+                  ? `Kategori menentukan susunan tab di kasir; SKU produk tidak ikut berubah saat kategori diganti (formatnya ${PRODUCT_SKU_PREFIX}-<nomor urut>). Subkategori dibuat di bawah kategorinya (tombol “atur” di baris kategori) dan ikut dikirim ke API & webhook tanpa mengubah SKU. Kategori nonaktif tidak bisa dipakai produk baru, tetapi produk yang sudah memakainya tetap dijual.`
+                  : "Kategori menentukan susunan tab di kasir. Menambah, mengubah, menonaktifkan, atau menghapusnya butuh peran manajer/pemilik."}
               </CardDescription>
             </div>
             <Badge variant="outline" className="shrink-0">
@@ -1783,16 +2719,6 @@ export function ProductsPage() {
             title="Penyelarasan kategori ditolak"
           />
 
-          {kodeBentrok.length > 0 && (
-            <p className="rounded-lg border border-accent/40 bg-accent/10 px-3 py-2 text-xs text-accent">
-              {kodeBentrok
-                .map(({ code, names }) => `Kode SKU ${code} dipakai ${names.join(" & ")}`)
-                .join("; ")}
-              . SKU-nya tetap unik karena nomor urutnya berlaku untuk seluruh katalog, tetapi nama
-              yang kodenya berbeda lebih mudah dibaca dari SKU.
-            </p>
-          )}
-
           {categories.length === 0 ? (
             <p className="text-sm text-muted-foreground">
               Belum ada kategori — semua produk tampil sebagai “Tanpa kategori”.
@@ -1803,7 +2729,6 @@ export function ProductsPage() {
                 <thead className="text-left text-xs uppercase tracking-wide text-muted-foreground">
                   <tr>
                     <th className="px-2 py-2">Kategori</th>
-                    <th className="px-2 py-2">Kode SKU</th>
                     <th className="px-2 py-2 text-right">Produk</th>
                     <th className="px-2 py-2">Status</th>
                     {canManageCategories && <th className="px-2 py-2 text-right">Aksi</th>}
@@ -1853,9 +2778,6 @@ export function ProductsPage() {
                               )}
                             </div>
                           )}
-                        </td>
-                        <td className="px-2 py-2 font-mono text-xs text-muted-foreground">
-                          {categorySkuCode(sedangUbah ? kategoriUbah.name : c.name)}
                         </td>
                         <td className="px-2 py-2 text-right font-mono text-xs">{c.productCount}</td>
                         <td className="px-2 py-2">
@@ -1968,7 +2890,7 @@ export function ProductsPage() {
                       </tr>
                       {canManageCategories && subTerbukaIni && (
                         <tr className="border-t border-border/60 bg-secondary/20">
-                          <td colSpan={5} className="px-2 py-3">
+                          <td colSpan={4} className="px-2 py-3">
                             <div className="space-y-2">
                               <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
                                 <Layers className="size-3.5 text-primary" />
@@ -2182,12 +3104,6 @@ export function ProductsPage() {
                     onChange={(e) => setKategoriBaru(e.target.value)}
                   />
                 </label>
-                <p className="text-xs text-muted-foreground">
-                  Kode SKU:{" "}
-                  <span className="font-mono text-foreground">
-                    {categorySkuCode(kategoriBaru || "?")}
-                  </span>
-                </p>
                 <Button
                   type="button"
                   size="sm"
@@ -2285,10 +3201,8 @@ export function ProductsPage() {
                 const isEditing = editing === p.id;
                 const isModifierEditing = editingModifiers === p.id;
                 const isAdjusting = adjusting === p.id;
-                const deltaDraft = Math.trunc(Number(adjustDraft.quantity) || 0);
                 return (
-                  <Fragment key={p.id}>
-                    <tr className="border-t border-border/70">
+                  <tr key={p.id} className="border-t border-border/70">
                       <td className="px-4 py-2 font-mono text-muted-foreground">{p.sku}</td>
                       <td className="px-4 py-2 font-medium">
                         {p.name}
@@ -2397,9 +3311,7 @@ export function ProductsPage() {
                               size="sm"
                               variant={isAdjusting ? "secondary" : "outline"}
                               aria-label={`Sesuaikan stok ${p.name}`}
-                              onClick={() =>
-                                isAdjusting ? setAdjusting(null) : openAdjuster(p)
-                              }
+                              onClick={() => (isAdjusting ? tutupAdjuster() : openAdjuster(p))}
                             >
                               {isAdjusting ? (
                                 <>
@@ -2414,7 +3326,7 @@ export function ProductsPage() {
                             type="button"
                             size="sm"
                             variant={isEditing ? "secondary" : "outline"}
-                            aria-label={`Atur harga ${p.name}`}
+                            aria-label={`Ubah produk ${p.name}`}
                             onClick={() => (isEditing ? closeEditor() : openEditor(p))}
                           >
                             {isEditing ? (
@@ -2422,7 +3334,7 @@ export function ProductsPage() {
                                 <X className="size-3.5" /> Tutup
                               </>
                             ) : (
-                              "Atur harga"
+                              "Ubah produk"
                             )}
                           </Button>
                           <Button
@@ -2487,388 +3399,6 @@ export function ProductsPage() {
                         </div>
                       </td>
                     </tr>
-
-                    {isModifierEditing && modifierDraft && (
-                      <tr className="border-t border-border/70 bg-secondary/20">
-                        <td colSpan={9} className="px-4 py-4">
-                          <ModifierEditor
-                            draft={modifierDraft}
-                            onChange={setModifierDraft}
-                            moduleOn={fnbOn}
-                          />
-                          <div className="mt-4 flex flex-wrap items-center gap-3">
-                            <Button
-                              type="button"
-                              disabled={savingModifiers}
-                              onClick={() => void saveModifiers(p.id)}
-                            >
-                              <Save className="size-4" />
-                              {savingModifiers ? "Menyimpan…" : "Simpan modifier"}
-                            </Button>
-                            <p className="text-xs text-muted-foreground">
-                              Harga modifier ditambahkan <strong>per unit yang dijual</strong>{" "}
-                              (2× pesanan = 2× tambahan), dan grup bertanda “wajib” harus
-                              dipilih kasir sebelum pesanan bisa disimpan.
-                            </p>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-
-                    {isAdjusting && (
-                      <tr className="border-t border-border/70 bg-secondary/20">
-                        <td colSpan={9} className="px-4 py-4">
-                          <div className="grid gap-3 md:grid-cols-4">
-                            <div className="text-xs text-muted-foreground md:col-span-4">
-                              Stok <strong className="text-foreground">{p.name}</strong> saat ini{" "}
-                              <span className="font-mono text-foreground">{p.stock}</span>{" "}
-                              {p.unit ?? "PCS"} di lokasi jual. Tulis angka <strong>negatif</strong>{" "}
-                              untuk mengurangi (mis. rusak, hilang, salah hitung).
-                            </div>
-                            <label className="space-y-1 text-xs text-muted-foreground">
-                              Jumlah penyesuaian
-                              <Input
-                                className="font-mono"
-                                inputMode="numeric"
-                                value={adjustDraft.quantity}
-                                placeholder="12"
-                                aria-label={`Jumlah penyesuaian stok ${p.name}`}
-                                onChange={(e) =>
-                                  setAdjustDraft((current) => ({
-                                    ...current,
-                                    quantity: e.target.value,
-                                  }))
-                                }
-                              />
-                            </label>
-                            <label className="space-y-1 text-xs text-muted-foreground md:col-span-2">
-                              Catatan (opsional)
-                              <Input
-                                value={adjustDraft.note}
-                                placeholder="Barang datang tanpa PO"
-                                aria-label={`Catatan penyesuaian stok ${p.name}`}
-                                onChange={(e) =>
-                                  setAdjustDraft((current) => ({
-                                    ...current,
-                                    note: e.target.value,
-                                  }))
-                                }
-                              />
-                            </label>
-                            <div className="flex flex-col justify-end gap-2">
-                              <p className="text-xs text-muted-foreground">
-                                Stok jadi{" "}
-                                <span className="font-mono text-foreground">
-                                  {p.stock + deltaDraft}
-                                </span>
-                              </p>
-                              <Button
-                                type="button"
-                                size="sm"
-                                disabled={adjustingStock || p.stock + deltaDraft < 0}
-                                onClick={() => void submitAdjustment(p)}
-                              >
-                                <Save className="size-3.5" />
-                                {adjustingStock ? "Menyimpan…" : "Sesuaikan stok"}
-                              </Button>
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-
-                    {isEditing && draft && (
-                      <tr className="border-t border-border/70 bg-secondary/20">
-                        <td colSpan={9} className="px-4 py-4">
-                          <div className="grid gap-4 lg:grid-cols-3">
-                            <div className="space-y-2">
-                              <Label htmlFor={`nama-${p.id}`}>Nama produk</Label>
-                              <Input
-                                id={`nama-${p.id}`}
-                                value={draft.name}
-                                aria-label={`Nama produk ${p.name}`}
-                                onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-                              />
-                              <Label htmlFor={`sku-${p.id}`}>SKU</Label>
-                              <Input
-                                id={`sku-${p.id}`}
-                                className="font-mono"
-                                value={draft.sku}
-                                aria-label={`SKU produk ${p.name}`}
-                                onChange={(e) => setDraft({ ...draft, sku: e.target.value })}
-                              />
-                              <Label htmlFor={`biaya-${p.id}`}>Harga beli per satuan dasar</Label>
-                              <Input
-                                id={`biaya-${p.id}`}
-                                inputMode="numeric"
-                                className="font-mono"
-                                value={draft.cost}
-                                aria-label={`Harga beli ${p.name}`}
-                                onChange={(e) => setDraft({ ...draft, cost: e.target.value })}
-                              />
-                              <p className="text-[11px] text-muted-foreground">
-                                Nama dan SKU dipakai apa adanya (SKU tetap unik per workspace);
-                                harga beli dipakai menghitung margin, bukan harga yang dibayar
-                                pembeli.
-                              </p>
-                              <Label htmlFor={`price-${p.id}`}>Harga dasar</Label>
-                              <Input
-                                id={`price-${p.id}`}
-                                inputMode="numeric"
-                                value={draft.price}
-                                onChange={(e) =>
-                                  setDraft({ ...draft, price: e.target.value })
-                                }
-                              />
-                              <Label htmlFor={`unit-${p.id}`}>Satuan dasar</Label>
-                              <Input
-                                id={`unit-${p.id}`}
-                                value={draft.unit}
-                                disabled={!wholesaleOn}
-                                onChange={(e) => setDraft({ ...draft, unit: e.target.value })}
-                                placeholder="PCS"
-                              />
-                              <Label htmlFor={`category-${p.id}`}>Kategori</Label>
-                              <select
-                                id={`category-${p.id}`}
-                                className="w-full rounded border border-border bg-background px-2 py-2 text-sm text-foreground"
-                                value={draft.category}
-                                aria-label={`Kategori produk ${p.name}`}
-                                onChange={(e) => setDraft({ ...draft, category: e.target.value })}
-                              >
-                                <option value="">Tanpa kategori</option>
-                                {/**
-                                  Kategori aktif, ditambah kategori produk ini sendiri
-                                  walau sudah nonaktif — kalau tidak, membuka “Atur
-                                  harga” akan tampak seperti memindahkan produknya.
-                                */}
-                                {selectableCategoryNames(categories, p.category).map((nama) => (
-                                  <option key={nama} value={nama}>
-                                    {nama}
-                                    {kategoriNonaktif.has(categoryNameKey(nama))
-                                      ? " (nonaktif)"
-                                      : ""}
-                                  </option>
-                                ))}
-                              </select>
-                              <Label htmlFor={`subcategory-${p.id}`}>Subkategori (opsional)</Label>
-                              <select
-                                id={`subcategory-${p.id}`}
-                                className="w-full rounded border border-border bg-background px-2 py-2 text-sm text-foreground disabled:opacity-60"
-                                value={draft.subcategory}
-                                disabled={draft.category.trim().length === 0}
-                                onChange={(e) =>
-                                  setDraft({ ...draft, subcategory: e.target.value })
-                                }
-                              >
-                                <option value="">Tanpa subkategori</option>
-                                {/**
-                                  Hanya subkategori **di bawah kategori ini** yang
-                                  ditawarkan; yang sedang dipakai produk tetap tampil
-                                  walau sudah nonaktif — kalau tidak, membuka panel
-                                  ini akan tampak seperti memindahkan produknya.
-                                */}
-                                {selectableSubcategoryNames(
-                                  subcategories,
-                                  kategoriIdDari(draft.category),
-                                  draft.subcategory,
-                                ).map((nama) => (
-                                  <option key={nama} value={nama}>
-                                    {nama}
-                                    {subkategoriNonaktif(kategoriIdDari(draft.category), nama)
-                                      ? " (nonaktif)"
-                                      : ""}
-                                  </option>
-                                ))}
-                              </select>
-                              <p className="text-[11px] text-muted-foreground">
-                                SKU <span className="font-mono text-foreground">{p.sku}</span> — SKU buatan
-                                sistem (PBB-…) ikut menyesuaikan saat kategorinya diganti; SKU yang diketik
-                                sendiri tidak diubah.
-                              </p>
-                            </div>
-
-                            <div className="space-y-2">
-                              <div className="flex items-center justify-between">
-                                <Label>Konversi satuan</Label>
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="ghost"
-                                  disabled={!wholesaleOn}
-                                  onClick={() =>
-                                    setDraft({
-                                      ...draft,
-                                      units: [...draft.units, { code: "", factor: "" }],
-                                    })
-                                  }
-                                >
-                                  + Satuan
-                                </Button>
-                              </div>
-                              {draft.units.length === 0 && (
-                                <p className="text-xs text-muted-foreground">
-                                  Belum ada satuan besar (mis. DUS = 24 Pcs).
-                                </p>
-                              )}
-                              {draft.units.map((unit, index) => (
-                                <div key={index} className="flex items-center gap-2">
-                                  <Input
-                                    aria-label={`Kode satuan ${index + 1}`}
-                                    value={unit.code}
-                                    disabled={!wholesaleOn}
-                                    placeholder="DUS"
-                                    onChange={(e) => {
-                                      const units = [...draft.units];
-                                      units[index] = { ...unit, code: e.target.value };
-                                      setDraft({ ...draft, units });
-                                    }}
-                                  />
-                                  <Input
-                                    aria-label={`Faktor satuan ${index + 1}`}
-                                    value={unit.factor}
-                                    disabled={!wholesaleOn}
-                                    inputMode="numeric"
-                                    placeholder="24"
-                                    onChange={(e) => {
-                                      const units = [...draft.units];
-                                      units[index] = { ...unit, factor: e.target.value };
-                                      setDraft({ ...draft, units });
-                                    }}
-                                  />
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="ghost"
-                                    disabled={!wholesaleOn}
-                                    aria-label={`Hapus satuan ${index + 1}`}
-                                    onClick={() =>
-                                      setDraft({
-                                        ...draft,
-                                        units: draft.units.filter((_, i) => i !== index),
-                                      })
-                                    }
-                                  >
-                                    <X className="size-3.5" />
-                                  </Button>
-                                </div>
-                              ))}
-                            </div>
-
-                            <div className="space-y-2">
-                              <div className="flex items-center justify-between">
-                                <Label>Harga bertingkat</Label>
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="ghost"
-                                  disabled={!wholesaleOn}
-                                  onClick={() =>
-                                    setDraft({
-                                      ...draft,
-                                      tiers: [...draft.tiers, { minQty: "", price: "" }],
-                                    })
-                                  }
-                                >
-                                  + Tier
-                                </Button>
-                              </div>
-                              {draft.tiers.length === 0 && (
-                                <p className="text-xs text-muted-foreground">
-                                  Belum ada tier; semua kuantitas memakai harga dasar.
-                                </p>
-                              )}
-                              {draft.tiers.map((tier, index) => (
-                                <div key={index} className="flex items-center gap-2">
-                                  <Input
-                                    aria-label={`Kuantitas tier ${index + 1}`}
-                                    value={tier.minQty}
-                                    disabled={!wholesaleOn}
-                                    inputMode="numeric"
-                                    placeholder="24"
-                                    onChange={(e) => {
-                                      const tiers = [...draft.tiers];
-                                      tiers[index] = { ...tier, minQty: e.target.value };
-                                      setDraft({ ...draft, tiers });
-                                    }}
-                                  />
-                                  <Input
-                                    aria-label={`Harga tier ${index + 1}`}
-                                    value={tier.price}
-                                    disabled={!wholesaleOn}
-                                    inputMode="numeric"
-                                    placeholder="4500"
-                                    onChange={(e) => {
-                                      const tiers = [...draft.tiers];
-                                      tiers[index] = { ...tier, price: e.target.value };
-                                      setDraft({ ...draft, tiers });
-                                    }}
-                                  />
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="ghost"
-                                    disabled={!wholesaleOn}
-                                    aria-label={`Hapus tier ${index + 1}`}
-                                    onClick={() =>
-                                      setDraft({
-                                        ...draft,
-                                        tiers: draft.tiers.filter((_, i) => i !== index),
-                                      })
-                                    }
-                                  >
-                                    <X className="size-3.5" />
-                                  </Button>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-
-                          <div className="mt-4 flex flex-wrap items-center gap-3">
-                            <Button
-                              type="button"
-                              disabled={saving}
-                              onClick={() => void save(p)}
-                            >
-                              <Save className="size-4" />
-                              {saving ? "Menyimpan…" : "Simpan harga"}
-                            </Button>
-                            <p className="text-xs text-muted-foreground">
-                              Tier selalu dihitung dalam satuan dasar
-                              {wholesaleOn
-                                ? " — harga tier tidak boleh lebih mahal dari harga dasar."
-                                : "."}
-                            </p>
-                          </div>
-
-                          {/*
-                            Gambar produk ada di kartu edit ini juga: unggahannya
-                            **langsung** tersimpan (tidak menunggu “Simpan harga”),
-                            karena berkasnya sudah punya tempat di penyimpanan begitu
-                            ditautkan ke produk.
-                          */}
-                          {canCreate && (
-                            <div className="mt-5 border-t border-border/60 pt-4">
-                              <ProductImageEditor
-                                scope={p.name}
-                                images={images}
-                                onAddFiles={(files) => void addImages(p, files)}
-                                onRemoveImage={(imageId) => void removeImage(p, imageId)}
-                                busy={uploadingImage}
-                                busyImageId={removingImage}
-                                canEdit
-                                note={
-                                  images.length === 0
-                                    ? `${describeProductImages(0)} — unggah foto produk supaya kasir gampang memastikan barangnya. Unggahan langsung tersimpan, tanpa menekan “Simpan harga”.`
-                                    : "Gambar pertama dipakai sebagai thumbnail di daftar produk. Unggahan dan penghapusan gambar langsung tersimpan, tanpa menekan “Simpan harga”."
-                                }
-                              />
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    )}
-                  </Fragment>
                 );
               })
             )}
@@ -2876,99 +3406,12 @@ export function ProductsPage() {
         </table>
       </div>
 
-      {/*
-        Dialog hapus produk. Yang tampil adalah pagar dari server
-        (`products.deletionCheck`), bukan tebakan halaman: produk yang sudah
-        terjual/berstok/terpakai dokumen ditolak dengan alasannya satu per satu, dan
-        tawarannya adalah menonaktifkan — bukan menghapus riwayat orang lain.
-      */}
-      {hapusProduk && (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-background/80 p-4 backdrop-blur-sm">
-          <div
-            role="dialog"
-            aria-label={`Hapus produk ${hapusProduk.name}`}
-            className="w-full max-w-lg rounded-xl border border-border bg-card p-6 shadow-2xl"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h3 className="flex items-center gap-2 text-lg font-semibold">
-                  <ShieldAlert className="size-5 text-destructive" /> Hapus produk
-                </h3>
-                <p className="text-sm text-muted-foreground">
-                  {hapusProduk.name} · <span className="font-mono">{hapusProduk.sku}</span>
-                </p>
-              </div>
-              <button
-                type="button"
-                aria-label="Tutup dialog hapus produk"
-                className="text-muted-foreground hover:text-foreground"
-                onClick={tutupHapus}
-              >
-                <X className="size-5" />
-              </button>
-            </div>
-
-            {memeriksaHapus || !pagarHapus ? (
-              <p className="mt-4 rounded-lg bg-secondary/40 px-4 py-3 text-sm text-muted-foreground">
-                Memeriksa apakah produk ini masih dipakai…
-              </p>
-            ) : (
-              <>
-                <p className="mt-4 rounded-lg bg-secondary/40 px-4 py-3 text-sm">
-                  {pagarHapus.sentence}
-                </p>
-                {pagarHapus.blockers.length > 0 && (
-                  <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-muted-foreground">
-                    {pagarHapus.blockers.map((alasan) => (
-                      <li key={alasan}>{alasan}</li>
-                    ))}
-                  </ul>
-                )}
-                {pagarHapus.canDelete && (
-                  <p className="mt-3 text-xs text-muted-foreground">
-                    Tindakan ini tidak bisa dibatalkan. Kalau produknya hanya berhenti dijual,
-                    tekan <strong>Nonaktifkan</strong> — produknya hilang dari kasir tanpa
-                    kehilangan data.
-                  </p>
-                )}
-              </>
-            )}
-
-            <div className="mt-5 flex flex-wrap justify-end gap-2">
-              <Button type="button" variant="outline" onClick={tutupHapus}>
-                Batal
-              </Button>
-              {pagarHapus && !pagarHapus.canDelete && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={togglingStatus === hapusProduk.id}
-                  aria-label={`Nonaktifkan saja ${hapusProduk.name}`}
-                  onClick={() => {
-                    const produk = hapusProduk;
-                    tutupHapus();
-                    void toggleStatus(produk);
-                  }}
-                >
-                  <PowerOff className="size-4" /> Nonaktifkan saja
-                </Button>
-              )}
-              <Button
-                type="button"
-                variant="accent"
-                disabled={
-                  menghapusProduk || memeriksaHapus || !pagarHapus || !pagarHapus.canDelete
-                }
-                aria-label={`Konfirmasi hapus produk ${hapusProduk.name}`}
-                onClick={() => void submitHapus(hapusProduk)}
-              >
-                <Trash2 className="size-4" />
-                {menghapusProduk ? "Menghapus…" : "Hapus produk"}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+      <BarcodeScanDialog
+        open={scanOpen}
+        onOpenChange={setScanOpen}
+        onScan={terapkanHasilScan}
+        context="halaman Produk & Stok"
+      />
     </div>
   );
 }

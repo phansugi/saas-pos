@@ -140,7 +140,7 @@ export interface ProductUpdatedEventInput {
   category: string | null;
   subcategory: string | null;
   changed: readonly string[];
-  /** SKU lama saat kategori berganti (SKU ikut diganti kode kategorinya). */
+  /** SKU lama saat SKU produk diperbaiki dari halaman Produk (kategori tidak lagi mengubah SKU). */
   previousSku?: string;
   /** Harga lama saat harga berubah — membantu penerima mengurutkan perubahan. */
   previousPrice?: number;
@@ -164,6 +164,41 @@ export function productUpdatedEventData(
   if (input.previousSku) data.previousSku = input.previousSku;
   if (input.previousPrice !== undefined) data.previousPrice = input.previousPrice;
   return data;
+}
+
+/**
+ * Isi `product.created` — produk yang **baru pertama kali** masuk katalog.
+ *
+ * Bedanya dengan `product.updated`: peristiwa ini hanya datang sekali per produk
+ * dan penerimanya tidak perlu membaca `changed` untuk tahu bahwa produknya baru.
+ * Field-nya sama dengan `product.updated` supaya platform yang sudah menyimpan
+ * bentuk katalog tidak perlu jalur kedua — hanya tanpa field “perubahan”,
+ * ditambah `createdAt` sebagai penanda urutan.
+ */
+export interface ProductCreatedEventInput {
+  sku: string;
+  name: string;
+  price: number;
+  unit: string;
+  active: boolean;
+  category: string | null;
+  subcategory: string | null;
+  createdAt: number;
+}
+
+export function productCreatedEventData(
+  input: ProductCreatedEventInput,
+): Record<string, unknown> {
+  return {
+    sku: input.sku,
+    name: input.name,
+    price: input.price,
+    unit: input.unit,
+    active: input.active,
+    category: input.category ?? null,
+    subcategory: input.subcategory ?? null,
+    createdAt: input.createdAt,
+  };
 }
 
 /**

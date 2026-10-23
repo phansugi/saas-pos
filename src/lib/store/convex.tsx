@@ -112,6 +112,17 @@ import {
   type SyncPlatform,
 } from "@/lib/sync";
 import type { ReceiptWhatsappSendResult } from "@/lib/receiptWhatsapp";
+import type {
+  MarketplaceCatalogPullResult,
+  MarketplacePairingView,
+  MarketplaceProductPushResult,
+  MarketplaceReconcileResult,
+  MarketplaceRetryResult,
+  MarketplaceStockDiffPullResult,
+  MarketplaceStockDiffPushResult,
+  MarketplaceStatusView,
+  MarketplaceSyncResult,
+} from "@/lib/marketplace";
 import { actingRole, useSession } from "@/lib/session";
 import {
   EMPTY_INVITE_DELIVERY,
@@ -201,6 +212,7 @@ import {
   type SetCreditInput,
   type SetModifiersInput,
   type SetPricingInput,
+  type SetProductBarcodeInput,
   type SetProductCategoryInput,
   type StoreApi,
   type StoreApiKey,
@@ -226,6 +238,7 @@ import {
   type UpdateBuiltinRoleInput,
   EMPTY_BUILTIN_ROLE_SUMMARY,
   type UpdateWebhookEndpointInput,
+  type WebhookRetryResult,
   type WebhookTestResult,
   type StoreLogo,
   type StoreProduct,
@@ -816,11 +829,38 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
 
   const createApiKeyMutation = useMutation(api.apiAccess.createKey);
   const revokeApiKeyMutation = useMutation(api.apiAccess.revokeKey);
+  const purgeRevokedApiKeysMutation = useMutation(api.apiAccess.purgeRevokedKeys);
   const createEndpointMutation = useMutation(api.apiAccess.createEndpoint);
   const updateEndpointMutation = useMutation(api.apiAccess.updateEndpoint);
   const removeEndpointMutation = useMutation(api.apiAccess.removeEndpoint);
   const testEndpointAction = useAction(api.apiAccess.testEndpoint);
+  const retryDeliveryAction = useAction(api.apiAccess.retryDelivery);
   const sendReceiptWhatsappAction = useAction(api.receiptWa.send);
+
+  /*
+    Pairing vendor marketplace (`pusatbahanbangunan.com`). Statusnya dibaca
+    sebagai langganan supaya kartu Pengaturan ikut berubah saat pemilik memasang
+    atau melepas pairing dari perangkat lain. Pencarian direktori & sinkron
+    adalah **action** karena keduanya menyentuh jaringan; keduanya tetap
+    memeriksa keanggotaan lewat query internal sebelum melakukan apa pun.
+  */
+  const marketplaceStatus = useQuery(
+    api.marketplace.status,
+    tenantId && userId ? { tenantId, actorId: userId } : "skip",
+  );
+  const lookupMarketplaceVendorsAction = useAction(api.marketplace.lookupVendors);
+  const pairMarketplaceMutation = useMutation(api.marketplace.pair);
+  const unpairMarketplaceMutation = useMutation(api.marketplace.unpair);
+  const setMarketplacePushSecretMutation = useMutation(api.marketplace.setPushSecret);
+  const retryMarketplaceOrderMutation = useMutation(
+    api.apiAccess.retryMarketplaceOrder,
+  );
+  const syncMarketplaceAction = useAction(api.marketplace.syncNow);
+  const pushMarketplaceProductsAction = useAction(api.marketplace.syncProducts);
+  const pullMarketplaceCatalogAction = useAction(api.marketplace.pullCatalog);
+  const reconcileMarketplaceStockAction = useAction(api.marketplace.reconcileNow);
+  const pushMarketplaceStockDiffsAction = useAction(api.marketplace.pushStockDiffs);
+  const pullMarketplaceStockDiffsAction = useAction(api.marketplace.pullStockDiffs);
 
   const createUser = useMutation(api.users.createOrGet);
   const cancelRegistrationMutation = useMutation(api.users.cancelRegistration);
@@ -864,6 +904,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
   const addProductImageMutation = useMutation(api.products.addImage);
   const removeProductImageMutation = useMutation(api.products.removeImage);
   const setPricingMutation = useMutation(api.products.setPricing);
+  const setProductBarcodeMutation = useMutation(api.products.setBarcode);
   const setCategoryMutation = useMutation(api.products.setCategory);
   const setModifiersMutation = useMutation(api.products.setModifiers);
   const createTableMutation = useMutation(api.tables.create);
@@ -1165,6 +1206,8 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
     (p: NonNullable<typeof productDocs>[number]): StoreProduct => ({
       id: p._id,
       sku: p.sku,
+      barcode: p.barcode,
+      barcodeType: p.barcodeType,
       name: p.name,
       // Dua katalog memakai pemetaan yang sama; yang membedakan hanya daftar
       // dokumennya (`listByStore` = aktif, `listAll` = termasuk nonaktif).
@@ -1477,6 +1520,10 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
         actorId: userId,
         // Kosong = minta server membuat SKU otomatis; nilai finalnya ada di balikan.
         sku: input.sku?.trim() ? input.sku : undefined,
+        // Kode kosong berarti produk tanpa barcode; jenisnya hanya ikut kalau
+        // kodenya memang diisi.
+        barcode: input.barcode?.trim() ? input.barcode : undefined,
+        barcodeType: input.barcode?.trim() ? input.barcodeType : undefined,
         name: input.name,
         price: input.price,
         cost: input.cost,
@@ -2219,6 +2266,21 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
    * Hapus: yang ditampilkan halaman adalah hitungan sungguhan (stok, penjualan,
    * pergerakan stok, dokumen pembelian, opname), bukan perkiraan klien.
    */
+  /** Mengisi/melepas barcode produk lewat `products.setBarcode`. */
+  const setProductBarcode = useCallback(
+    async (input: SetProductBarcodeInput) => {
+      if (!tenantId || !userId) notReady();
+      return await setProductBarcodeMutation({
+        tenantId,
+        actorId: userId,
+        productId: input.productId as Id<"products">,
+        barcode: input.barcode,
+        barcodeType: input.barcodeType,
+      });
+    },
+    [tenantId, userId, setProductBarcodeMutation],
+  );
+
   const updateProduct = useCallback(
     async (input: UpdateProductInput): Promise<UpdatedProduct> => {
       if (!tenantId || !userId) notReady();
@@ -2292,9 +2354,9 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
    *
    * Empat mutation terpisah — bukan satu `update` serba bisa — karena masing-masing
    * punya akibat yang berbeda dan harus dijelaskan apa adanya ke pengguna: ganti
-   * nama mengubah kode SKU produk **berikutnya**, nonaktif menutup kategori untuk
-   * produk baru, dan hapus melepas produk yang masih memakainya. `actorId` selalu
-   * yang sedang masuk; izinnya diperiksa lagi di server.
+   * nama hanya mengganti label katalog (SKU tidak ikut berubah), nonaktif menutup
+   * kategori untuk produk baru, dan hapus melepas produk yang masih memakainya.
+   * `actorId` selalu yang sedang masuk; izinnya diperiksa lagi di server.
    */
   const createCategory = useCallback(
     async (input: CreateCategoryInput): Promise<{ id: string; name: string }> => {
@@ -2342,7 +2404,6 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       return {
         name: result.name,
         previousName: result.previousName,
-        skuCodeChanged: result.skuCodeChanged,
       };
     },
     [tenantId, userId, renameCategoryMutation],
@@ -3843,6 +3904,13 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
     [tenantId, userId, revokeApiKeyMutation],
   );
 
+  const purgeRevokedApiKeys = useCallback(async () => {
+    if (!tenantId || !userId) {
+      notReady();
+    }
+    return await purgeRevokedApiKeysMutation({ tenantId, actorId: userId });
+  }, [tenantId, userId, purgeRevokedApiKeysMutation]);
+
   const createWebhookEndpoint = useCallback(
     async (input: CreateWebhookEndpointInput): Promise<{ id: string; secret: string }> => {
       if (!tenantId || !userId) {
@@ -3873,6 +3941,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
         description: input.description,
         events: input.events,
         rotateSecret: input.rotateSecret,
+        secret: input.secret,
       });
       return { secret: result.secret ?? null };
     },
@@ -3905,6 +3974,20 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       });
     },
     [tenantId, userId, testEndpointAction],
+  );
+
+  const retryWebhookDelivery = useCallback(
+    async (deliveryId: string): Promise<WebhookRetryResult> => {
+      if (!tenantId || !userId) {
+        notReady();
+      }
+      return await retryDeliveryAction({
+        tenantId,
+        actorId: userId,
+        deliveryId: deliveryId as Id<"webhookDeliveries">,
+      });
+    },
+    [tenantId, userId, retryDeliveryAction],
   );
 
   // -------------------- Phase 5: dukungan khusus (`support.dedicated`) ------
@@ -4335,6 +4418,146 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
     [tenantId, userId, resolveSyncMutation],
   );
 
+  /**
+   * Status pairing marketplace. Selama query pertama masih berjalan, bentuknya
+   * kosong yang sah dengan `loading: true` — kartu menampilkan keadaan tunggu,
+   * bukan menebak bahwa workspace belum dipasangkan atau bahwa pemanggil bukan
+   * pemilik.
+   */
+  const marketplace = useMemo<MarketplaceStatusView>(
+    () =>
+      marketplaceStatus
+        ? { ...marketplaceStatus, loading: false }
+        : {
+            pairing: null,
+            canPair: false,
+            pairBlockedReason: "Status pairing marketplace belum dimuat.",
+            loading: true,
+            pushEndpointReady: false,
+          },
+    [marketplaceStatus],
+  );
+
+  const lookupMarketplaceVendors = useCallback(
+    async (input: {
+      contactKind: "email" | "whatsapp";
+      value: string;
+      includeDirectory?: boolean;
+    }) => {
+      if (!tenantId || !userId) notReady();
+      return await lookupMarketplaceVendorsAction({
+        tenantId,
+        actorId: userId,
+        contactKind: input.contactKind,
+        value: input.value,
+        includeDirectory: input.includeDirectory === true,
+      });
+    },
+    [tenantId, userId, lookupMarketplaceVendorsAction],
+  );
+
+  const pairMarketplace = useCallback(
+    async (input: {
+      vendorId: string;
+      vendorName: string;
+      contactKind: "email" | "whatsapp";
+      contact: string;
+      contactVerified: boolean;
+    }): Promise<{ pairing: MarketplacePairingView; sentence: string }> => {
+      if (!tenantId || !userId) notReady();
+      const result = await pairMarketplaceMutation({
+        tenantId,
+        actorId: userId,
+        ...input,
+      });
+      return { pairing: result.pairing, sentence: result.sentence };
+    },
+    [tenantId, userId, pairMarketplaceMutation],
+  );
+
+  const unpairMarketplace = useCallback(async (): Promise<{ sentence: string }> => {
+    if (!tenantId || !userId) notReady();
+    const result = await unpairMarketplaceMutation({ tenantId, actorId: userId });
+    return { sentence: result.sentence };
+  }, [tenantId, userId, unpairMarketplaceMutation]);
+
+  const syncMarketplaceNow = useCallback(async (): Promise<MarketplaceSyncResult> => {
+    if (!tenantId || !userId) notReady();
+    return await syncMarketplaceAction({ tenantId, actorId: userId });
+  }, [tenantId, userId, syncMarketplaceAction]);
+
+  const pushMarketplaceProducts = useCallback(
+    async (): Promise<MarketplaceProductPushResult> => {
+      if (!tenantId || !userId) notReady();
+      return await pushMarketplaceProductsAction({ tenantId, actorId: userId });
+    },
+    [tenantId, userId, pushMarketplaceProductsAction],
+  );
+
+  const pullMarketplaceCatalog = useCallback(
+    async (): Promise<MarketplaceCatalogPullResult> => {
+      if (!tenantId || !userId) notReady();
+      return await pullMarketplaceCatalogAction({ tenantId, actorId: userId });
+    },
+    [tenantId, userId, pullMarketplaceCatalogAction],
+  );
+
+  const reconcileMarketplaceStock = useCallback(
+    async (): Promise<MarketplaceReconcileResult> => {
+      if (!tenantId || !userId) notReady();
+      return await reconcileMarketplaceStockAction({ tenantId, actorId: userId });
+    },
+    [tenantId, userId, reconcileMarketplaceStockAction],
+  );
+
+  const pushMarketplaceStockDiffs = useCallback(
+    async (): Promise<MarketplaceStockDiffPushResult> => {
+      if (!tenantId || !userId) notReady();
+      return await pushMarketplaceStockDiffsAction({
+        tenantId,
+        actorId: userId,
+      });
+    },
+    [tenantId, userId, pushMarketplaceStockDiffsAction],
+  );
+
+  const pullMarketplaceStockDiffs = useCallback(
+    async (): Promise<MarketplaceStockDiffPullResult> => {
+      if (!tenantId || !userId) notReady();
+      return await pullMarketplaceStockDiffsAction({
+        tenantId,
+        actorId: userId,
+      });
+    },
+    [tenantId, userId, pullMarketplaceStockDiffsAction],
+  );
+
+  const retryMarketplaceOrder = useCallback(
+    async (orderId: string): Promise<MarketplaceRetryResult> => {
+      if (!tenantId || !userId) notReady();
+      return await retryMarketplaceOrderMutation({
+        tenantId,
+        actorId: userId,
+        orderId,
+      });
+    },
+    [tenantId, userId, retryMarketplaceOrderMutation],
+  );
+
+  const setMarketplacePushSecret = useCallback(
+    async (
+      secret: string | null,
+    ): Promise<{ saved: boolean; lastFour: string | null; sentence: string }> => {
+      if (!tenantId || !userId) notReady();
+      return await setMarketplacePushSecretMutation({
+        tenantId,
+        actorId: userId,
+        secret,
+      });
+    },
+    [tenantId, userId, setMarketplacePushSecretMutation],
+  );
+
   const value = useMemo<StoreApi>(
     () => ({
       source: "convex",
@@ -4368,6 +4591,18 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       setReceipt,
       shift,
       setShift,
+      marketplace,
+      lookupMarketplaceVendors,
+      pairMarketplace,
+      unpairMarketplace,
+      retryMarketplaceOrder,
+      setMarketplacePushSecret,
+      syncMarketplaceNow,
+      pushMarketplaceProducts,
+      pullMarketplaceCatalog,
+      reconcileMarketplaceStock,
+      pushMarketplaceStockDiffs,
+      pullMarketplaceStockDiffs,
       shiftAlerts,
       reportShiftAlert,
       resolveShiftAlert,
@@ -4395,6 +4630,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       addProductImage,
       removeProductImage,
       setPricing,
+      setProductBarcode,
       setCategory,
       setModifiers,
       customers,
@@ -4513,10 +4749,12 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       webhookSummary,
       createApiKey,
       revokeApiKey,
+      purgeRevokedApiKeys,
       createWebhookEndpoint,
       updateWebhookEndpoint,
       removeWebhookEndpoint,
       testWebhookEndpoint,
+      retryWebhookDelivery,
       createSale,
       adjustStock,
       offline,
@@ -4552,6 +4790,18 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       setReceipt,
       shift,
       setShift,
+      marketplace,
+      lookupMarketplaceVendors,
+      pairMarketplace,
+      unpairMarketplace,
+      retryMarketplaceOrder,
+      setMarketplacePushSecret,
+      syncMarketplaceNow,
+      pushMarketplaceProducts,
+      pullMarketplaceCatalog,
+      reconcileMarketplaceStock,
+      pushMarketplaceStockDiffs,
+      pullMarketplaceStockDiffs,
       shiftAlerts,
       reportShiftAlert,
       resolveShiftAlert,
@@ -4579,6 +4829,7 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       addProductImage,
       removeProductImage,
       setPricing,
+      setProductBarcode,
       setCategory,
       setModifiers,
       customers,
@@ -4697,10 +4948,12 @@ export function ConvexStoreProvider({ children }: { children: ReactNode }) {
       webhookSummary,
       createApiKey,
       revokeApiKey,
+      purgeRevokedApiKeys,
       createWebhookEndpoint,
       updateWebhookEndpoint,
       removeWebhookEndpoint,
       testWebhookEndpoint,
+      retryWebhookDelivery,
       createSale,
       adjustStock,
       offline,

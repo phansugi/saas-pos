@@ -14,9 +14,11 @@ import {
   History,
   Image as ImageIcon,
   ImageOff,
+  LayoutGrid,
   Lock,
   MessageCircle,
   Minus,
+  PackagePlus,
   Pause,
   Play,
   Plus,
@@ -24,6 +26,7 @@ import {
   QrCode,
   Bluetooth,
   RefreshCw,
+  ScanBarcode,
   Search,
   Share2,
   Trash2,
@@ -33,8 +36,15 @@ import {
   X,
   XCircle,
 } from "lucide-react";
+import { BarcodeScanDialog } from "@/components/BarcodeScanDialog";
 import { QrCodeImage } from "@/components/QrCodeImage";
 import { ErrorNotice } from "@/components/ErrorNotice";
+import {
+  findProductByScannedCode,
+  normalizeScannedCode,
+  scannedCodeMatchesExactly,
+  suggestProductsForScannedCode,
+} from "@/lib/barcode";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -51,7 +61,7 @@ import {
 import { businessUsesTableService } from "@/lib/businessCategory";
 import { formatPctPlain, orderTotal } from "@/lib/fnbTax";
 import { tableLabel, tableStates, ticketTableHolders } from "@/lib/fnb";
-import { posCategoryChips } from "@/lib/categories";
+import { categoryNameKey, posCategoryChips } from "@/lib/categories";
 import { decideCredit, rupiah } from "@/lib/ar";
 import { ESC_POS_TRANSPORTS, type EscposTransport } from "@/lib/escpos";
 import { describeMember, discountBreakdown } from "@/lib/loyalty";
@@ -193,6 +203,12 @@ type ModifierDraft = Record<string, string[]>;
 
 const PAYMENT_METHODS: PaymentLabel[] = ["Tunai", "QRIS", "Kartu"];
 const ALL_CATEGORIES = "Semua";
+/**
+ * Penanda “tanpa saringan subkategori” di baris kedua filter katalog POS.
+ * Nilainya sama dengan `ALL_CATEGORIES` supaya kasir melihat kata yang sama di
+ * kedua baris; yang membedakan hanya baris mana yang sedang dibaca.
+ */
+const ALL_SUBCATEGORIES = "Semua";
 
 /**
  * Pecahan uang yang paling sering diserahkan pembeli, untuk tombol cepat di
@@ -254,7 +270,9 @@ function readShiftState(): ShiftState {
 export function PosPage() {
   const {
     products,
+    catalogProducts,
     categories,
+    subcategories,
     sales,
     createSale,
     source,
@@ -360,6 +378,10 @@ export function PosPage() {
    * sebab yang sebenarnya (minta izin/beri tahu pemilik), bukan tombol mati.
    */
   const canManageShift = can("shift.manage");
+  /** Rute Produk & Stok dijaga `stock.adjust`; tautan hanya untuk yang bisa masuk. */
+  const canOpenProducts = can("stock.adjust");
+  /** Pendaftaran SKU baru dari hasil scan butuh rute & izin Produk & Stok. */
+  const canRegisterProduct = canOpenProducts && can("product.manage");
   /*
     Keadaan kasinya juga bisa berubah dari tab/perangkat lain (kasir lain menutup
     shiftnya di halaman Shift & Kas). Pendengar `storage` membacanya ulang supaya
@@ -404,7 +426,29 @@ export function PosPage() {
   });
 
   const [query, setQuery] = useState("");
+  /** Pemindai barcode/QR kamera. Hasilnya dicocokkan ke SKU, bukan ke nama. */
+  const [scanOpen, setScanOpen] = useState(false);
+  const [scanResult, setScanResult] = useState<{
+    code: string;
+    product: StoreProduct | null;
+    /** Produk dengan SKU itu ada, tetapi sedang nonaktif sehingga tidak dijual. */
+    inactive: StoreProduct | null;
+    /**
+     * Hasil penambahan **otomatis** ke keranjang untuk produk yang ketemu:
+     * `added` masuk, `modifier` menunggu pilihan di dialog modifier, `stock`
+     * stoknya tidak cukup, `locked` shifnya belum dibuka. `null` untuk kode yang
+     * tidak menemukan produk mana pun — panelnya menawarkan pendaftaran.
+     */
+    added: "added" | "modifier" | "stock" | "locked" | null;
+  } | null>(null);
   const [category, setCategory] = useState<string>(ALL_CATEGORIES);
+  /**
+   * Saringan tingkat kedua di katalog kasir. Hanya berlaku setelah sebuah
+   * kategori dipilih: subkategori selalu milik satu kategori, jadi menampilkan
+   * seluruh subkategori saat “Semua” aktif hanya membuat barisnya penuh tanpa
+   * mengubah daftar produk.
+   */
+  const [subcategory, setSubcategory] = useState<string>(ALL_SUBCATEGORIES);
   const [cart, setCart] = useState<CartLine[]>([]);
   const [discount, setDiscount] = useState(0);
   const [tableId, setTableId] = useState<string | undefined>(undefined);
@@ -646,15 +690,136 @@ export function PosPage() {
     [categories, products],
   );
 
-  const filtered = useMemo(
+  /**
+   * Subkategori untuk kategori yang sedang dipilih.
+   *
+   * Sumbernya dua, dengan alasan yang sama seperti tab kategori: subkategori
+   * **aktif** dari katalog, ditambah subkategori **nonaktif yang masih dipakai**
+   * produk di kategori itu — produk lama tidak boleh kehilangan jalan pintasnya
+   * hanya karena subkategorinya dinonaktifkan di halaman Produk & Stok.
+   * Subkategori yang belum dipakai produk mana pun tetap ditampilkan supaya
+   * kasir tahu katalognya ada, dan bisa bersiap sebelum barangnya masuk.
+   */
+  const subcategoryChips = useMemo(() => {
+    if (category === ALL_CATEGORIES) return [];
+    const kategori = categories.find((c) => c.name === category);
+    const dipakai = new Set(
+      products
+        .filter((p) => p.category === category && (p.subcategory ?? "").length > 0)
+        .map((p) => categoryNameKey(p.subcategory ?? "")),
+    );
+    const hasil: string[] = [];
+    const sudahAda = new Set<string>();
+    const tambah = (nama: string) => {
+      const kunci = categoryNameKey(nama);
+      if (kunci.length === 0 || sudahAda.has(kunci)) return;
+      sudahAda.add(kunci);
+      hasil.push(nama);
+    };
+    for (const sub of subcategories) {
+      if (kategori && sub.categoryId !== kategori.id) continue;
+      if (sub.active || dipakai.has(categoryNameKey(sub.name))) tambah(sub.name);
+    }
+    for (const sub of subcategories) {
+      if (dipakai.has(categoryNameKey(sub.name))) tambah(sub.name);
+    }
+    return hasil;
+  }, [category, categories, subcategories, products]);
+
+  /**
+   * Ganti kategori dari filter: subkategorinya ikut direset. Tanpa itu, memilih
+   * “Kopi” lalu pindah ke “Makanan” akan membawa saringan “Kopi Susu” yang tidak
+   * ada di kategori baru — daftar produknya kosong tanpa sebab yang terlihat.
+   */
+  function pilihKategori(nama: string) {
+    setCategory(nama);
+    setSubcategory(ALL_SUBCATEGORIES);
+  }
+
+  const filtered = useMemo(() => {
+    const cari = query.trim().toLowerCase();
+    return products.filter(
+      (p) =>
+        (category === ALL_CATEGORIES || p.category === category) &&
+        (subcategory === ALL_SUBCATEGORIES ||
+          categoryNameKey(p.subcategory ?? "") === categoryNameKey(subcategory)) &&
+        // SKU & barcode ikut dicari: hasil scan barcode/QR (kamera atau
+        // pemindai USB) yang mengetik ke kolom ini langsung menyaring katalog.
+        (cari.length === 0 ||
+          p.name.toLowerCase().includes(cari) ||
+          p.sku.toLowerCase().includes(cari) ||
+          (p.barcode ?? "").toLowerCase().includes(cari)),
+    );
+  }, [products, category, subcategory, query]);
+
+  /**
+   * Menambahkan produk hasil scan ke keranjang **tanpa tombol perantara**.
+   *
+   * Di halaman Kasir, hasil scan yang sudah menemukan produknya langsung dicatat
+   * sebagai penjualan berjalan: kasir yang memindai sepuluh barang tidak perlu
+   * menekan “Tambah ke keranjang” sepuluh kali. Panel hasil tetap muncul, tetapi
+   * isinya hanya konfirmasi apa yang baru masuk — bukan pilihan tindakan.
+   *
+   * Produk bermodifier tetap membuka dialog modifier (pilihannya harus disengaja,
+   * sama seperti ketukan di katalog), dan panel hasil ditutup karena langkah
+   * berikutnya sudah ada di dialog itu.
+   */
+  function tambahkanHasilScan(code: string, product: StoreProduct) {
+    const hasil = addToCart(product.id, product.name, product.price);
+    if (hasil === "modifier") {
+      setScanResult(null);
+      return;
+    }
+    setScanResult({ code, product, inactive: null, added: hasil });
+  }
+
+  /**
+   * Menerapkan satu kode hasil scan dari pemindai kamera.
+   *
+   * Tiga jawaban yang mungkin: produk aktif (**langsung masuk keranjang**),
+   * produk nonaktif (tidak dijual, arahkan ke Produk & Stok), atau kode yang
+   * belum terdaftar (tawarkan pendaftaran sebagai SKU baru kalau akunnya boleh
+   * membuat produk).
+   */
+  function terapkanHasilScan(raw: string) {
+    const code = normalizeScannedCode(raw);
+    if (code.length === 0) return;
+    const aktif = findProductByScannedCode(products, code);
+    const nonaktif = aktif ? null : findProductByScannedCode(catalogProducts, code);
+    setQuery(aktif ? aktif.sku : code);
+    // Saringan kategori dibersihkan: produk yang dipindai bisa berada di tab
+    // lain, dan hasil scan yang “tidak terlihat” hanya membingungkan kasir.
+    setCategory(ALL_CATEGORIES);
+    setSubcategory(ALL_SUBCATEGORIES);
+    if (aktif) {
+      tambahkanHasilScan(code, aktif);
+      return;
+    }
+    setScanResult({ code, product: null, inactive: nonaktif, added: null });
+  }
+
+  /**
+   * Kandidat produk saat hasil scan **tidak cocok persis**.
+   *
+   * Pemindai yang membaca label kecil (atau label di layar) kadang mengirim kode
+   * yang mirip tetapi tidak sama dengan yang tersimpan. Dulu kasir hanya melihat
+   * “belum terdaftar” lalu mendaftarkan produk kembar; sekarang barang yang
+   * mungkin dimaksud ditawarkan lebih dulu — baru masuk keranjang setelah kasir
+   * memilih salah satunya.
+   */
+  const scanSuggestions = useMemo(
     () =>
-      products.filter(
-        (p) =>
-          (category === ALL_CATEGORIES || p.category === category) &&
-          p.name.toLowerCase().includes(query.toLowerCase()),
-      ),
-    [products, category, query],
+      scanResult && !scanResult.product && !scanResult.inactive
+        ? suggestProductsForScannedCode(products, scanResult.code)
+        : [],
+    [scanResult, products],
   );
+
+  /** Produk hasil scan yang sedang tampil di panel, dan jumlahnya di keranjang. */
+  const scanProduct = scanResult?.product ?? null;
+  const scanProductQty = scanProduct
+    ? cart.find((l) => l.productId === scanProduct.id && !l.modifiers)?.qty ?? 0
+    : 0;
 
   const productById = useMemo(
     () => new Map(products.map((p) => [p.id, p])),
@@ -910,12 +1075,23 @@ export function PosPage() {
     return "";
   }, [offline]);
 
-  function addToCart(productId: string, name: string, price: number) {
+  /**
+   * Hasil `addToCart` — dipakai jalur scan untuk memberi kabar apa adanya:
+   * `added` masuk keranjang, `modifier` menunggu pilihan di dialog modifier,
+   * `stock` stoknya tidak cukup, `locked` shifnya belum dibuka.
+   */
+  type AddToCartResult = "added" | "modifier" | "stock" | "locked";
+
+  function addToCart(
+    productId: string,
+    name: string,
+    price: number,
+  ): AddToCartResult {
     // Gerbang kasir: tanpa shift terbuka tidak ada barang yang masuk keranjang.
     // Tombolnya memang sudah dimatikan saat terkunci — penjagaan ini yang membuat
     // jalur lain (mis. keranjang lama yang masih tersimpan di layar) tetap tidak
     // bisa memulai penjualan baru.
-    if (posLocked) return;
+    if (posLocked) return "locked";
     const product = productById.get(productId);
     const stockLeft = available.get(productId) ?? 0;
     const inCart = cart.find(
@@ -923,7 +1099,7 @@ export function PosPage() {
     )?.qty ?? 0;
     // Ketukan yang tidak menghasilkan apa-apa dibiarkan tanpa bunyi: bip untuk
     // barang yang tidak jadi masuk justru menyesatkan kasir.
-    if (inCart >= stockLeft) return;
+    if (inCart >= stockLeft) return "stock";
 
     // Bunyi bip mesin kasir tepat saat ketukan produknya diterima — **termasuk**
     // saat yang terbuka berikutnya adalah dialog modifier, karena dari sisi kasir
@@ -943,7 +1119,7 @@ export function PosPage() {
         draft: {},
         lineIndex: null,
       });
-      return;
+      return "modifier";
     }
 
     setCart((prev) => {
@@ -957,6 +1133,7 @@ export function PosPage() {
       }
       return [...prev, { productId, name, price, qty: 1 }];
     });
+    return "added";
   }
 
   /** Buka dialog modifier untuk baris yang sudah ada di keranjang. */
@@ -1923,8 +2100,8 @@ export function PosPage() {
               </div>
             )}
           </div>
-          <div className="w-full sm:w-64">
-            <div className="relative">
+          <div className="flex w-full gap-2 sm:w-auto">
+            <div className="relative min-w-0 flex-1 sm:w-64">
               <Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input
                 value={query}
@@ -1933,8 +2110,198 @@ export function PosPage() {
                 className="pl-8"
               />
             </div>
+            {/*
+              Tombol pemindai: membuka kamera untuk barcode/QR, lalu hasilnya
+              dicocokkan ke SKU (lihat `terapkanHasilScan`). Di layar sempit
+              hanya ikonnya yang tampil — kolom pencarian tetap prioritas.
+            */}
+            <Button
+              type="button"
+              variant="outline"
+              className="shrink-0 gap-2"
+              aria-label="Pindai barcode atau QR"
+              title="Pindai barcode/QR dengan kamera"
+              data-testid="pos-scan"
+              onClick={() => setScanOpen(true)}
+            >
+              <ScanBarcode className="size-4" />
+              <span className="hidden sm:inline">Scan</span>
+            </Button>
           </div>
         </div>
+
+        {/*
+          Hasil scan tinggal di bawah toolbar sampai ditutup. Produk yang ketemu
+          **langsung masuk keranjang** — kasir tidak perlu menekan apa pun lagi,
+          panel ini hanya mengonfirmasi apa yang baru tercatat. Kode yang belum
+          terdaftar ditawari pendaftaran sebagai SKU baru — hanya kalau akun ini
+          memang boleh membuka Produk & Stok.
+        */}
+        {scanResult && (
+          <div
+            data-testid="pos-scan-result"
+            className="mt-3 rounded-lg border border-primary/30 bg-primary/5 px-4 py-3"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs text-muted-foreground">
+                  Hasil scan · <span className="font-mono">{scanResult.code}</span>
+                </p>
+                {scanResult.product ? (
+                  <>
+                    <p className="mt-0.5 truncate text-sm font-semibold">
+                      {scanResult.product.name}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      SKU {scanResult.product.sku}
+                      {scanResult.product.barcode
+                        ? ` · barcode ${scanResult.product.barcode}`
+                        : ""}{" "}
+                      · {formatIDR(scanResult.product.price)} · stok{" "}
+                      {available.get(scanResult.product.id) ?? 0}
+                    </p>
+                    {/*
+                      Kode yang hanya **mirip** (pemisah hilang, `B` terbaca
+                      `8`, deretan nol terlewat) tetap membuka produknya supaya
+                      kasir tidak perlu mencari manual — tetapi diberi tahu apa
+                      adanya, karena salah baca bisa menunjuk barang tetangga.
+                    */}
+                    {!scannedCodeMatchesExactly(scanResult.product, scanResult.code) && (
+                      <p
+                        data-testid="pos-scan-approx"
+                        className="mt-1 text-xs text-muted-foreground"
+                      >
+                        Kode hasil scan tidak sama persis dengan kode yang tersimpan —
+                        periksa barangnya di keranjang sebelum dibayar.
+                      </p>
+                    )}
+                  </>
+                ) : scanResult.inactive ? (
+                  <>
+                    <p className="mt-0.5 text-sm font-semibold">
+                      {scanResult.inactive.name} — produk nonaktif
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Kode ini sudah terdaftar, tetapi produknya sedang tidak dijual.
+                      {canOpenProducts
+                        ? " Aktifkan dulu di halaman Produk & Stok supaya bisa masuk keranjang."
+                        : " Minta pemilik atau pengelola produk mengaktifkannya lagi."}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="mt-0.5 text-sm font-semibold">
+                      {scanSuggestions.length > 0
+                        ? "Kode hasil scan tidak cocok persis dengan produk mana pun."
+                        : "Kode ini belum terdaftar sebagai SKU atau barcode."}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {scanSuggestions.length > 0
+                        ? "Periksa dulu daftar di bawah — kalau barangnya memang belum ada, daftarkan sebagai produk baru."
+                        : canRegisterProduct
+                          ? "Daftarkan sebagai produk baru — SKU-nya sudah terisi dari hasil scan."
+                          : "Minta pemilik atau pengelola produk mendaftarkannya sebagai SKU atau barcode produk."}
+                    </p>
+                    {scanSuggestions.length > 0 && (
+                      <div
+                        data-testid="pos-scan-suggestions"
+                        className="mt-2 space-y-1.5"
+                      >
+                        <p className="text-xs font-medium">
+                          Mungkin maksud Anda — kode hasil scan tidak sama persis
+                          dengan yang tersimpan:
+                        </p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {scanSuggestions.map((product) => (
+                            <Button
+                              key={product.id}
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              data-testid="pos-scan-suggestion"
+                              onClick={() => {
+                                setQuery(product.sku);
+                                setCategory(ALL_CATEGORIES);
+                                setSubcategory(ALL_SUBCATEGORIES);
+                                // Usulan yang dipilih juga masuk keranjang
+                                // langsung: pilihannya sudah disengaja kasir.
+                                tambahkanHasilScan(scanResult.code, product);
+                              }}
+                            >
+                              {product.name} · {product.sku}
+                            </Button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+              <button
+                type="button"
+                aria-label="Tutup hasil scan"
+                onClick={() => setScanResult(null)}
+                className="shrink-0 text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            {/*
+              Konfirmasi penambahan otomatis — tanpa pilihan tindakan. Yang perlu
+              kasir ketahui hanya berapa yang sekarang ada di keranjang, atau
+              sebab barangnya tidak jadi masuk.
+            */}
+            {scanResult.product && (
+              <p
+                data-testid="pos-scan-added"
+                data-status={scanResult.added ?? undefined}
+                className={cn(
+                  "mt-2 flex flex-wrap items-center gap-1.5 text-xs font-medium",
+                  scanResult.added === "added"
+                    ? "text-primary"
+                    : "text-destructive",
+                )}
+              >
+                {scanResult.added === "added" ? (
+                  <>
+                    <BadgeCheck className="size-4 shrink-0" />
+                    Masuk keranjang · {scanProductQty} di keranjang
+                  </>
+                ) : scanResult.added === "stock" ? (
+                  <>
+                    <AlertTriangle className="size-4 shrink-0" />
+                    {(available.get(scanResult.product.id) ?? 0) <= 0
+                      ? "Stoknya kosong — produk tidak masuk keranjang."
+                      : "Stok tidak mencukupi — semua stok yang tersedia sudah ada di keranjang."}
+                  </>
+                ) : (
+                  <>
+                    <Lock className="size-4 shrink-0" />
+                    Shift belum dibuka — produk belum masuk keranjang.
+                  </>
+                )}
+              </p>
+            )}
+
+            {scanResult.inactive && canOpenProducts && (
+              <Button asChild size="sm" variant="outline" className="mt-3">
+                <Link to="/app/products">Aktifkan di Produk &amp; Stok</Link>
+              </Button>
+            )}
+
+            {!scanResult.product && !scanResult.inactive && canRegisterProduct && (
+              <Button asChild size="sm" className="mt-3" data-testid="pos-scan-register">
+                <Link
+                  to={`/app/products?sku=${encodeURIComponent(scanResult.code)}`}
+                >
+                  <PackagePlus className="size-4" />
+                  Daftarkan sebagai produk
+                </Link>
+              </Button>
+            )}
+          </div>
+        )}
 
         {/*
           Gerbang kasir (`posShiftGate` di `@/lib/shift`). Ini yang dibaca kasir
@@ -2049,23 +2416,105 @@ export function PosPage() {
           </div>
         )}
 
-        <div className="mt-4 flex flex-wrap gap-2">
-          {categoryChips.map((c) => (
-            <button
-              key={c}
-              type="button"
-              onClick={() => setCategory(c)}
-              className={cn(
-                "rounded-full border px-3 py-1.5 text-sm font-medium transition-colors",
-                category === c
-                  ? "border-primary/50 bg-primary/12 text-primary"
-                  : "border-border text-muted-foreground hover:text-foreground",
-              )}
+        {/*
+          Filter katalog dua tingkat: kategori dulu, lalu subkategori di bawahnya.
+          Dirancang untuk layar kasir yang disentuh cepat: pil besar, gulir mendatar
+          (bukan membungkus jadi beberapa baris yang menggeser grid produk), dan
+          penanda aktif yang bergeser halus supaya mata kasir tetap menemukan
+          pilihannya di antara puluhan produk.
+        */}
+        <section
+          data-testid="pos-filter-katalog"
+          className="mt-4 overflow-hidden rounded-xl border border-border/70 bg-card shadow-sm"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border/60 bg-gradient-to-r from-primary/10 via-card to-accent/10 px-3 py-2">
+            <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <LayoutGrid className="size-3.5 text-primary" />
+              Kategori produk
+            </span>
+            <span
+              data-testid="pos-filter-jumlah"
+              className="text-[11px] font-medium text-muted-foreground"
             >
-              {c}
-            </button>
-          ))}
-        </div>
+              {filtered.length} dari {products.length} produk
+            </span>
+          </div>
+
+          <div className="flex gap-1.5 overflow-x-auto px-2.5 py-2">
+            {categoryChips.map((c) => {
+              const aktif = category === c;
+              return (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => pilihKategori(c)}
+                  aria-pressed={aktif}
+                  className={cn(
+                    "relative shrink-0 rounded-full px-3 py-1.5 text-sm font-medium transition-colors",
+                    aktif
+                      ? "text-primary-foreground"
+                      : "text-muted-foreground hover:bg-secondary hover:text-foreground",
+                  )}
+                >
+                  {aktif && (
+                    <motion.span
+                      layoutId="pos-kategori-aktif"
+                      className="absolute inset-0 rounded-full bg-primary shadow-sm"
+                      transition={{ type: "spring", stiffness: 420, damping: 34 }}
+                    />
+                  )}
+                  <span className="relative z-10 flex items-center gap-1.5">
+                    {c === ALL_CATEGORIES ? (
+                      <LayoutGrid className="size-3.5" />
+                    ) : (
+                      <span
+                        aria-hidden="true"
+                        className={cn(
+                          "size-1.5 rounded-full",
+                          aktif ? "bg-primary-foreground/80" : "bg-accent",
+                        )}
+                      />
+                    )}
+                    {c}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {category !== ALL_CATEGORIES && subcategoryChips.length > 0 && (
+            <div
+              data-testid="pos-subkategori"
+              className="border-t border-border/60 bg-secondary/25 px-2.5 py-2"
+            >
+              <div className="flex items-center gap-1.5 px-0.5 pb-1.5 text-[11px] text-muted-foreground">
+                <span className="font-medium uppercase tracking-wide">Subkategori</span>
+                <span className="truncate">· {category}</span>
+              </div>
+              <div className="flex gap-1.5 overflow-x-auto">
+                {[ALL_SUBCATEGORIES, ...subcategoryChips].map((s) => {
+                  const aktif = subcategory === s;
+                  return (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => setSubcategory(s)}
+                      aria-pressed={aktif}
+                      className={cn(
+                        "relative shrink-0 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
+                        aktif
+                          ? "border-accent/60 bg-accent/15 text-foreground"
+                          : "border-transparent text-muted-foreground hover:border-border hover:bg-card hover:text-foreground",
+                      )}
+                    >
+                      {s}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </section>
 
         <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
           {filtered.map((p) => {
@@ -3803,6 +4252,13 @@ export function PosPage() {
         yang dicetak kasir tidak pernah berbeda dari pratinjau yang dilihat pemilik
         toko di sana.
       */}
+      <BarcodeScanDialog
+        open={scanOpen}
+        onOpenChange={setScanOpen}
+        onScan={terapkanHasilScan}
+        context="halaman Kasir"
+      />
+
       <div data-testid="struk-cetak" className="struk-cetak">
         {strukDocument.sheets.map((sheet) => (
           <div

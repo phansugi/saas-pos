@@ -326,8 +326,8 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     label: "Produk & stok",
     permissions: [
       "product.manage",
-      // Kategori = struktur katalog (menentukan kode SKU & tab POS), jadi izinnya
-      // terpisah dari `product.manage` yang juga dipegang staf gudang.
+      // Kategori = struktur katalog (menentukan tab POS), jadi izinnya terpisah
+      // dari `product.manage` yang juga dipegang staf gudang.
       "category.manage",
       "stock.adjust",
       "inventory.view",

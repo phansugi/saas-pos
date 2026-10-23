@@ -24,6 +24,13 @@
  * memutuskan hal yang sama dengan aturan berbeda.
  */
 
+import {
+  MAX_GROUP_SELECT,
+  MAX_MODIFIER_GROUPS,
+  normaliseGroupCode,
+  normaliseOptionCode,
+} from "./modifiers";
+
 /** Metode pembayaran yang dikenal — dijaga sama dengan `paymentMethodValidator`. */
 export const PAYMENT_METHODS = ["cash", "qris", "card", "transfer"] as const;
 
@@ -35,6 +42,8 @@ export const ORDER_IDEMPOTENCY_MIN = 8;
 export const ORDER_IDEMPOTENCY_MAX = 64;
 export const ORDER_CODE_MAX = 32;
 export const ORDER_UNIT_CODE_MAX = 8;
+/** Panjang maksimum nama produk pada satu baris (dipakai sebagai cadangan SKU). */
+export const ORDER_NAME_MAX = 200;
 export const ORDER_PROVIDER_MAX = 40;
 
 const CODE_PATTERN = /^[A-Z0-9][A-Z0-9._-]*$/;
@@ -49,16 +58,39 @@ const ORDER_FIELDS = new Set([
   "memberCode",
 ]);
 
-const LINE_FIELDS = new Set(["sku", "quantity", "unitCode"]);
+const LINE_FIELDS = new Set(["sku", "name", "quantity", "unitCode", "modifiers"]);
+const MODIFIER_FIELDS = new Set(["groupCode", "optionCodes"]);
 
 const PAYMENT_FIELDS = new Set(["method", "amount", "provider", "providerRef"]);
+
+/** Pilihan modifier pada satu baris: grup + opsi, dalam bentuk kode. */
+export interface ExternalOrderModifier {
+  groupCode: string;
+  optionCodes: string[];
+}
 
 export interface ExternalOrderLine {
   /** SKU dalam huruf besar; pencocokan produk dilakukan server. */
   sku: string;
+  /**
+   * Nama produk, **hanya** dipakai kalau SKU tidak ditemukan. Berguna kalau
+   * katalog sumber sempat mengganti nomor SKU (mis. marketplace yang
+   * mengurutkan ulang SKU) sementara namanya tetap sama: pesanan yang sudah
+   * lunas tidak perlu tertahan hanya karena kodenya bergeser. Nama harus
+   * menunjuk **tepat satu** produk; nama kembar tetap ditolak agar tidak
+   * menebak produk yang salah.
+   */
+  name?: string;
   quantity: number;
   /** Satuan besar (modul Grosir, mis. `DUS`); kosong = satuan dasar produk. */
   unitCode?: string;
+  /**
+   * Modifier item (modul F&B), mis. `{ groupCode: "LEVEL", optionCodes: ["3"] }`
+   * dan `{ groupCode: "TOPPING", optionCodes: ["TELUR"] }`. Kode, bukan nama:
+   * nama boleh berubah tanpa mengubah riwayat struk. Aturan wajib/batas pilihan
+   * ditegakkan `pos.createSale` lewat `applyModifiers` yang sama dengan kasir.
+   */
+  modifiers?: ExternalOrderModifier[];
 }
 
 export interface ExternalOrderPayment {
@@ -86,6 +118,20 @@ export interface ExternalOrder {
 export type ExternalOrderParse =
   | { ok: true; value: ExternalOrder }
   | { ok: false; reason: string };
+
+/**
+ * Bentuk kunci idempotensi yang diterima `pos.createSale`. Dipakai juga oleh
+ * jalur marketplace supaya kunci yang disusun dari id pesanan mereka tidak
+ * ditolak hanya karena bentuknya.
+ */
+export function isOrderIdempotencyKey(value: string): boolean {
+  return (
+    typeof value === "string" &&
+    value.length >= ORDER_IDEMPOTENCY_MIN &&
+    value.length <= ORDER_IDEMPOTENCY_MAX &&
+    IDEMPOTENCY_PATTERN.test(value)
+  );
+}
 
 /** Kode (SKU/pelanggan/member) dinormalkan supaya “kopi-susu” = “KOPI-SUSU”. */
 export function normalizeOrderCode(value: string): string {
@@ -117,6 +163,99 @@ function readCode(
 }
 
 /**
+ * Tanda tangan baris: SKU + satuan + modifier terurut. Dipakai hanya untuk
+ * menolak baris kembar, jadi bentuknya tidak disimpan dan tidak mengikat
+ * kontrak API.
+ */
+function modifierSignature(modifiers: readonly ExternalOrderModifier[]): string {
+  return modifiers
+    .map((entry) => `${entry.groupCode}:${[...entry.optionCodes].sort().join("+")}`)
+    .sort()
+    .join(",");
+}
+
+/**
+ * Modifier satu baris. Yang diperiksa di sini hanya **bentuk**: kode grup/opsi
+ * ada, jumlah pilihan masuk akal, dan grup tidak tertulis dua kali. Apakah grup
+ * wajib sudah dipilih dan opsinya benar-benar milik produk itu dijawab
+ * `applyModifiers` di jalur kasir — satu tempat untuk aturan bisnis.
+ */
+function readModifiers(
+  raw: unknown,
+  lineIndex: number,
+): { ok: true; value: ExternalOrderModifier[] } | { ok: false; reason: string } {
+  if (raw === undefined || raw === null) return { ok: true, value: [] };
+  if (!Array.isArray(raw)) {
+    return { ok: false, reason: `Baris ke-${lineIndex}: modifiers harus berupa array.` };
+  }
+  if (raw.length > MAX_MODIFIER_GROUPS) {
+    return {
+      ok: false,
+      reason: `Baris ke-${lineIndex}: maksimal ${MAX_MODIFIER_GROUPS} grup modifier per baris.`,
+    };
+  }
+
+  const seenGroups = new Set<string>();
+  const modifiers: ExternalOrderModifier[] = [];
+  for (const [index, entry] of raw.entries()) {
+    if (!isPlainObject(entry)) {
+      return {
+        ok: false,
+        reason: `Baris ke-${lineIndex}: modifier ke-${index + 1} harus berupa objek { groupCode, optionCodes }.`,
+      };
+    }
+    const stray = Object.keys(entry).find((key) => !MODIFIER_FIELDS.has(key));
+    if (stray) {
+      return {
+        ok: false,
+        reason: `Baris ke-${lineIndex}: modifier ke-${index + 1} punya field "${stray}"; yang diterima groupCode & optionCodes.`,
+      };
+    }
+    if (typeof entry.groupCode !== "string" || entry.groupCode.trim().length === 0) {
+      return {
+        ok: false,
+        reason: `Baris ke-${lineIndex}: modifier ke-${index + 1} harus punya groupCode (mis. LEVEL).`,
+      };
+    }
+    const groupCode = normaliseGroupCode(entry.groupCode);
+    if (seenGroups.has(groupCode)) {
+      return {
+        ok: false,
+        reason: `Baris ke-${lineIndex}: grup modifier ${groupCode} tertulis dua kali.`,
+      };
+    }
+    seenGroups.add(groupCode);
+
+    if (!Array.isArray(entry.optionCodes) || entry.optionCodes.length === 0) {
+      return {
+        ok: false,
+        reason: `Baris ke-${lineIndex}: ${groupCode} wajib punya minimal satu optionCodes, atau grupnya dihilangkan.`,
+      };
+    }
+    if (entry.optionCodes.length > MAX_GROUP_SELECT) {
+      return {
+        ok: false,
+        reason: `Baris ke-${lineIndex}: ${groupCode} maksimal ${MAX_GROUP_SELECT} pilihan.`,
+      };
+    }
+
+    const optionCodes: string[] = [];
+    for (const option of entry.optionCodes) {
+      if (typeof option !== "string" || option.trim().length === 0) {
+        return {
+          ok: false,
+          reason: `Baris ke-${lineIndex}: ${groupCode} berisi kode opsi yang bukan teks.`,
+        };
+      }
+      const code = normaliseOptionCode(option);
+      if (!optionCodes.includes(code)) optionCodes.push(code);
+    }
+    modifiers.push({ groupCode, optionCodes });
+  }
+  return { ok: true, value: modifiers };
+}
+
+/**
  * Memeriksa satu pesanan dari sistem luar. Mengembalikan bentuk yang sudah
  * dinormalkan, atau alasan yang bisa dibaca operator (bukan kode galat).
  */
@@ -138,11 +277,7 @@ export function parseExternalOrder(body: unknown): ExternalOrderParse {
     return { ok: false, reason: "idempotencyKey wajib diisi." };
   }
   const idempotencyKey = rawKey.trim();
-  if (
-    idempotencyKey.length < ORDER_IDEMPOTENCY_MIN ||
-    idempotencyKey.length > ORDER_IDEMPOTENCY_MAX ||
-    !IDEMPOTENCY_PATTERN.test(idempotencyKey)
-  ) {
+  if (!isOrderIdempotencyKey(idempotencyKey)) {
     return {
       ok: false,
       reason: `idempotencyKey harus ${ORDER_IDEMPOTENCY_MIN}–${ORDER_IDEMPOTENCY_MAX} karakter huruf, angka, atau . _ : - (dipakai untuk menolak kiriman ulang).`,
@@ -163,17 +298,11 @@ export function parseExternalOrder(body: unknown): ExternalOrderParse {
     if (!isPlainObject(rawLine)) {
       return { ok: false, reason: `Baris ke-${at} harus berupa objek.` };
     }
-    if ("modifiers" in rawLine) {
-      return {
-        ok: false,
-        reason: `Baris ke-${at}: field modifiers belum didukung lewat API; kirim pesanan tanpa modifier.`,
-      };
-    }
     const unknownLineField = Object.keys(rawLine).find((key) => !LINE_FIELDS.has(key));
     if (unknownLineField) {
       return {
         ok: false,
-        reason: `Baris ke-${at}: field "${unknownLineField}" tidak dikenal. Field yang diterima: sku, quantity, unitCode.`,
+        reason: `Baris ke-${at}: field "${unknownLineField}" tidak dikenal. Field yang diterima: sku, name, quantity, unitCode, modifiers.`,
       };
     }
 
@@ -187,6 +316,18 @@ export function parseExternalOrder(body: unknown): ExternalOrderParse {
         ok: false,
         reason: `Baris ke-${at}: sku "${rawSku}" tidak valid (maksimal ${ORDER_CODE_MAX} karakter huruf besar/angka, boleh . _ -).`,
       };
+    }
+
+    let name: string | undefined;
+    if (rawLine.name !== undefined && rawLine.name !== null) {
+      if (typeof rawLine.name !== "string" || rawLine.name.trim().length === 0) {
+        return { ok: false, reason: `Baris ke-${at}: name harus berupa teks yang tidak kosong.` };
+      }
+      const trimmed = rawLine.name.trim();
+      if (trimmed.length > ORDER_NAME_MAX) {
+        return { ok: false, reason: `Baris ke-${at}: name maksimal ${ORDER_NAME_MAX} karakter.` };
+      }
+      name = trimmed;
     }
 
     const quantity = rawLine.quantity;
@@ -217,18 +358,26 @@ export function parseExternalOrder(body: unknown): ExternalOrderParse {
       unitCode = normalized;
     }
 
-    // Dua baris dengan SKU & satuan sama hampir selalu kiriman ganda; menolaknya
-    // lebih baik daripada menebak mana yang dimaksud pengirim.
-    const signature = `${sku}@${unitCode ?? ""}`;
+    const modifiers = readModifiers(rawLine.modifiers, at);
+    if (!modifiers.ok) return modifiers;
+
+    // Dua baris dengan SKU, satuan, **dan modifier** sama hampir selalu kiriman
+    // ganda; menolaknya lebih baik daripada menebak mana yang dimaksud
+    // pengirim. Modifier berbeda (mis. pedas level 1 vs level 3) adalah dua
+    // baris yang sah, jadi ikut masuk tanda tangan baris.
+    const signature = `${sku}@${unitCode ?? ""}@${modifierSignature(modifiers.value)}`;
     if (seen.has(signature)) {
       return {
         ok: false,
-        reason: `Baris ke-${at}: ${sku} muncul lebih dari sekali; gabungkan kuantitasnya dalam satu baris.`,
+        reason: `Baris ke-${at}: ${sku} dengan satuan & modifier yang sama muncul lebih dari sekali; gabungkan kuantitasnya dalam satu baris.`,
       };
     }
     seen.add(signature);
 
-    lines.push(unitCode ? { sku, quantity, unitCode } : { sku, quantity });
+    const line: ExternalOrderLine = unitCode ? { sku, quantity, unitCode } : { sku, quantity };
+    if (name) line.name = name;
+    if (modifiers.value.length > 0) line.modifiers = modifiers.value;
+    lines.push(line);
   }
 
   if (!isPlainObject(body.payment)) {

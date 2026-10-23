@@ -767,17 +767,6 @@ export const API_KEYS: DemoApiKey[] = [
     lastUsedDaysAgo: 3,
     createdDaysAgo: 70,
   },
-  {
-    id: "key-lama",
-    name: "Integrasi toko lama",
-    publicId: "r8wq2vhbmn",
-    scopes: ["report.view", "inventory.view"],
-    creatorRole: "owner",
-    active: false,
-    expiresInDays: 0,
-    lastUsedDaysAgo: 40,
-    createdDaysAgo: 120,
-  },
 ];
 
 /**
@@ -938,7 +927,7 @@ export const SUPPORT_TICKETS: DemoSupportTicket[] = [
       {
         atMinutesAgo: 2600,
         kind: "status",
-        body: "Kolom harga bertingkat ada di Produk → Atur harga, dan menunya muncul saat modul Grosir aktif.",
+        body: "Kolom harga bertingkat ada di Produk → Ubah produk, dan menunya muncul saat modul Grosir aktif.",
       },
     ],
     createdMinutesAgo: 3000,

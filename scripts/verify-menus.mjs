@@ -75,7 +75,7 @@ const PAGE_MARKERS = {
   "/app/pos": "Keranjang kosong",
   "/app/kds": "Antrean dapur",
   "/app/shift": "Shift & Kas",
-  "/app/products": "Atur harga",
+  "/app/products": "Ubah produk",
   "/app/inventory": "Gudang & Stok",
   "/app/opname": "Stock Opname",
   "/app/receivables": "Piutang & Limit Kredit",

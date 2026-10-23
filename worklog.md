@@ -27,6 +27,2681 @@ Aturan penulisan yang dipakai di berkas ini:
 
 ## Riwayat
 
+## 2026-10-23 — Kasir: hasil scan langsung masuk keranjang, tanpa tombol pilihan
+
+**Ruang lingkup:** permintaan pemilik — khusus di halaman Kasir, barcode yang berhasil dipindai
+seharusnya **langsung masuk keranjang**, tidak perlu memilih tombol “Tambah ke keranjang” atau “Buka
+Produk & Stok”. Dikerjakan di jalur scan halaman Kasir saja; halaman Produk & Stok tidak diubah.
+
+- **Alur** (`src/pages/PosPage.tsx`): `terapkanHasilScan` memanggil `tambahkanHasilScan`, yang langsung
+  menjalankan `addToCart` untuk produk yang ketemu — termasuk hasil baca yang **mirip** (lihat entri
+  pencocokan toleran di bawah). `addToCart` sekarang mengembalikan hasilnya (`added` / `modifier` /
+  `stock` / `locked`) supaya panel bisa menyebut apa adanya, bukan diam saja.
+- **Panel hasil** tidak lagi berisi tombol tindakan: yang tampil hanya konfirmasi `Masuk keranjang ·
+  N di keranjang` beserta nama/SKU/barcode/harga/stok produk, atau sebab barangnya tidak masuk
+  (stok kosong/tidak cukup, shift belum dibuka). Catatan kode yang tidak sama persis tetap ada, tetapi
+  bunyinya kini “periksa barangnya di keranjang sebelum dibayar”.
+- **Produk bermodifier** tetap membuka dialog modifier (pilihan topping/grup wajib harus disengaja,
+  sama seperti ketukan di katalog) dan panel hasil ditutup karena langkah berikutnya ada di dialog itu.
+  Kode yang tidak menemukan produk, produk nonaktif, serta **Daftarkan sebagai produk** tetap seperti
+  semula — itu bukan scan yang berhasil.
+- **Usulan** (`pos-scan-suggestion`): memilih salah satu usulan kini juga langsung memasukkan produknya
+  ke keranjang, bukan sekadar membuka panel dengan tombol tambah.
+
+**Berkas:** baru: — · diubah: `src/pages/PosPage.tsx`, `scripts/verify-render.mjs`, `README.md`,
+`worklog.md`.
+
+**Verifikasi:**
+- `bun tsc -p tsconfig.app.json --noEmit` → **exit 0**.
+- `bun scripts/verify-render.mjs` → **1133/1133 checks passed**, exit 0. Dua cek lama (“klik tombol
+  tambah” lalu “keranjang bertambah”) dilebur menjadi satu cek per alur, jadi jumlah total turun dari
+  1135 menjadi 1133 — bukan cek yang dihapus tanpa pengganti. Cek baru membuktikan: scan `P03` → panel
+  memuat “Masuk keranjang”, `pos-scan-add` **tidak ada**, keranjang “1 item”; scan `PB800005` (meleset)
+  → produk yang tepat + catatan tidak sama persis, langsung “2 item”; pilih usulan → “3 item”.
+- `bun run bersih:uji` **tidak dijalankan**: harness render memakai store demo di memori, tidak ada
+  tulisan ke deployment, jadi tidak ada akun uji yang tertinggal.
+- `README.md`/`worklog.md` hanya dokumentasi (tidak memengaruhi build/tipe); uraian tombol pemindai di
+  README disesuaikan.
+
+**Catatan / blocker:** perilaku ini **belum diuji di perangkat sungguhan** (kamera + pemindai USB di
+halaman Kasir); yang terbukti adalah jalur pemanggilan & perubahan keranjang di DOM tiruan. Tidak ada
+perubahan skema/data. Tabel **Status Phase 1–6** dan daftar **Blocker** diperiksa: tidak ada butir yang
+berubah.
+
+## 2026-10-23 — Pemindai: frame kamera resolusi penuh + galeri untuk barcode kecil di layar
+
+**Ruang lingkup:** laporan pemilik — scan barcode yang **ditampilkan di halaman detail marketplace** gagal
+di Kasir (muncul “Kode ini belum terdaftar sebagai SKU atau barcode. Daftarkan sebagai produk baru”),
+sedangkan scan kode yang sama dari MesinPOS berhasil. Diperiksa penyebabnya di sisi tampilan marketplace
+dan jalur baca di dialog pemindai.
+
+- **Temuan (dari bundel marketplace, bukan tebakan):** barcode halaman detail digambar sebagai SVG
+  280×96 (`moduleWidth: 2`, `canvasWidth: 280`; `PBB-0000005` = 208 modul), lalu ditampilkan di kotak
+  `h-12 w-[140px]` (ponsel) / `sm:h-14 sm:w-[163px]` dengan `object-contain`. Hasilnya **±0,6–0,7 piksel
+  per modul** dan teks kodenya mengecil dari 8 px — di bawah batas yang bisa dibaca kamera mana pun.
+  Datanya sendiri benar: `sku: "PBB-0000005"`, `barcode: "code39:PBB-0000005"`, dan tabel Code 39-nya
+  sama dengan MesinPOS (44/44, lihat entri di bawah). Jadi yang salah adalah **ukuran tampilannya**,
+  bukan data atau pencocokan.
+- **Perbaikan di repo ini** (`src/components/BarcodeScanDialog.tsx`): frame kamera diminta **1920×1080**
+  (constraint `ideal`, jadi perangkat yang tidak sanggup tetap memakai frame terbaiknya) supaya kode
+  kecil di layar punya cukup piksel saat kamera didekatkan; ditambah tombol **Galeri / tangkapan layar**
+  + input berkas yang membaca kode lewat `readBarcodeFromImage` — jalur yang sama dengan kolom barcode
+  produk — dan menampilkan hasil/gagal apa adanya. Petunjuk kamera kini menyebut “dekatkan bila kodenya
+  kecil”.
+- **Pesan** (`src/lib/barcodeImage.ts`) dibuat netral karena helper ini sekarang dipakai dua tempat
+  (kolom barcode produk & dialog pemindai): “ketik kodenya secara manual”, bukan lagi menyarankan
+  “buat barcode otomatis dari SKU”.
+
+**Berkas:** baru: — · diubah: `src/components/BarcodeScanDialog.tsx`, `src/lib/barcodeImage.ts`,
+`scripts/verify-render.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+- `bun tsc -p tsconfig.app.json --noEmit` → **exit 0**.
+- `bun scripts/verify-render.mjs` → **1135/1135 checks passed**, exit 0 (dari 1133; dua cek baru: tombol
+  & input galeri ada di dialog, dan memilih berkas benar-benar menjalankan pembaca lalu memberi pesan).
+  Di happy-dom `BarcodeDetector` tidak ada, jadi yang terbukti adalah **jalur pemanggilannya**, bukan
+  pembacaan gambar sungguhan.
+- Pemeriksaan ukuran dari bundel marketplace: SVG 280×96 dengan 208 modul, kotak tampil 140×48 /
+  163×56 px → **0,61 px/modul** (ponsel) dan **0,72 px/modul** (desktop).
+- `bun run bersih:uji` **tidak dijalankan**: tidak ada uji yang menulis ke deployment.
+- `README.md`/`worklog.md` hanya dokumentasi; jumlah cek di README disesuaikan menjadi 1135/1135.
+
+**Catatan / blocker:** perbaikan **permanen** ada di aplikasi marketplace — barcode halaman detail perlu
+digambar dan ditampilkan jauh lebih besar (mis. kotak ±320 px di ponsel & ±420 px di desktop,
+`moduleWidth: 3`, `barHeight: 160`, `canvasWidth: 640`, teks ≥14 px). Repo marketplace tidak ada di
+workspace ini, jadi perubahan itu belum dikerjakan di sini. Sampai saat itu, dari MesinPOS jalurnya:
+kamera resolusi penuh sambil didekatkan, atau simpan tangkapan layar halaman marketplace lalu pilih
+**Galeri**. Constraint kamera dan pembacaan gambar **belum diuji di perangkat sungguhan** (butuh
+Chrome Android ber-`BarcodeDetector` + kamera); sesi ini hanya memverifikasi tipe dan harness render.
+Tabel Status Phase 1–6 dan daftar **Blocker** diperiksa: tidak ada butir yang berubah.
+
+## 2026-10-23 — Scan barcode marketplace yang terbaca meleset tetap membuka produknya
+
+**Ruang lingkup:** laporan pemilik — setiap kali scan barcode dari marketplace di Kasir selalu muncul
+“Kode ini belum terdaftar sebagai SKU atau barcode. Daftarkan sebagai produk”, padahal setiap SKU di
+MesinPOS sudah punya barcode. Diperiksa dengan **data marketplace sungguhan**, bukan tebakan.
+
+- **Temuan dari data nyata:** `marketplace:getProducts` (vendor “Pusat Bahan Bangunan Official”, 11
+  produk) mengirim `sku: "PBB-0000005"` dan `barcode: "code39:PBB-0000005"`; komponen label marketplace
+  membuka prefix itu lalu menggambar Code 39 dari `PBB-0000005`. Tabel pola Code 39 marketplace
+  dibandingkan karakter demi karakter dengan tabel MesinPOS → **44/44 sama**, jadi label yang tercetak
+  benar dan yang diterima Kasir adalah **hasil baca pemindai yang meleset** (`PB800005`: `B` terbaca
+  `8`, satu `B` dan dua nol hilang). Pencocokan lama hanya persis/pemisah, sehingga kode itu tidak
+  menemukan produk dan Kasir ditawari mendaftarkan produk kembar.
+- **Aturan murni** (`src/lib/barcode.ts`): `tolerantScannedKey` menyamakan karakter yang paling sering
+  tertukar (`8↔B`, `0↔O`, `1↔I`, `2↔Z`, `5↔S`, `6↔G`), membuang pemisah, dan merapatkan deretan `O`;
+  `findProductByScannedCode` memakainya sebagai **jalan terakhir** dan hanya menerima hasil yang
+  menunjuk **tepat satu** produk. `suggestProductsForScannedCode` mengusulkan maksimal tiga kandidat
+  terdekat (jarak edit 1–2; kode < 5 karakter tidak diusulkan), dan `scannedCodeMatchesExactly`
+  menandai kecocokan yang bukan persis.
+- **Kasir** (`src/pages/PosPage.tsx`): hasil scan yang mirip membuka produknya lengkap dengan harga,
+  stok, dan catatan `pos-scan-approx` (“tidak sama persis — periksa nama & harganya”); kalau
+  kandidatnya lebih dari satu, panel menampilkan tombol `pos-scan-suggestions` (tidak pernah masuk
+  keranjang sendiri) dan **tidak** lagi menyuruh mendaftarkan produk kembar. Tombol **Daftarkan
+  sebagai produk** tetap ada untuk kode yang benar-benar baru. Halaman Produk & Stok ikut memakai
+  pencocokan yang sama tanpa perubahan kode di sana.
+- **Harness & dokumentasi:** cek katalog 11 SKU berurutan (`PBB-0000001`…`PBB-0000011`) memastikan
+  deretan nol yang dirapatkan tidak membuat semuanya ambigu, cek kode ambigu tidak ditebak, cek
+  usulan (isi & batas tiga), serta alur Kasir: scan `PB800005` → produk terbuka + peringatan → bisa
+  ditambahkan, kode ambigu → usulan → pilih → tambah. `README.md` menjelaskan aturan baru ini.
+
+**Berkas:** baru: — · diubah: `src/lib/barcode.ts`, `src/pages/PosPage.tsx`,
+`scripts/verify-render.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+- `curl -s -X POST https://scintillating-crane-800.convex.cloud/api/query` (`marketplace:getProducts`)
+  → `sku: "PBB-0000005"`, `barcode: "code39:PBB-0000005"`; skrip pembanding sementara
+  (`/tmp/cocok39.mjs`, membaca pola dari bundel marketplace) → **0 dari 44 karakter berbeda** dari
+  tabel Code 39 MesinPOS, barcode `PBB-0000005` = 208 modul. Jadi masalahnya di hasil baca pemindai,
+  bukan di label/data.
+- `bun tsc -p tsconfig.app.json --noEmit` → **exit 0**.
+- `bun scripts/verify-render.mjs` → **1133/1133 checks passed**, exit 0 (dari 1120; cek baru mencakup
+  kasus laporan, katalog 11 SKU, kode ambigu, usulan, dan alur Kasir).
+- `bun run bersih:uji` **tidak dijalankan**: tidak ada uji yang menulis ke deployment (harness render
+  memakai store demo di memori), jadi tidak ada akun uji yang tertinggal.
+- `README.md`/`worklog.md` hanya dokumentasi; jumlah cek di README disesuaikan menjadi 1133/1133.
+
+**Catatan / blocker:** fallback toleran sengaja hanya untuk kandidat **tunggal**; kode yang bisa
+menunjuk dua produk tetap dianggap belum dipastikan dan kasir memilih dari usulan. Bila pemindai
+meleset sampai digit pembeda hilang, produk tidak ditebak. Tidak ada perubahan data/migrasi — barcode
+yang tersimpan tetap `PBB-0000005`. Tabel **Status Phase 1–6** dan daftar **Blocker** diperiksa: tidak
+ada butir yang berubah.
+
+## 2026-10-23 — Sinkron barcode/QR otomatis terjadwal (hanya kolom barcode)
+
+**Ruang lingkup:** permintaan pemilik — tambahkan sinkron barcode otomatis terjadwal yang **hanya**
+menyentuh kolom barcode. Arahnya marketplace → MesinPOS (marketplace sumber label), berjalan sendiri
+tiap hari tanpa tombol, tanpa membuat produk baru, dan tanpa mengubah nama/harga/stok/kategori/gambar.
+
+- **Aturan murni** (`src/convex/lib/marketplace.ts`): `planMarketplaceBarcodeSync` mencocokkan SKU
+  marketplace dengan SKU lokal (tanpa beda huruf besar/kecil), menyusun daftar `updates` yang isinya
+  **hanya** `productId`, `sku`, `barcode`, `barcodeType`, serta hitungan `products`/`changed`/
+  `unchanged`/`conflicts`/`missing`. Satu kode tetap tidak boleh dipakai dua produk: kode milik produk
+  lain atau yang menabrak SKU produk lain dilewati dan dihitung bentrok. SKU yang belum ada tidak
+  dibuat. `marketplaceBarcodeSyncNote`/`marketplaceBarcodeSyncSentence` menulis hasilnya apa adanya.
+- **Pekerja** (`src/convex/marketplace.ts`): `barcodeSyncState` (pairing → vendor), `applyBarcodeSync`
+  (menulis `barcode`/`barcodeType` + satu audit `marketplace.barcode.sync`), `recordBarcodeSync`
+  (mencatat `lastBarcodeSync*` di baris pairing), `runBarcodeSync` (baca katalog → parse → rencana →
+  tulis; kegagalan jaringan dicatat `failed`, bukan dilempar), `syncBarcodesForTenant`
+  (`internalAction` untuk cron), `syncBarcodesNow` (aksi pemilik untuk memicu lebih awal; dipakai
+  harness), dan `syncAllBarcodes` (`internalMutation`: satu pekerja per workspace terpasang).
+- **Jadwal** (`src/convex/crons.ts`): `crons.daily("menyinkronkan barcode marketplace", 03:00 UTC)` —
+  sesudah rekonsiliasi stok 02:30, supaya dua pekerja tidak membaca katalog vendor yang sama
+  berbarengan. Batch 20 workspace per putaran.
+- **Skema & kartu:** `marketplacePairings.lastBarcodeSyncAt/Status/Note/Counts` (opsional, baris lama
+  tetap sah); kartu Pengaturan mendapat panel **Barcode/QR otomatis** dengan status terakhir
+  (`data-testid="marketplace-barcode-sync-note"`). Tanpa tombol baru: pekerjaannya memang terjadwal.
+- **Harness:** cek murni (rencana hanya mengubah kode, cocok lewat SKU tanpa beda huruf, bentrok tidak
+  direbut, SKU asing tidak dibuat, sinkron kedua tidak menulis lagi, kalimat hasil/status, batas batch)
+  dan cek E2E: barcode produk dirusak menjadi `SALAH-1` di POS, `syncBarcodesNow` memulihkannya menjadi
+  kode marketplace, jumlah produk dan nama/harga/stok tidak berubah, kasir ditolak, status tercatat di
+  kartu.
+
+**Berkas:** diubah: `src/convex/lib/marketplace.ts`, `src/convex/marketplace.ts`,
+`src/convex/schema.ts`, `src/convex/crons.ts`, `src/components/MarketplacePairingCard.tsx`,
+`scripts/verify-marketplace-pairing.mjs`, `README.md`, `worklog.md`. Tidak ada berkas baru.
+
+**Verifikasi:**
+- `bun scripts/verify-marketplace-pairing.mjs` → **222/222 pemeriksaan lulus**, exit 0 (murni).
+- `bun convex dev --once` → **exit 0**, `Convex functions ready! (3.53s)`; fungsi & tipe baru
+  (`syncBarcodesNow`, `syncAllBarcodes`, `syncBarcodesForTenant`) tergenerasi.
+- `MARKETPLACE_E2E=1 bun scripts/verify-marketplace-pairing.mjs` → **304/304 pemeriksaan lulus**,
+  exit 0 (deployment dev; katalog marketplace sungguhan). Bukti: produk `PBB-0000005` yang diubah
+  menjadi `SALAH-1` kembali menjadi `PBB-0000005` (jenis `barcode`); jumlah produk lokal sebelum &
+  sesudah sinkron sama (tidak ada yang dibuat); nama, harga, dan stok tidak berubah; kasir ditolak;
+  `lastBarcodeSyncStatus: "synced"` di kartu.
+- `bun convex run marketplace:syncAllBarcodes '{"limit":5}'` → **exit 0**, `{"scanned": 5,
+  "scheduled": 5}`; titik masuk cron dijalankan langsung di deployment dev dan menjadwalkan lima
+  pekerja workspace yang sedang terpasang (bukan akun uji).
+- `bun tsc -p tsconfig.convex.json --noEmit` → **exit 0**.
+- `bun tsc -p tsconfig.app.json --noEmit` → **exit 0**.
+- `bun scripts/verify-render.mjs` → **1120/1120 checks passed**, exit 0 (termasuk uji error-boundary
+  bawaan harness: jejak `Boom` di keluaran memang disengaja).
+- `bun run bersih:uji` (sesudah E2E) → pengguna uji dihapus **2**
+  (`marketplace+…`/`marketplace-kasir+…@mesinpos.test`), **5** baris dilewati karena bukan akun uji,
+  akun bisnis uji dibersihkan (`ran: true`).
+
+**Catatan / blocker:** pekerja ini sengaja **tidak** menghapus kode lokal saat marketplace tidak lagi
+menyebutkannya, dan **tidak** membuat produk yang belum ada — dua hal itu tetap milik tombol
+**Impor katalog**. Kode yang bentrok hanya dihitung; pemilik perlu membereskan produk yang memakainya.
+Sinkron memakai batas impor (500 SKU marketplace) dan 2.000 produk lokal sekali pindai; bila
+terpotong, catatan menyebutnya. Tidak ada tombol manual di kartu — pemicu pemilik tersedia sebagai
+action `syncBarcodesNow` dan dipakai harness. Tabel **Status Phase 1–6** dan daftar **Blocker**
+diperiksa: tidak ada butir yang berubah.
+
+## 2026-10-23 — Barcode marketplace `code39:` dibaca & dikirim dalam format yang sama
+
+**Ruang lingkup:** permintaan pemilik — kolom **Barcode / QR Code (untuk kasir POS)** harus otomatis
+sama dengan yang ada di marketplace. Pemeriksaan data **nyata** marketplace
+(`marketplace:getProducts`, vendor “Pusat Bahan Bangunan Official”, 11 produk) menunjukkan kodenya
+disimpan berprefix simbol: `code39:PBB-0000005` + `barcodeType: "barcode"`. Impor sebelumnya
+menyimpan teks itu apa adanya, gagal divalidasi sebagai Code 39, lalu jatuh ke jenis QR — jadi kolom
+di MesinPOS berisi `code39:PBB-0000005` sebagai QR, tidak sama dengan marketplace dan tidak bisa
+dipindai. Entri ini memperbaiki bentuk kodenya, bukan arah sinkronisasinya.
+
+- **Baca (marketplace → POS)**: `decodeMarketplaceBarcode` di `src/convex/lib/marketplace.ts` membuka
+  prefix yang dikenal (`code39`, `code93`, `code128`, `ean13`, `ean8`, `upca`, `upce`, `itf`,
+  `codabar` → jenis Barcode; `qr`/`qrcode` → jenis QR). Prefix yang tidak dikenal **tidak** dibuang
+  karena bisa jadi bagian kode (URL `https://…`). `catalogBarcode` memakai fungsi ini sebelum
+  validasi, jadi yang tersimpan adalah teks kodenya (`PBB-0000005`, jenis `barcode`) — sama seperti
+  label yang tercetak di marketplace. Barcode berbentuk angka tetap dibaca sebagai teks.
+- **Kirim (POS → marketplace)**: `encodeMarketplaceBarcode` mengembalikan format yang dipakai
+  marketplace (`code39:<kode>` / `qr:<kode>`), dan `buildProductCatalog` memakainya untuk kolom
+  `barcode` di snapshot, tombol **Sinkronkan produk**, dan dorongan stok otomatis. `barcodeType`
+  tetap ikut, jadi penerima tidak perlu menebak simbolnya.
+- **Harness:** cek murni baru (prefix `code39`/`qr` dibuka, prefix tak dikenal utuh, hasil encode sama
+  dengan format marketplace), cek E2E: produk POS ber-barcode muncul di snapshot sebagai
+  `code39:8990001112223`, dan barcode yang tersimpan di POS (dibaca ulang dari snapshot) sama dengan
+  barcode marketplace setelah prefix dibuka.
+
+**Berkas:** diubah: `src/convex/lib/marketplace.ts`, `src/convex/marketplace.ts`,
+`scripts/verify-marketplace-pairing.mjs`, `README.md`, `worklog.md`. Tidak ada berkas baru.
+
+**Verifikasi:**
+- `bun scripts/verify-marketplace-pairing.mjs` → **205/205 pemeriksaan lulus**, exit 0 (murni).
+- `bun convex dev --once` → **exit 0**, `Convex functions ready! (3.44s)`.
+- `MARKETPLACE_E2E=1 bun scripts/verify-marketplace-pairing.mjs` → **280/280 pemeriksaan lulus**,
+  exit 0. Bukti: snapshot produk POS memuat `barcode: "code39:8990001112223"`; produk impor dari
+  marketplace memiliki barcode `PBB-0000005` (jenis `barcode`), bukan `code39:PBB-0000005`.
+- Percobaan E2E **pertama gagal** di cek “barcode marketplace ikut tersimpan di POS” karena cek lama
+  membandingkan nilai snapshot (berformat marketplace) dengan nilai yang sudah diurai; cek diperbaiki
+  agar membuka prefix dulu, lalu ulangan lulus 280/280.
+- `bun tsc -p tsconfig.convex.json --noEmit` → **exit 0**.
+- `bun tsc -p tsconfig.app.json --noEmit` → **exit 0**.
+- `bun run bersih:uji` (sesudah dua percobaan E2E) → pengguna uji dihapus **4** (dua pasang
+  `marketplace+…`/`marketplace-kasir+…`), **5** baris dilewati karena bukan akun uji, akun bisnis uji
+  dibersihkan (`ran: true`).
+
+**Catatan / blocker:** `barcode` di snapshot/dorongan kini berformat marketplace (`code39:`/`qr:`);
+konsumen yang membaca snapshot perlu membuka prefix itu — dan MesinPOS sendiri melakukannya saat
+impor, jadi bolak-balik tetap stabil. Simbol 1D di luar Code 39 (EAN/UPC/Code 128 dari marketplace)
+map ke jenis `barcode` MesinPOS; teks yang dipindai sama, tetapi gambar pratinjau di MesinPOS selalu
+Code 39. Impor katalog masih **manual** (tombol **Impor katalog**) — barcode mengikuti setiap kali
+impor dijalankan atau saat marketplace menarik snapshot kita; belum ada jadwal impor otomatis, karena
+itu berarti menimpa nama/harga/stok POS tanpa perintah pemilik. Tabel **Status Phase 1–6** dan daftar
+**Blocker** diperiksa: tidak ada butir yang berubah.
+
+## 2026-10-23 — Barcode/QR kasir ikut tersinkron dua arah dengan marketplace
+
+**Ruang lingkup:** permintaan pemilik — saat sinkronisasi marketplace → MesinPOS maupun MesinPOS →
+marketplace, field **Barcode / QR Code (untuk kasir POS)** ikut diperbarui, supaya hasil scan di kedua
+sisi menemukan SKU produk yang sama. Sebelumnya field ini tersimpan di produk tetapi tidak pernah
+masuk badan snapshot/dorongan katalog dan tidak dibaca saat impor katalog marketplace.
+
+- **Arah POS → marketplace** (`src/convex/marketplace.ts`, `src/convex/lib/marketplace.ts`):
+  `MARKETPLACE_PRODUCT_FIELDS` kini mendeklarasikan `barcode` + `barcodeType` (jadi marketplace yang
+  belum punya kolomnya membuat kolom itu), dan `buildProductCatalog` mengisi keduanya dari
+  `products.barcode`/`products.barcodeType` (`barcodeType` memakai `productBarcodeTypeOr` untuk produk
+  lama). Karena snapshot bertoken, tombol **Sinkronkan produk**, dan dorongan stok otomatis memakai
+  penyusun yang sama, ketiganya membawa kode yang sama — tidak ada jalur yang tertinggal.
+- **Arah marketplace → POS** (`parseMarketplaceCatalogProducts` + `applyCatalogImport`): baris
+  marketplace dibaca lewat `catalogBarcode`. Kode divalidasi dengan aturan produk yang sudah ada;
+  kode bertipe Barcode yang memuat karakter di luar Code 39 dicoba ulang sebagai QR, kode yang tetap
+  tidak sah dibuang **tanpa membatalkan produknya**. `applyCatalogImport` menulis `barcode` +
+  `barcodeType` pada produk baru maupun produk yang sudah ada, dengan peta pemilik kode: satu kode
+  hanya boleh menunjuk satu produk dan tidak boleh menabrak SKU produk lain (aturan yang sama dengan
+  `products.create`/`products.setBarcode`). Kode yang sudah dipakai produk lain **dilewati** dan
+  dihitung `barcodeConflicts`, bukan membuat seluruh impor gagal; kode lokal tidak dihapus hanya
+  karena baris marketplace belum menyebutkannya.
+- **Hitungan & tampilan:** `MarketplaceCatalogCounts` menambah `barcodes` (kode yang disimpan) dan
+  `barcodeConflicts`; `marketplaceCatalogImportSentence` dan baris ringkas kartu Pengaturan
+  menampilkannya, dan `lastCatalogCounts` di skema menyimpan keduanya sebagai opsional (baris lama
+  tetap sah dibaca dan dibaca sebagai `0`).
+- **Harness:** `verify-marketplace-pairing` menambah cek murni (barcode dibaca & dirapikan, jenis QR
+  tanpa beda huruf, fallback ke QR, produk tanpa kode tetap diimpor, hitungan & kalimatnya) dan cek
+  E2E (produk POS ber-barcode muncul di snapshot, barcode marketplace tersimpan di POS, impor ulang
+  tidak menulis barcode lagi).
+
+**Berkas:** diubah: `src/convex/lib/marketplace.ts`, `src/convex/marketplace.ts`,
+`src/convex/schema.ts`, `src/components/MarketplacePairingCard.tsx`,
+`scripts/verify-marketplace-pairing.mjs`, `README.md`, `worklog.md`. Tidak ada berkas baru.
+
+**Verifikasi:**
+- `bun scripts/verify-marketplace-pairing.mjs` → **201/201 pemeriksaan lulus**, exit 0 (murni, tanpa
+  jaringan/deployment; termasuk barcode marketplace yang berbentuk angka).
+- `bun convex dev --once` → **exit 0**, `Convex functions ready! (4.81s)`; skema
+  `lastCatalogCounts.barcodes`/`barcodeConflicts` terpasang di deployment dev.
+- `MARKETPLACE_E2E=1 bun scripts/verify-marketplace-pairing.mjs` → **275/275 pemeriksaan lulus**,
+  exit 0 (deployment dev, menulis akun uji). Bukti yang dipegang: produk POS dengan barcode
+  `8990001112223` muncul di snapshot dengan `barcodeType: "barcode"`; barcode dari katalog
+  marketplace tersimpan di produk impor; impor kedua mencatat `barcodes: 0`.
+- `bun tsc -p tsconfig.convex.json --noEmit` → **exit 0**.
+- `bun tsc -p tsconfig.app.json --noEmit` → **exit 0**.
+- `bun tsc -b --noEmit` → **gagal dijalankan**: timeout 180 detik dua kali karena workspace sibuk
+  (bukan karena error tipe); diganti dua perintah `tsc -p` di atas yang keduanya exit 0.
+- `bun run bersih:uji` (sesudah E2E) → akun bisnis uji dibersihkan (`ran: true`), pengguna uji
+  dihapus **2** (`marketplace+…@mesinpos.test`, `marketplace-kasir+…@mesinpos.test`), **5** baris
+  dilewati karena bukan akun uji.
+- `bun scripts/verify-render.mjs` **tidak dijalankan**: perubahan UI hanya menambah “N barcode/QR” di
+  baris ringkas kartu, tanpa mengubah alur atau teks yang diperiksa harness render.
+
+**Catatan / blocker:** kode yang dilewati karena bentrok dilaporkan sebagai `barcodeConflicts` —
+pemilik perlu membersihkan salah satu produk di marketplace, karena MesinPOS tidak boleh menebak
+kode mana yang benar. Mengubah barcode di POS belum memicu kiriman sendiri; kode baru sampai ke
+marketplace lewat tombol **Sinkronkan produk**, dorongan stok otomatis berikutnya untuk produk itu,
+atau saat marketplace menarik snapshot (snapshot selalu memuat field ini). Untuk produk lama yang
+belum punya `barcodeType`, jenisnya dibaca sebagai `barcode`. Tabel **Status Phase 1–6** dan daftar
+**Blocker** diperiksa: tidak ada butir yang berubah (ini kelengkapan field sinkronisasi, bukan
+klausa roadmap).
+
+## 2026-10-23 — Kolom Barcode / QR Code produk: otomatis dari SKU, galeri, kamera, dan pencarian kasir
+
+**Ruang lingkup:** permintaan pemilik — kolom baru di produk MesinPOS seperti form marketplace:
+pilihan **Barcode / QR Code**, tombol **Buat otomatis** dari SKU, unggah dari **galeri** atau **kamera**,
+dan pratinjau kode. Kode yang disimpan harus benar-benar dipakai kasir, bukan sekadar hiasan form.
+
+- **`src/convex/lib/productBarcode.ts`** (baru, aturan murni): jenis `barcode`/`qr`; normalisasi kode;
+  validasi Code 39 (A–Z, 0–9, spasi, `- . $ / + %`) dan QR; pembuatan kode dari SKU; tabel & modul
+  Code 39 untuk gambar. `src/lib/productBarcode.ts` hanya meneruskan modul yang sama ke sisi aplikasi.
+- **`src/components/ProductBarcodeField.tsx`** (baru): pilihan jenis, pratinjau Code 39/QR yang bisa
+  dipindai, tombol **Buat Barcode/QR Code otomatis**, **Galeri**, **Kamera** (input `capture=environment`),
+  kolom ketik manual, pesan validasi, dan tombol melepas kode. Foto hanya dibaca menjadi teks lewat
+  `BarcodeDetector` (`src/lib/barcodeImage.ts`, baru); tidak ada gambar label yang disimpan.
+- **`src/components/Barcode39Image.tsx`** (baru): gambar Code 39 hitam-putih dengan zona tenang dari
+  modul yang sama dengan validasi — pratinjau bukan kotak hiasan.
+- **Data & backend:** `products.barcode` + `products.barcodeType` (opsional, satu kode per produk);
+  `products.create` menerima keduanya, `products.setBarcode` baru menyimpan/melepas kode dengan audit
+  sendiri. Kode unik per tenant dan **tidak boleh menabrak SKU produk lain** — satu hasil scan tidak
+  boleh menunjuk dua barang. Store demo memakai aturan & pesan yang sama; store Convex meneruskan ke
+  mutation baru.
+- **Pemakaian di kasir:** `findProductByScannedCode` mencocokkan SKU lebih dulu, lalu `barcode`;
+  pencarian Kasir ikut mencocokkan barcode; panel hasil scan menampilkan barcode. Form Produk baru dan
+  kartu Ubah produk sama-sama memuat kolom ini, dan `?sku=` tetap membuka produk/form yang tepat.
+- **Harness `verify-render`**: aturan barcode (otomatis dari SKU, Code 39 valid, validasi Code 39 vs QR,
+  barcode ikut dicari), DOM form (pilihan jenis, pratinjau Code 39, ganti ke QR, kode eksternal
+  `BC-9001`), simpan produk baru, scan `bc-9001` untuk membuka produk yang sama, ubah kodenya ke
+  `BC-9002`, simpan, lalu pindai lagi. Kamera/galeri
+  fisik tidak bisa diuji di happy-dom; yang diuji adalah keberadaan tombol/input dan jalur manual yang
+  sama untuk peramban tanpa `BarcodeDetector`.
+
+**Berkas:** baru: `src/convex/lib/productBarcode.ts`, `src/lib/productBarcode.ts`,
+`src/components/ProductBarcodeField.tsx`, `src/components/Barcode39Image.tsx`, `src/lib/barcodeImage.ts` ·
+diubah: `src/convex/schema.ts`, `src/convex/products.ts`, `src/lib/store/types.ts`,
+`src/lib/store/demo.tsx`, `src/lib/store/convex.tsx`, `src/pages/ProductsPage.tsx`,
+`src/pages/PosPage.tsx`, `src/components/BarcodeScanDialog.tsx`, `src/lib/barcode.ts`,
+`scripts/verify-render.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+- `bun convex dev --once` → **exit 0**, `Convex functions ready!`; tipe `api.products.setBarcode`
+  ikut tergenerasi.
+- `bun tsc -p tsconfig.app.json --noEmit` → **exit 0**.
+- `bun tsc -p tsconfig.convex.json --noEmit` → **exit 0**.
+- `bun scripts/verify-render.mjs` → **1120/1120 checks passed**, exit 0 (dari 1107; +13 cek baru).
+- Tidak ada uji yang menulis ke deployment, jadi `bun run bersih:uji` tidak dijalankan.
+
+**Catatan / blocker:** tombol **Galeri/Kamera** memakai `BarcodeDetector` bawaan peramban; di Safari/
+Firefox saat ini foto belum bisa dibaca, sehingga kolom ketik manual tetap bagian dari kolom (bukan
+jalan tersembunyi). Kode 39 hanya mendukung A–Z/0–9 dan beberapa tanda baca; SKU dengan karakter lain
+harus memakai QR. Kode kosong berarti produk hanya dipindai lewat SKU. Tabel **Status Phase 1** dan
+daftar **Blocker** tidak berubah — ini field produk, bukan klausa roadmap.
+
+## 2026-10-23 — Pemindai barcode/QR di Kasir & Produk: cari SKU atau daftarkan kode baru
+
+**Ruang lingkup:** permintaan pemilik — tombol pemindai barcode/QR di halaman **Kasir (POS)** dan
+**Produk & Stok**; hasil scan mencari kode yang sudah ada di MesinPOS, dan kode yang belum ada bisa
+didaftarkan sebagai **SKU produk**.
+
+- **`src/lib/barcode.ts`** (baru, aturan murni): `normalizeScannedCode` merapikan spasi pinggir/ganda,
+  `findProductByScannedCode` mencocokkan **persis** ke `products.sku` tanpa membedakan huruf besar/
+kecil. Tidak ada kolom barcode baru — kode di barang memang SKU-nya. Pencocokan sengaja tidak
+  “mengandung” supaya barcode `899` tidak membuka `899123`.
+- **`src/components/BarcodeScanDialog.tsx`** (baru): kamera belakang + `BarcodeDetector` bawaan
+  peramban (QR, EAN-13/8, UPC-A/E, Code 128/39/93, ITF, Codabar, Data Matrix, PDF417, Aztec), dengan
+  penyaringan `getSupportedFormats`; kamera tanpa pembaca kode; dan **kolom ketik manual** yang selalu
+  ada (juga untuk pemindai USB). Izin kamera ditolak/tidak ada kamera/tanpa `BarcodeDetector`
+  dijelaskan di dialog, bukan layar hitam. Tidak ada dependensi baru.
+- **Kasir (`PosPage`)** — tombol **Scan** di samping pencarian (ikon di layar sempit). Hasil scan:
+  produk aktif → panel berisi nama/SKU/harga/stok + **Tambah ke keranjang**; produk nonaktif → sebabnya
+  + tautan aktifkan (hanya untuk yang bisa membuka Produk & Stok); kode belum terdaftar →
+  **Daftarkan sebagai produk** ke `/app/products?sku=<kode>` (hanya pemegang `product.manage` **dan**
+  `stock.adjust`). Saringan kategori direset dan kolom pencarian kini juga mencocokkan **SKU**.
+- **Produk & Stok (`ProductsPage`)** — tombol **Scan barcode / QR** di header: SKU yang ada (termasuk
+  nonaktif) membuka kartu **Ubah produk**; kode baru mengisi kolom **SKU** di form **Produk baru** dan
+  membukanya (nama/harga/stok tetap diisi manusia), lalu menggulir ke formnya. Halaman membaca
+  `?sku=<kode>` dari tautan Kasir **setelah store `ready`** (supaya katalog Convex tidak telat dibaca),
+  membuka produk/form yang tepat, lalu membuang parameter itu dari URL.
+- **Harness `verify-render`**: aturan pencocokan (persis, tanpa beda huruf, spasi, kosong), alur manual
+  Kasir (dialog → hasil Cappuccino/P03 → tambah ke keranjang; kode baru → tautan daftar), alur Produk &
+  Stok (buka Ubah produk / form baru terisi), dan tautan `?sku=` (kode baru & kode yang sudah ada).
+  Kamera sendiri tidak bisa diuji di happy-dom; jalur manual adalah jalur yang sama yang dipakai
+  peramban tanpa `BarcodeDetector`.
+
+**Berkas:** baru: `src/lib/barcode.ts`, `src/components/BarcodeScanDialog.tsx` · diubah:
+`src/pages/PosPage.tsx`, `src/pages/ProductsPage.tsx`, `scripts/verify-render.mjs`, `README.md`,
+`worklog.md`.
+
+**Verifikasi:**
+- `bun tsc -p tsconfig.app.json --noEmit` → **exit 0**.
+- `bun scripts/verify-render.mjs` → **1107/1107 checks passed**, exit 0 (dari 1095; +12 cek baru).
+  Termasuk alur Kasir → keranjang (1 item) dan tautan `?sku=BELUM-ADA-9000` / `?sku=BARU-7777` /
+  `?sku=P03` di Produk & Stok.
+- Tidak ada perubahan skema/Convex, jadi `bun convex dev --once` tidak dijalankan.
+- Tidak ada uji yang menulis ke deployment, jadi `bun run bersih:uji` tidak dijalankan.
+
+**Catatan / blocker:** kamera butuh HTTPS (atau `localhost`) dan izin pengguna; `BarcodeDetector` belum
+ada di semua peramban (Safari/Firefox saat ini), sehingga kolom manual adalah bagian tetap dari dialog,
+bukan jalan tersembunyi. Mendaftarkan hasil scan hanya mengisi **SKU**; nama, harga, dan stok awal tetap diisi manusia. Karena SKU adalah kunci yang sudah ada, kode baru yang didaftarkan tetap tunduk
+pada pengecekan unik server (SKU duplikat ditolak dengan pesan yang sudah ada). Tabel **Status Phase
+1–6** dan daftar **Blocker** tidak berubah — ini fitur halaman, bukan klausa roadmap.
+
+## 2026-10-23 — Kartu pairing marketplace: pemilik + pengelola workspace + integrasi API
+
+**Ruang lingkup:** lanjutan permintaan pemilik — kartu **Pengaturan workspace → Pairing vendor
+marketplace** masih muncul untuk akun yang tidak memegang peran pengelola workspace, dan kartu itu
+“bukan untuk semua akun/email, tetapi hanya untuk bisnis yg memang sudah mengatur API untuk
+integrasi dengan platform marketplace”.
+
+- **Aturan baru `marketplacePairingVisible`** (`src/lib/settingsVisibility.ts`): kartu hanya tampil
+  bila **ketiganya** benar — akunnya pemilik (`canPair`, server: `ownerOnlyReason`), perannya memegang
+  izin pengaturan workspace (`billing.manage`, dibaca lewat `useCan`), dan workspace punya **minimal
+  satu kunci API aktif** (`apiKeySummary.active`) sebagai tanda integrasi API-nya sudah diatur.
+- **`MarketplacePairingCard`** memakai aturan itu sebagai gerbang awal (`return null`). Akun dengan
+  peran kustom yang membatasi `billing.manage` kini ikut tersembunyi walau peran dasarnya `owner` —
+  sebelumnya `canPair` (yang membaca peran dasar) saja sudah cukup menampilkan kartu. Bisnis yang
+  belum membuat kunci API tidak ditawari pairing; setelah kuncinya dibuat di halaman API & Webhook,
+  kartu muncul sendiri (store menyiarkan `apiKeySummary`).
+- **Bukan gerbang server:** isi kartu tetap hanya UI. Mutation marketplace tetap menolak non-pemilik
+  (`gate.canPair`), sedangkan pembacaan status tetap boleh dibaca anggota untuk pemeriksaan.
+- **Harness `verify-render`:** satu cek aturan murni (empat kombinasi syarat) + satu blok DOM pemilik
+  yang **mencabut semua kunci API aktif** di provider yang sama lalu memastikan kartu
+  `marketplace-pairing` hilang (dan tanpa error konsol). Blok pemilik ber-API, blok tiga peran
+  non-pemilik, dan seluruh alur pairing tidak berubah.
+- README bagian *Pairing vendor marketplace* menyebut ketiga syarat itu.
+
+**Berkas:** baru: — · diubah: `src/lib/settingsVisibility.ts`,
+`src/components/MarketplacePairingCard.tsx`, `scripts/verify-render.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+- `bun tsc -p tsconfig.app.json --noEmit` → **exit 0**.
+- `bun scripts/verify-render.mjs` → **1095/1095 checks passed**, exit 0 (dari 1092; +3 cek baru).
+  Blok DOM baru membuktikan pemilik dengan kunci API yang dicabut tidak melihat kartu pairing,
+  sementara pemilik dengan kunci API aktif tetap melihatnya.
+- `bun scripts/verify-marketplace-pairing.mjs` → **191/191 pemeriksaan lulus**, exit 0 (mode wiring,
+  tanpa `MARKETPLACE_E2E=1`; backend marketplace tidak diubah, aturannya masih `ownerOnlyReason` +
+  `gate.canPair`).
+- Tidak ada uji yang menulis ke deployment (wiring & render saja), jadi `bun run bersih:uji` tidak
+  dijalankan — tidak ada akun uji baru yang lahir.
+
+**Catatan / blocker:** “sudah mengatur API” dibaca dari **jumlah kunci API aktif**, karena tidak ada
+flag integrasi marketplace per tenant sebelum pairing terbentuk — kalau pairing sendiri dijadikan
+syarat, kartunya tidak akan pernah muncul untuk pemasangan pertama. Konsekuensinya kunci API untuk
+keperluan lain (mis. server internal) juga membuka kartu ini; alternatif yang lebih sempit (kunci
+ber-scope `pos.sell`, karena pesanan marketplace masuk lewat `POST /api/v1/sales`) belum dipakai
+supaya bisnis yang baru menyiapkan integrasi tidak terkunci. Server marketplace masih memakai peran
+bawaan (`ownerOnlyReason`) untuk mutation, sedangkan kartu memakai izin efektif (`billing.manage`);
+akun dengan peran kustom yang membatasi izin itu kini tidak melihat kartunya, tetapi pemanggilan
+mutation langsung oleh peran dasar `owner` tidak ikut diubah di entri ini. Tabel **Status Phase 1–6**
+dan daftar **Blocker** tidak berubah.
+
+## 2026-10-23 — Kartu pairing marketplace hanya untuk pemilik
+
+**Ruang lingkup:** permintaan pemilik — “Card Pairing vendor marketplace hanya muncul untuk akun
+pemilik yg mempunyai akses saja.” Sebelumnya kartu tampil untuk semua peran: pemilik mendapat
+formulirnya, manajer/keuangan/kasir hanya membaca status beserta catatan “Hanya pemilik yang bisa…”.
+
+- **`MarketplacePairingCard`** kini berhenti lebih awal (`return null`) selama `marketplace.canPair`
+  tidak benar. `canPair` berasal dari server (`ownerOnlyReason` di `marketplace.status`) dan dari
+  store demo (`actingBaseRole === "owner"`), jadi kartu hanya dirender untuk akun pemilik — peran
+  lain tidak melihat kartu, status pairing, tautan snapshot, maupun catatan “khusus pemilik”.
+- **Bukan sekadar UI:** server tetap menolak aksi non-pemilik (`gate.canPair` di setiap mutation
+  marketplace), dan query `marketplace.status` tetap bisa dibaca anggota untuk keperluan pemeriksaan
+  — yang dihapus hanya jalan masuknya dari layar Pengaturan.
+- **Harness `verify-render`:** blok kasir yang lama (“hanya membaca status, formulir tidak
+  ditawarkan”) diganti dengan pemeriksaan tiga peran (**manager, finance, cashier**): kartu
+  `marketplace-pairing` tidak ada dan teks “Pairing vendor marketplace” tidak muncul, tanpa error
+  konsol. Blok pemilik tetap menguji seluruh alur pairing seperti sebelumnya.
+- README bagian *Pairing vendor marketplace* diperbarui: kartu hanya untuk pemilik; manajer,
+  keuangan, kasir, dan staf gudang tidak melihat kartu maupun statusnya, dan server tetap menolak.
+
+**Berkas:** baru: — · diubah: `src/components/MarketplacePairingCard.tsx`,
+`scripts/verify-render.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+- `bun tsc -p tsconfig.app.json --noEmit` → **exit 0**.
+- `bun scripts/verify-render.mjs` → **1092/1092 checks passed**, exit 0 (dari 1088; +4 cek bersih:
+  dua cek kasir diganti enam cek untuk manager/finance/cashier, blok pemilik tidak berubah).
+- Backend marketplace tidak diubah, jadi `verify-marketplace-pairing.mjs` (191/191 pada entri
+  sebelumnya) **tidak dijalankan ulang**; aturan server yang dipakai tetap `ownerOnlyReason`.
+- Tidak ada uji yang menulis ke deployment, jadi `bun run bersih:uji` tidak dijalankan.
+
+**Catatan / blocker:** selama status marketplace belum termuat, store Convex mengembalikan
+`canPair: false`; pemilik melihat kartunya begitu status datang (bukan kartu kosong lebih dulu),
+sedangkan peran lain tidak pernah melihatnya. Tabel **Status Phase 1–6** dan daftar **Blocker** tidak
+berubah — ini gerbang tampilan kartu, bukan klausa roadmap.
+
+## 2026-10-23 — Setelan yang fiturnya tidak ada di paket tidak ditampilkan
+
+**Ruang lingkup:** permintaan pemilik — “Pengaturan untuk workspace hanya berlaku atau muncul untuk
+email/akun yg memang memiliki fitur pengaturan tsb”, dengan cakupan yang dipilih: **sembunyikan
+setelan yang fiturnya tidak ada di paket**. Yang dikerjakan: kartu di halaman Pengaturan mengikuti
+paket & modul yang benar-benar hidup, bukan daftar tetap.
+
+- **`src/lib/settingsVisibility.ts`** (baru, aturan murni): `settingsSectionVisibility` menjawab dua
+  kartu. **Pajak & pungutan F&B** hanya tampil bila modul F&B hidup (paket memuatnya **dan** tenant
+  menyalakannya). **Struk belanja** hanya tampil bila `entitlementFor(planKey)` memuat
+  `peripheral.escpos`; semua paket saat ini memuatnya, gerbangnya disiapkan untuk paket berikutnya.
+- **Pengecualian yang disengaja:** profil F&B yang **masih memungut** (PBJT, biaya layanan, PPh final
+  UMKM, PPh 21, atau PPh 4(2)) tetap menampilkan kartunya walau modulnya mati. Tanpa itu, workspace
+  yang turun paket justru kehilangan satu-satunya jalan menghentikan pungutan yang masih ditambahkan
+  ke setiap struk — kartu yang disembunyikan bukan berarti setelannya berhenti berlaku.
+- **Halaman Pengaturan:** kedua kartu dibungkus gerbang di atas (dengan `data-testid` baru
+  `setelan-pajak-fnb` / `setelan-struk-belanja`); peringatan lama “paket belum memuat Cetak struk
+  ESC/POS” dihapus karena kartunya kini tidak tampil sama sekali saat fiturnya tidak ada.
+- **Yang tetap universal & tidak digerbang:** PPN, pengingat tutup shift, bunyi bip kasir (setelan
+  perangkat), dan pairing marketplace. Marketplace tidak punya kunci fitur di katalog paket —
+  integrasinya memakai token pairing sendiri, bukan `api.access` — jadi menggantungkannya pada paket
+  hanya akan menebak.
+- **Harness `verify-render`:** blok baru menguji aturan murni (UMKM/Grosir tanpa F&B menyembunyikan
+  kartu, F&B aktif/profil masih memungut menampilkannya, paket tanpa `peripheral.escpos`
+  menyembunyikan kartu struk) dan DOM dua sesi (UMKM tanpa kartu F&B, F&B dengan kartu F&B).
+- **Perbaikan flake harness yang menghalangi verifikasi:** uji “halaman Shift & Kas menyebut lama
+  shift berjalan” memakai `Date.now() − 26 jam` lalu menuntut label “Dibuka kemarin”. Pada pukul
+  00.00–01.59, 26 jam lalu sudah jatuh **dua** hari sebelumnya, jadi label yang benar (“21 Okt
+  23:19”) membuat uji gagal tanpa ada yang salah di aplikasi. Fixture-nya kini memakai **kemarin
+  pukul 08.00** (selalu > ambang 14 jam dan selalu terbaca “kemarin”). Perilaku aplikasi tidak diubah.
+
+**Berkas:** baru: `src/lib/settingsVisibility.ts` · diubah: `src/pages/SettingsPage.tsx`,
+`scripts/verify-render.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+- `bun tsc -p tsconfig.app.json --noEmit` → **exit 0**; `bun tsc -p tsconfig.convex.json --noEmit` →
+  **exit 0**.
+- `bun scripts/verify-render.mjs` → **1088/1088 checks passed**, exit 0 (dari 1082; +6 cek baru).
+  Blok baru lulus di kedua sesi: UMKM professional (modul F&B mati) tanpa `setelan-pajak-fnb` tapi
+  tetap punya `Setelan PPN` & `setelan-struk-belanja`; sesi F&B professional punya kartu F&B.
+- `bun tsc -b --noEmit` **tidak bisa diselesaikan** di sesi ini: perintahnya melewati batas waktu
+  karena workspace sedang sibuk (proyek app & convex sudah diperiksa satu per satu dan exit 0).
+- Harness lain yang menyentuh halaman ini (`verify-tax.mjs`, `verify-fnb-tax.mjs`, `verify-struk*`,
+  `verify-api.mjs`) **tidak dijalankan ulang**; perubahannya hanya komposisi kartu di halaman, dan
+  perilaku setelannya tidak disentuh.
+- Tidak ada uji yang menulis ke deployment, jadi `bun run bersih:uji` tidak dijalankan (tidak ada akun
+  uji baru yang lahir di entri ini).
+
+**Catatan / blocker:** penyembunyian ini **UI saja** — mutation `tenants.updateFnbTax`,
+`updateReceipt`, `updateTax`, dan `updateShift` tetap memakai `billing.manage`, dan nilai yang sudah
+tersimpan tetap dibaca kasir/struk/laporan. Konsekuensi yang perlu diketahui: workspace F&B di paket
+**Starter** (yang tidak memuat modul F&B) tidak lagi melihat kartu PBJT/biaya layanan sampai modulnya
+bisa dinyalakan atau paketnya naik; profil yang sudah memungut tetap tampil lewat pengecualian di
+atas. Tabel **Status Phase 1–6** dan daftar **Blocker** tidak berubah (ini gerbang tampilan setelan,
+bukan klausa roadmap).
+
+## 2026-10-22 — Tombol “Catat ulang” untuk pesanan marketplace yang ditolak
+
+**Ruang lingkup:** permintaan pemilik — tombol di MesinPOS untuk mengirim ulang pesanan marketplace
+yang ditolak **setelah produknya diperbaiki**. Yang dikerjakan: menerapkan ulang isi pesanan yang
+sudah tersimpan di `marketplaceInboundOrders.payload` lewat jalur penjualan MesinPOS yang sama
+(`pos.createSale`), plus tombolnya di kartu Pengaturan.
+
+- **`apiAccess.retryMarketplaceOrder`** (mutation, `tenantId` + `actorId` + `orderId`): memeriksa izin
+  `pos.sell`, membaca baris `rejected` milik pairing, menerjemahkan isi pesanan tersimpan lewat
+  `prepareMarketplaceOrderBody` + `parseExternalOrder`, lalu mencatat lewat `applyExternalOrder`
+  (harga, PPN, stok, piutang, dan audit tetap dihitung server). Barisnya berubah jadi `applied`
+  beserta `saleNumber`; kalau masih gagal, `message`-nya diperbarui supaya sebab barunya terbaca.
+- **Tidak menghubungi marketplace.** Pesanan itu sudah ada di sana; kunci idempotensinya sama
+  (`pbb-order-<id>`), jadi kalau marketplace mencoba lagi nanti ia dijawab `duplicate` dengan nota
+  yang sama. Menekan tombol dua kali juga tidak membuat nota kedua (diuji).
+- **`marketplaceRetryPayload`** membaca dua bentuk yang tersimpan: amplop endpoint langsung
+  (`{ id, event, data }`) dan isi jalur API (`{ lines, payment, … }`); payload rusak dijawab dengan
+  kalimat yang bisa dibaca, bukan nota kosong.
+- **Kartu Pengaturan:** setiap baris `rejected` mendapat tombol **Catat ulang** (per baris, dengan
+  indikator proses), pesan penolakan ditampilkan di barisnya, dan ada petunjuk “perbaiki dulu
+  produknya — daftarkan SKU atau samakan namanya”. Berhasil → notis berisi nomor nota; gagal → pesan
+  dari server apa adanya.
+- **Kedua store:** mode Convex memanggil mutation baru (status pairing ikut berubah sendiri karena
+  langganan query); mode demo menjawab jujur bahwa demo tidak menerima pesanan marketplace, bukan
+  berpura-pura membuat nota.
+- README bagian *Pairing vendor marketplace* menambah butir tombol ini beserta batasnya
+  (butuh izin `pos.sell`, hanya untuk baris yang punya isi pesanan tersimpan).
+
+**Berkas:** baru: — · diubah: `src/convex/lib/marketplace.ts` (`MarketplaceRetryResult`,
+`marketplaceRetryPayload`), `src/convex/apiAccess.ts` (`retryMarketplaceOrder`),
+`src/lib/store/types.ts`, `src/lib/store/convex.tsx`, `src/lib/store/demo.tsx`,
+`src/components/MarketplacePairingCard.tsx`, `scripts/verify-marketplace-pairing.mjs`,
+`scripts/verify-marketplace-sales.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+- `bun convex dev --once` → `Convex functions ready! (4.15s)`, exit 0.
+- `bun tsc -p tsconfig.convex.json --noEmit` → **exit 0**; `bun tsc -p tsconfig.app.json --noEmit` →
+  **exit 0**.
+- `bun scripts/verify-marketplace-pairing.mjs` → **191/191** (dari 188; isi pesanan dari dua bentuk
+  jalur, wiring mutation tanpa jaringan, tombol per baris `rejected`).
+- `bun scripts/verify-marketplace-sales.mjs` → **34/34** terhadap deployment dev (dari 32). Jalur
+  nyata: pesanan dengan SKU `TIDAK-ADA` ditolak **400** → produk diubah menjadi `TIDAK-ADA` →
+  `retryMarketplaceOrder` → **ok**, nota `A-…`, stok 6 → 5, baris berubah `applied` dengan nomor nota;
+  tombol ditekan lagi → nomor nota sama, stok tetap 5.
+- `bun scripts/verify-api.mjs` → **318/318**; `bun scripts/verify-render.mjs` → **1082/1082**, exit 0.
+- `bun run bersih:uji` → `purged: 1` (`mksale+1792682898080@mesinpos.test`), `scanned: 6`,
+  `skipped: 5` (akun platform/pemilik yang tidak boleh dihapus).
+
+**Catatan / blocker:** tombol ini mencatat ulang **di MesinPOS**, bukan mengirim ulang dari
+marketplace — MesinPOS tidak punya jalan mengirim pesanan ke sana, dan tidak perlu: nota yang sama
+akan dijawab `duplicate` oleh kunci idempotensi. Baris lama tanpa `payload` (kalau ada) hanya bisa
+dicatat setelah marketplace mengirim lagi. Izin yang dipakai `pos.sell`; kasir yang punya izin jual
+boleh menekannya, dan audit mencatat `marketplace.order.retry`. Blocker **#11** tidak berubah intinya
+(pengirim tetap di aplikasi marketplace); Tabel Status Phase 1–6 tidak tersentuh.
+
+## 2026-10-22 — Pesanan marketplace yang ditolak tidak lagi senyap, dan kiriman khasnya diterima
+
+**Ruang lingkup:** lanjutan laporan pemilik — “tetap masih tidak meng-update / sinkron otomatis
+transaksi di marketplace ke mesinpos”. Yang diperiksa di deployment dev (bukan ditebak):
+
+- Baris pairing **Pusat Bahan Bangunan Official** (`ks7dtrcvxj0c3q0g7t4455mg198g4tep`) sudah punya
+  **tiga nota marketplace** yang masuk lewat `POST /api/v1/sales` dengan kunci `pbb-order-…`:
+  `A-00007` (60.000 → diskon 344), `A-00008` (890.000), `A-00009` (385.000), terakhir
+  **2026-10-22 12:16 UTC**. Jadi jalur marketplace → POS benar-benar hidup; yang tidak terjadi adalah
+  kiriman berikutnya.
+- Kunci API **“Pusat Bahan Bangunan”** milik workspace itu dipakai terakhir **15:06 UTC**, jadi
+  marketplace memang masih memanggil MesinPOS (pembacaan laporan), bukan berhenti total.
+- `marketplaceInboundOrders` dan `inboundWebhookEvents` untuk workspace itu **kosong**: tidak ada
+  kiriman ke endpoint langsung, dan **tidak ada jejak penolakan** kalau marketplace ditolak saat
+  mengirim pesanan lewat `/api/v1/sales`. Itu celah yang ditutup di sini.
+
+Yang dikerjakan: membuat penerimaan lebih tahan terhadap bentuk kiriman marketplace **tanpa
+melonggarkan kontrak API untuk pemanggil lain**, dan mencatat penolakan supaya sebabnya terbaca dari
+MesinPOS.
+
+- **`prepareMarketplaceOrderBody`** (hanya untuk badan ber-kunci `pbb-order-…`): field tambahan dari
+  marketplace (harga/nama baris, catatan, ongkir, status pembayaran mereka) dibuang, **baris kembar
+digabung** dengan kuantitas dijumlahkan, angka berbentuk teks (`"2"`, `"99000"`) dibaca sebagai
+  angka, dan nama metode bayar dipetakan (`bank_transfer`/`transfer_bank`/`va` → `transfer`,
+  `cod`/`tunai` → `cash`, `kartu`/`debit`/`credit_card` → `card`). Metode yang benar-benar tidak
+  dikenal tetap ditolak 400 dengan daftar metode sah.
+- **`parseExternalOrder` menerima `lines[].name`** (opsional, maks. 200 karakter). Dipakai
+  **hanya** kalau SKU tidak ditemukan, dan hanya kalau nama itu menunjuk **tepat satu** produk;
+  nama kembar tetap 400 supaya produk salah tidak ditebak. Ini menutup kasus katalog marketplace yang
+  mengurutkan ulang SKU sementara nama produknya tetap.
+- **Penolakan lewat `/api/v1/sales` dicatat** sebagai baris `rejected` di `marketplaceInboundOrders`
+  (nomor pesanan + pesan dari jalur penjualan) dan tampil di kartu **Pengaturan**. Sebelumnya
+  marketplace menerima 400/409, menahan pesanannya, sementara MesinPOS tetap berkata “belum ada
+  pesanan” tanpa sebab.
+- **Kartu Pengaturan** kini menampilkan pesan penolakan per baris, menjelaskan bahwa marketplace hanya
+  mengirim pesanan **lunas** dan hanya selama integrasinya tidak dijeda, serta menyebut lokasi antrean
+  tertahan di marketplace → Integrasi POS → “Pesanan lunas yang belum masuk MesinPOS”.
+
+**Berkas:** baru: — · diubah: `src/convex/lib/apiOrders.ts`, `src/convex/lib/marketplace.ts`,
+`src/convex/apiAccess.ts`, `src/convex/http.ts`, `src/components/MarketplacePairingCard.tsx`,
+`src/lib/apiDocs.ts`, `scripts/verify-api.mjs`, `scripts/verify-marketplace-pairing.mjs`,
+`scripts/verify-marketplace-sales.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+- `bun tsc -p tsconfig.convex.json --noEmit` → **exit 0**; `bun tsc -p tsconfig.app.json --noEmit` →
+  **exit 0**.
+- `bun scripts/verify-api.mjs` → **318/318** (dari 316; cek `lines[].name` dipangkas/dibatasi dan
+  wiring `prepareMarketplaceOrderBody` di `http.ts`).
+- `bun scripts/verify-marketplace-pairing.mjs` → **188/188** (dari 186; field asing dibuang, baris
+  kembar digabung, angka teks & alias metode bayar, metode tak dikenal tidak ditebak, pesanan
+  non-marketplace tidak disentuh, penolakan `/api/v1/sales` tercatat, cadangan nama).
+- `bun scripts/verify-marketplace-sales.mjs` → **32/32** terhadap deployment dev (dari 30):
+  pesanan berisi field tambahan + baris kembar + `quantity: "1"` + `bank_transfer` → **201**, total
+  55.500, stok 9 → 7; SKU `SKU-BERGESER` dengan nama produk → **201**, total 27.750, stok 7 → 6;
+  SKU tanpa nama yang cocok → **400** dan baris `rejected` muncul di kartu dengan pesan
+  “tidak ditemukan”. Jalankan pertama kali **31/32**: ekspektasi total lupa PPN 11% (ditulis 50.000,
+  seharusnya 55.500) — ekspektasinya diperbaiki, bukan kodenya.
+- `bun scripts/verify-render.mjs` → **1082/1082**, exit 0.
+- `bun run bersih:uji` → `purged: 2` (`mksale+1792682278573@mesinpos.test`,
+  `mksale+1792682301401@mesinpos.test`), `scanned: 7`, `skipped: 5` (akun platform/pemilik yang tidak
+  boleh dihapus).
+
+**Catatan / blocker:** MesinPOS tetap **tidak menarik** pesanan dari marketplace — tidak ada API
+pesanan publik yang bisa dibaca (query vendor untuk pesanan bersifat privat dan menuntut sesi vendor).
+Yang sekarang dijamin: kiriman yang sampai diterima lebih toleran, dan kiriman yang **ditolak**
+tercatat beserta sebabnya. Kalau pesanan baru tetap tidak muncul dan kartu **tidak** menampilkan baris
+`rejected` sama sekali, berarti marketplace belum mengirimnya (belum lunas, integrasi dijeda, atau
+antreannya tertahan) — pemeriksaannya di marketplace, bukan di repo ini. Blocker **#11** diperbarui
+karena bunyinya masih menganggap semua pesanan hanya lewat endpoint langsung. Tabel Status Phase
+1–6 tidak berubah (tidak ada klausa roadmap yang tersentuh).
+
+## 2026-10-22 — Pesanan marketplace lewat jalur API yang sudah ada kini dikenali & terlihat
+
+**Ruang lingkup:** lanjutan laporan yang sama. Endpoint langsung sudah ada, tetapi jalur API lama
+(`POST /api/v1/sales`) tetap bisa dipakai integrasi luar — termasuk marketplace, yang menandai
+pesanannya dengan kunci idempotensi `pbb-order-<id>`. Nota seperti itu tercatat sebagai penjualan API
+biasa: tidak bisa dibedakan dari kiriman integrasi lain, dan kartu Pengaturan tetap berkata “belum ada
+pesanan marketplace” walau notanya sudah ada. Yang dikerjakan: mengenali bentuk kunci itu di kedua
+arah dan menampilkan buktinya apa adanya — tanpa menambah kolom baru di tabel penjualan.
+
+- **Bentuk kanonik kunci.** `marketplaceOrderKey` menormalkan id apa pun menjadi `pbb-order-<id>`
+  (id kosong tetap kosong, jadi bisa ditolak), dan `isMarketplaceSaleKey` membaca kunci penjualan
+  yang ditulis jalur API (`api:<tenant>:pbb-order-…`). Penjualan lama tetap terbaca apa adanya.
+- **Tidak ada nota ganda.** `receiveMarketplaceOrder` memakai kunci kanonik yang sama, sehingga
+  pesanan yang sudah masuk lewat `/api/v1/sales` dijawab `duplicate` oleh `pos.createSale` — satu
+  nota, satu pengurangan stok — walaupun marketplace memakai kedua jalur.
+- **Kartu membuktikan, bukan menebak.** `marketplace.status.inbound.sales` membaca 200 nota terbaru
+  workspace, menyaring kunci marketplace, lalu menampilkan 5 nota terakhir (nomor, total, status,
+  waktu) di samping daftar kiriman endpoint langsung. Kalau belum ada, kalimatnya tetap jujur.
+- **README dikoreksi.** Klaim “cron marketplace ±10 menit” yang sempat ditulis di entri sebelumnya
+  **dihapus** karena tidak bisa dibuktikan dari repo ini; yang ditulis sekarang hanya perilaku kode
+  (kedua jalur dikenali) dan batasnya (pengiriman tetap milik marketplace; tidak ada API pesanan
+  publik untuk ditarik MesinPOS).
+
+**Berkas:** baru: — · diubah: `src/convex/lib/marketplace.ts` (prefiks & pembaca nota),
+`src/convex/marketplace.ts` (`sales` di tampilan inbound), `src/convex/apiAccess.ts` (kunci kanonik),
+`src/convex/lib/apiOrders.ts` (`isOrderIdempotencyKey`), `src/convex/pos.ts`,
+`src/components/MarketplacePairingCard.tsx`, `scripts/verify-marketplace-pairing.mjs`,
+`scripts/verify-marketplace-sales.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+- `bun convex dev --once` → `Convex functions ready! (3.41s)`, exit 0.
+- `bun tsc -p tsconfig.convex.json --noEmit` → exit 0; `bun tsc -p tsconfig.app.json --noEmit` →
+  exit 0.
+- `bun scripts/verify-marketplace-sales.mjs` → **29/29** terhadap deployment dev (dari 27; dua cek
+  baru: “pesanan yang sudah masuk lewat API tidak dibuat dua kali dari endpoint langsung” dan “kartu
+  membaca nota marketplace dari jalur API yang sudah dipakai”).
+- `bun scripts/verify-marketplace-pairing.mjs` → **180/180** (dari 174; cek bentuk kanonik kunci,
+  penyaringan per tenant, dan wiring `fromMarketplace`).
+- `bun scripts/verify-render.mjs` → **1082/1082**, exit 0.
+- `bun run bersih:uji` → penyapuan workspace uji `ran: true`; pengguna `purged: 1`, `scanned: 6`,
+  `skipped: 5` (akun `mksale+…@mesinpos.test`; sisanya akun platform/pemilik yang memang tidak boleh
+  dihapus).
+
+**Catatan / blocker:** kepastian “otomatis” tetap bergantung pada marketplace memanggil salah satu
+jalur; MesinPOS tidak punya cara menarik pesanan dari sana. Kartu kini menyebut nota mana yang sudah
+masuk, jadi kalau marketplace berhenti mengirim, sebabnya terlihat (tanggal nota terakhir), bukan
+hanya keadaan kosong. Tabel **Status Phase 1–6** dan daftar **Blocker** diperiksa: tidak ada butir
+status yang berubah; blocker pengirim di aplikasi marketplace tetap terbuka.
+
+## 2026-10-22 — Penjualan di marketplace kini masuk sendiri sebagai penjualan MesinPOS
+
+**Ruang lingkup:** laporan pemilik — “jika terjadi penjualan di marketplace, kenapa tidak otomatis
+sinkron ke MesinPOS?”. Yang diperiksa: seluruh jalur marketplace yang ada (snapshot bertoken,
+dorongan katalog/stok/penjualan, rekonsiliasi selisih, dan webhook masuk generik). Temuan: semua
+jalur itu satu arah (MesinPOS → marketplace) atau **ditarik** marketplace; tidak ada satu pun jalur
+yang memberi tahu MesinPOS bahwa pesanan sudah terjadi di marketplace, sehingga nota, laba, dan
+pengurangan stoknya tidak pernah masuk POS. Webhook masuk generik sebenarnya bisa menerima
+`order.created`, tetapi endpoint-nya harus dibuat manual dengan rahasia baru dan tidak terhubung ke
+pairing — jadi bukan “otomatis”.
+
+Yang dikerjakan: jalur balik **marketplace → MesinPOS** lewat
+`POST /api/marketplace/orders`, diautentikasi **token pairing** (`mp_…`) yang sudah dipegang
+marketplace, dengan amplop yang sama seperti webhook masuk (`{ id, event, data }`):
+
+- `order.created` mencatat pesanan lewat `pos.createSale` (harga, PPN, diskon member, stok, piutang,
+dan audit dihitung server). `data` berbentuk `{ lines, payment, discount?, customerCode?, memberCode?,
+  storeCode? }`; harga dari marketplace tidak dipercaya mentah-mentah.
+- `sale.voided` membatalkan nota lewat nomor MesinPOS yang dikembalikan balasan `order.created`.
+- `id` pesanan marketplace menjadi kunci idempotensi (`marketplaceInboundOrders.by_pairing_order`):
+  kiriman ulang dijawab `200 { duplicate: true }` tanpa penjualan kedua.
+- Tanda tangan HMAC `x-mesinpos-*` **opsional**; bila dikirim wajib sah memakai rahasia penanda tangan
+  pairing yang sama dengan arah keluar. Token pairing yang membuktikan pengirimnya.
+- Nota yang lahir dari marketplace **tidak** dikirim balik sebagai penjualan baru (`pos.createSale`
+  menerima `fromMarketplace`), karena `upsertKey` kita nomor MesinPOS dan pesanan itu sudah ada di
+  marketplace — stoknya tetap menyusul lewat antrean stok otomatis.
+- Alamat penerimaan ikut setiap snapshot (`pairing.inbound.url`), status pairing membawa 5 riwayat
+  terakhir, dan kartu Pengaturan menampilkan alamat, event yang diterima, serta hasil tiap pesanan
+  (diterima/ditolak beserta sebabnya).
+
+**Berkas:** baru: — · diubah: `src/convex/lib/marketplace.ts`, `src/convex/schema.ts`
+(`marketplaceInboundOrders`), `src/convex/apiAccess.ts` (`receiveMarketplaceOrder`,
+`applyExternalOrder` menerima `fromMarketplace`), `src/convex/pos.ts`, `src/convex/http.ts`,
+`src/convex/marketplace.ts` (`inboundAuthForToken`, status & snapshot),
+`src/components/MarketplacePairingCard.tsx`, `scripts/verify-marketplace-pairing.mjs`,
+`scripts/verify-marketplace-sales.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+- `bun convex dev --once` → `Convex functions ready! (4.34s)` (exit 0); indeks baru
+  `marketplaceInboundOrders.by_pairing_order` & `by_tenant_created` terpasang.
+- `bun tsc -p tsconfig.convex.json --noEmit` → **exit 0**; `bun tsc -p tsconfig.app.json --noEmit` →
+  **exit 0**. `bun tsc -b --noEmit` (gabungan) **tidak selesai** dua kali dalam batas 180 detik karena
+  workspace kehabisan CPU/RAM (mesin uji 2 GB); kedua proyeknya diperiksa terpisah dan lulus.
+- `bun scripts/verify-marketplace-pairing.mjs` → **174/174** lulus (sebelumnya 158; +16 cek: alamat &
+  kalimat pesanan masuk, event yang diterima, tabel & indeks idempotensi, endpoint HTTP, tanda tangan
+  opsional, penerapan lewat `pos.createSale`, larangan kirim balik, snapshot, status, kartu).
+- `bun scripts/verify-marketplace-sales.mjs` → **27/27** terhadap deployment dev. Jalur nyata:
+  `POST /api/marketplace/orders` `order.created` → **201**, nota `A-…`, stok 10 → 9; kiriman ulang id
+  yang sama → **200** `duplicate: true`, stok tetap 9; `sale.voided` → stok kembali 10; token salah →
+  **401**. (`lastSalesSyncAt` tidak berubah sesudah pesanan marketplace, jadi nota itu memang tidak
+  dikirim balik.) Jalankan pertama kali gagal **20/27** karena balasan endpoint belum dibungkus `data`;
+  setelah dibungkus, 27/27.
+- `bun scripts/verify-render.mjs` → **1082/1082**, exit 0.
+- `bun run bersih:uji` → `purged: 2`, `scanned: 7`, `skipped: 5` (dua akun `mksale+…@mesinpos.test`
+  dari uji di atas; tidak ada akun uji baru yang tertinggal).
+
+**Catatan / blocker:** sisi marketplace **masih harus memanggil** alamat itu saat pesanan dibuat;
+selama belum, kartu menulis “Belum ada pesanan marketplace yang masuk” apa adanya — MesinPOS tidak
+menarik pesanan dari marketplace, dan itu batas yang disengaja (tidak ada API pesanan marketplace
+yang bisa dibaca dari sini). Pembatalan memakai nomor nota MesinPOS yang dikembalikan balasan
+`order.created`. Tabel **Status Phase 1–6** dan daftar **Blocker** diperiksa: klausa integrasi
+marketplace bertambah satu arah balik; blocker baru = pengirim di aplikasi marketplace belum ada di
+repo ini.
+
+## 2026-10-21 — Kategori & subkategori produk tersinkron sendiri ke marketplace
+
+**Ruang lingkup:** permintaan pemilik — sinkronisasi **kategori & subkategori produk dari MesinPOS
+ke platform marketplace**. Sebelumnya pohon kategori hanya ikut saat tombol **Sinkronkan produk**
+ditekan atau saat marketplace menarik snapshot; mengubah kategori di halaman Produk & Stok tidak
+mengabari marketplace. Yang dikerjakan:
+
+- **Antrean katalog otomatis.** `queueMarketplaceCategoryPush` menulis satu baris
+  `marketplaceStockQueue` bertanda `catalog: true` + `pushAll: true` di dalam transaksi mutasi
+  kategori. Kirimannya memakai katalog penuh (pohon kategori + produk, karena nama kategori hidup di
+  baris produk), dijadwalkan sesudah jeda ± 2 detik, dan digabung dengan antrean stok yang mungkin
+  sudah menunggu — satu kiriman, bukan dua.
+- **Event & endpoint yang benar.** Dorongan kategori memakai event katalog
+  `product.updated` (bukan `stock.changed`) dengan `trigger: "category"`, ke endpoint katalog
+  `PUSATBAHANBANGUNAN_PRODUCTS_URL` → `SYNC_URL` → `STOCK_URL`; hasilnya dicatat di
+  `lastProductSync*` supaya tidak tertukar dengan catatan stok otomatis.
+- **Semua jalur perubahan disambungkan:** kategori tambah/ganti nama/aktif-nonaktif/hapus dan
+  penyemaian kategori bisnis; subkategori tambah/ganti nama/aktif-nonaktif/hapus. Setiap pemanggilan
+  dilakukan sesudah audit log ditulis, jadi kiriman hanya lahir untuk perubahan yang benar-benar
+  tersimpan.
+- **Kartu Pengaturan** kini menyebut pohon kategori + subkategori ikut di setiap kiriman katalog dan
+  dikirim sendiri sesudah disimpan (dengan catatan bahwa mode demo hanya menyimulasikan). Catatan
+  hasil sinkron produk membedakan kiriman kategori (“Kategori & subkategori terkirim bersama
+  katalog…”) dari kiriman manual.
+- README bagian *Pairing vendor marketplace* menambah butir sinkron kategori & subkategori beserta
+  urutan endpoint dan pencatatannya.
+
+**Berkas:** baru: — · diubah: `src/convex/lib/marketplace.ts`,
+`src/convex/lib/marketplaceStockQueue.ts`, `src/convex/marketplace.ts`, `src/convex/schema.ts`,
+`src/convex/categories.ts`, `src/convex/subcategories.ts`,
+`src/components/MarketplacePairingCard.tsx`, `src/lib/store/demo.tsx`, `scripts/verify-render.mjs`,
+`scripts/verify-marketplace-pairing.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+- `bun convex dev --once` → **exit 0**, `Convex functions ready! (4.67s)`; skema `catalog` (opsional)
+  terpasang.
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bun scripts/verify-marketplace-pairing.mjs` → **158/158** lulus (sebelumnya 150; 8 cek baru:
+  urutan endpoint katalog, antrean kategori menandai `catalog`/`pushAll`, syarat endpoint & pairing,
+  jumlah pemanggilan di mutasi kategori (≥5) & subkategori (≥4), event/trigger kategori, pencatatan di
+  `lastProductSync`, dan penjelasan di kartu).
+- `bun scripts/verify-render.mjs` → **1082/1082**, exit 0 (cek baru: kartu menjelaskan kategori &
+  subkategori dikirim sendiri).
+- `MARKETPLACE_E2E=1 bun scripts/verify-marketplace-pairing.mjs` **tidak dijalankan** — uji itu menulis
+  akun & data ke deployment; konsekuensinya alur dorongan nyata ke endpoint marketplace belum diuji
+  dari sisi saya. Tidak ada akun uji baru, jadi `bun run bersih:uji` tidak diperlukan.
+
+**Catatan / blocker:**
+- Kiriman kategori bersifat **upsert**: pohon terbaru dikirim, tetapi apakah marketplace menghapus
+  kategori/subkategori yang sudah tidak ada ditentukan oleh penerimanya — dari sisi MesinPOS hanya
+  bisa memastikan data terbaru terkirim.
+- Tanpa endpoint katalog atau tanpa pairing, tidak ada antrean yang ditulis (sama seperti antrean
+  stok); kartu tetap menyebut endpoint yang belum diisi apa adanya.
+- Kiriman yang gagal tidak diulang otomatis sampai perubahan kategori berikutnya (pola yang sama
+  dengan dorongan stok); cron menyapu antrean yang belum sempat berangkat.
+- Mode demo hanya menyimulasikan; tidak ada jaringan yang dikirim.
+- Tabel **Status Phase 1–6** dan daftar **Blocker** diperiksa: tidak ada butir yang berubah.
+
+## 2026-10-21 — PlatformAuditLogs dikosongkan
+
+**Ruang lingkup:** lanjutan permintaan pemilik — setelah riwayat audit tenant dikosongkan, jejak
+audit backstage (`platformAuditLogs`) juga dihapus supaya backstage benar-benar bersih. Yang
+dikerjakan:
+
+- Tabel **`platformAuditLogs`** dikosongkan: **1.218 baris** terhapus. Riwayat tindakan pengelola
+  platform (provisioning, verifikasi, penghapusan akun) kini kosong, termasuk catatan reset hari ini.
+- Tabel lain tidak disentuh: tenant, akun, anggota, kategori, toko, dan pengaturan tetap seperti
+  sesudah reset operasional.
+
+**Berkas:** diubah: `worklog.md`. Tidak ada perubahan kode.
+
+**Verifikasi:**
+- `bunx convex import --table platformAuditLogs --replace -y --format jsonLines /tmp/empty.jsonl` →
+  **exit 0**, ringkasan `platformAuditLogs | create 0 | delete 1.218 of 1.218`.
+- `bunx convex data platformAuditLogs --limit 1` → **“There are no documents in this table.”**
+- Cek tabel yang harus tetap ada: `tenants`, `users`, `memberships`, `categories`, `subcategories`,
+  `stores` masih berisi (keluaran JSON array, bukan pesan kosong); `auditLogs`, `products`, `sales`
+  kosong seperti sesudah reset.
+- Tidak ada akun uji baru; `bun run bersih:uji` tidak diperlukan.
+
+**Catatan / blocker:** penghapusan ini permanen di deployment `mellow-narwhal-477`. Backup
+`backups/convex-2026-10-21-1220.zip` dibuat sebelum semua penghapusan hari ini, jadi baris audit
+platform masih ada di dalamnya — tetapi memulihkannya juga mengembalikan data operasional, produk,
+dan riwayat audit tenant yang tadi dihapus. Tabel **Status Phase 1–6** dan daftar **Blocker**
+diperiksa: tidak ada butir yang berubah.
+
+## 2026-10-21 — Riwayat audit tenant dikosongkan
+
+**Ruang lingkup:** lanjutan permintaan pemilik — setelah data operasional dikosongkan, riwayat audit
+lama juga dihapus supaya aplikasi benar-benar tampak seperti sistem baru. Yang dikerjakan:
+
+- Tabel **`auditLogs`** (jejak audit yang dibaca halaman audit milik tenant) dikosongkan:
+  359 baris terhapus. Halaman audit kini kosong untuk semua workspace.
+- **`platformAuditLogs` sengaja dipertahankan**: itu jejak tindakan pengelola platform (provisioning,
+  penghapusan akun, termasuk reset hari ini). Menghapusnya berarti menghapus catatan siapa melakukan
+  apa di backstage. Kalau memang ingin ikut dikosongkan, tinggal minta.
+- Backup `backups/convex-2026-10-21-1220.zip` dibuat **sebelum** penghapusan ini, jadi baris audit
+  lama masih ada di dalamnya kalau perlu dipulihkan.
+
+**Berkas:** diubah: `worklog.md`. Tidak ada perubahan kode.
+
+**Verifikasi:**
+- `bunx convex import --table auditLogs --replace -y --format jsonLines /tmp/empty.jsonl` → **exit 0**,
+  ringkasan `auditLogs | create 0 | delete 359 of 359`.
+- `bunx convex data auditLogs --limit 1` → **“There are no documents in this table.”**
+- `bunx convex data platformAuditLogs --limit 1000` → masih berisi (1000 baris pertama terbaca,
+  sesuai batas baca); backstage tidak ikut terhapus.
+- Tidak ada akun uji baru; `bun run bersih:uji` tidak diperlukan.
+
+**Catatan / blocker:** penghapusan audit bersifat permanen di deployment `mellow-narwhal-477` dan tidak
+bisa dibatalkan dari aplikasi; satu-satunya jalan pulih adalah impor backup di atas (yang juga
+mengembalikan data operasional yang tadi dihapus). Tabel **Status Phase 1–6** dan daftar **Blocker**
+diperiksa: tidak ada butir yang berubah.
+
+## 2026-10-21 — Data operasional dikosongkan untuk semua workspace
+
+**Ruang lingkup:** permintaan pemilik — hapus semua data penjualan & produk, lalu normalkan seperti
+sistem baru. Pilihan pemilik: cakupan **data operasional saja**, lingkungan **produksi**, sasaran
+**semua workspace**. Yang dikerjakan:
+
+- **Backup penuh lebih dulu**: `bun scripts/backup-data.mjs` → `backups/convex-2026-10-21-1220.zip`
+  (14,9 MB), plus satu snapshot di server Convex.
+- **27 tabel operasional dikosongkan** lewat `bunx convex import --table <tabel> --replace -y
+  --format jsonLines /tmp/empty.jsonl` (berkas JSONL kosong). Perintah ini hanya mengganti tabel yang
+  disebut, **bukan** `--replace-all`, jadi tabel lain tidak ikut tersentuh.
+- Tabel yang dikosongkan: `sales`, `saleItems`, `products`, `stockMovements`, `stockLevels`,
+  `customers`, `shifts`, `shiftAlerts`, `opnameSessions`, `mejaOrders`, `digitalCharges`,
+  `receivables`, `receivablePayments`, `payables`, `payablePayments`, `purchaseRequisitions`,
+  `purchaseOrders`, `goodsReceipts`, `suppliers`, `counters`, `syncChanges`, `webhookEvents`,
+  `webhookDeliveries`, `inboundWebhookEvents`, `marketplaceStockDiffs`, `marketplaceStockQueue`,
+  `marketplaceSaleQueue`.
+- **Dipertahankan**: akun pengguna, tenant/workspace, anggota, peran & `roleSettings`, kategori,
+  subkategori, `businessCategories`, toko, gudang, denah meja, `apiKeys`/`webhookEndpoints`/
+  `marketplacePairings`, `auditLogs` & `platformAuditLogs`, serta tabel auth dan billing.
+- Isi yang hilang: workspace **Pusat Bahan Bangunan** kehilangan 15 produk, 47 penjualan + 68 item,
+  113 pergerakan stok, 14 saldo stok, 2 pelanggan, 4 shift, 4 opname, 5 pesanan meja, dan 4 counter.
+  Dua workspace lain (**Toko Buah Segar**, **Toko Sumber Bangunan**) memang sudah tanpa data
+  operasional; kategorinya tetap.
+
+**Berkas:** diubah: `worklog.md`. Tidak ada perubahan kode.
+
+**Verifikasi:**
+- `bun scripts/backup-data.mjs` → **exit 0**, `backups/convex-2026-10-21-1220.zip` **14,9 MB**.
+- Import 27 tabel dengan berkas kosong → **exit 0** untuk setiap perintah; uji lebih dulu pada
+  `supportTickets` (sudah kosong) → `0 of 0`, untuk memastikan perintahnya tidak menghapus tabel lain.
+- `bunx convex data <tabel> --limit 1` untuk 27 tabel di atas → semuanya
+  **“There are no documents in this table.”**.
+- Hitung tabel yang dipertahankan: `tenants` 3, `memberships` 5, `users` 5, `categories` 21,
+  `subcategories` 26, `stores` 3, `warehouses` 1, `tables` 5, `businessCategories` 6,
+  `roleSettings` 2, `auditLogs` 359, `webhookEndpoints` 1, `apiKeys` 1, `marketplacePairings` 19.
+- `freebuff-preview status` → `statusCode` **200** (aplikasi tetap tersaji).
+- Tidak ada akun uji baru yang lahir, jadi `bun run bersih:uji` tidak diperlukan.
+
+**Catatan / blocker:**
+- `--prod` **diabaikan** CLI karena `CONVEX_DEPLOY_KEY` workspace ini menunjuk satu deployment
+  (`mellow-narwhal-477`); itulah data yang dipakai aplikasi ini, dan itulah yang direset. Deployment
+  produksi lain (kalau ada di proyek Convex yang berbeda) tidak tersentuh.
+- `counters` ikut dikosongkan → SKU otomatis mulai lagi dari `PBB-0000001`; penomoran dokumen lain
+  juga mulai ulang.
+- `auditLogs` & `platformAuditLogs` sengaja disimpan sebagai jejak; entri lama masih menyebut produk
+  yang sudah dihapus.
+- Gambar produk lama masih ada di `_storage` sebagai berkas yatim (tidak dirujuk baris produk mana
+  pun).
+- Pemulihan: `bunx convex import backups/convex-2026-10-21-1220.zip` (mengganti isi deployment dengan
+  isi snapshot). Snapshot di server Convex terpakai 1 dari 2 kuota paket gratis.
+- Tabel **Status Phase 1–6** dan daftar **Blocker** diperiksa: tidak ada butir yang berubah.
+
+## 2026-10-21 — Konfirmasi sebelum “Buat otomatis” menimpa SKU di kartu Ubah produk
+
+**Ruang lingkup:** permintaan pemilik — tombol **Buat otomatis** di kartu Ubah produk tidak boleh
+langsung menimpa SKU yang sedang diubah. Sekarang tombol itu menampilkan konfirmasi berisi SKU lama &
+nomor barunya lebih dulu; isi kolom baru berganti setelah **Ya, ganti SKU** ditekan, dan penyimpanannya
+tetap lewat **Simpan perubahan**. Yang dikerjakan:
+
+- `ProductCoreFields` menyimpan usulan di state lokal (`gantiSku`), bukan langsung mengisi kolom.
+  Konfirmasi hanya tampil selama kolomnya masih berisi SKU lama yang sama; **Batal** atau mengetik
+  sendiri menutupnya tanpa mengubah apa pun. Di form Produk baru perilakunya tetap: kolom kosong →
+  tombol mengisi langsung, karena tidak ada SKU yang bisa tertimpa.
+- Kontrak prop `skuSuggestion` berubah dari `onFill: () => void` menjadi `suggest: () => string`,
+  supaya komponen sendiri yang memutuskan “isi langsung” atau “minta konfirmasi” dan halaman tidak
+  perlu menduplikasi aturan itu di dua tempat.
+- Konfirmasi tampil sebagai kotak amber selebar baris kolom (bukan dialog melayang), mengikuti pola
+  konfirmasi inline yang sudah dipakai hapus kategori/peran. Teks bantu kolom SKU di mode edit dan
+  tooltip tombol menyebut langkah konfirmasi ini.
+- README (bagian *SKU otomatis* + dua daftar perintah verifikasi) dan langkah “Memperbaiki nama, SKU,
+  atau harga beli” di panduan PDF diselaraskan; PDF dibangun ulang.
+
+**Berkas:** baru: — · diubah: `src/pages/ProductsPage.tsx`, `scripts/verify-render.mjs`,
+`scripts/gen-panduan-pdf.mjs`, `public/panduan/panduan-mesinpos.pdf` (dibangun ulang), `README.md`,
+`worklog.md`.
+
+**Verifikasi:**
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bun scripts/verify-render.mjs` → **1081/1081** pemeriksaan lolos, exit 0 (sebelumnya 1078; dua cek
+  diganti lima). Yang baru: konfirmasi muncul dengan SKU lama & nomor baru sementara kolom belum
+  berubah; **Batal** mempertahankan SKU lama dan menutup konfirmasi; mengetik SKU sendiri membatalkan
+  usulan; setelah **Ya, ganti SKU** kolom berisi `PBB-<nomor urut>` baru tetapi SKU tersimpan belum
+  berubah sampai **Simpan perubahan**. Cek form Produk baru (tombol mati selama kolom terisi) tetap
+  lulus.
+- `bun scripts/verify-panduan.mjs` → **14/14** `pemeriksaan lolos`.
+- `bun scripts/gen-panduan-pdf.mjs` → **exit 0** (35 halaman, 19 bagian, 12 gambar, 106.9 KB).
+- Tidak ada uji yang menulis ke deployment, jadi tidak ada akun uji yang perlu dibersihkan lewat
+  `bun run bersih:uji`.
+
+**Catatan / blocker:** konfirmasi ini hanya mengatur isi kolom, bukan penyimpanan — SKU tetap baru
+berlaku setelah **Simpan perubahan**, dan server tetap memeriksa keunikannya (SKU kembar ditolak
+seperti sebelumnya). Tabel **Status Phase 1–6** dan daftar **Blocker** diperiksa: tidak ada butir
+yang berubah.
+
+## 2026-10-21 — Tombol “Buat otomatis” untuk SKU di kartu Ubah produk
+
+**Ruang lingkup:** permintaan pemilik — pembuatan SKU di form **ubah/edit produk** juga harus punya
+tombol **Buat otomatis**, seperti di form **Produk baru**. Sebelumnya tombol itu hanya dirender untuk
+mode buat, sehingga di kartu Ubah produk kolom SKU harus diketik manual. Yang dikerjakan:
+
+- `ProductCoreFields` menerima `skuSuggestion` di **kedua mode**. Form Produk baru tetap seperti
+  sebelumnya (tombol mati selama kolom terisi, supaya ketikan pemilik tidak tertimpa); kartu Ubah
+  produk selalu menghidupkan tombolnya karena kolomnya memang sudah berisi SKU lama — kalau aturan
+  “mati selama terisi” dipakai di sana, tombolnya tidak akan pernah bisa ditekan.
+- Menekan **Buat otomatis** di kartu edit mengisi kolom SKU dengan nomor berikutnya dari daftar SKU
+yang sudah ada (`suggestProductSku`, format `PBB-<nomor urut>`, termasuk produk nonaktif). Isi kolom
+  langsung diganti, tetapi **belum tersimpan**: perubahan baru berlaku setelah **Simpan perubahan**,
+  dan kalau dibatalkan SKU lama tetap dipakai.
+- Teks bantu & tooltip tombol kini mengikuti mode: di form baru “isi kolom dari daftar SKU”, di kartu
+  edit “ganti SKU dengan nomor berikutnya” plus penjelasan bahwa perubahan tersimpan bersama tombol
+  simpan. README bagian *SKU otomatis* dan langkah “Memperbaiki nama, SKU, atau harga beli” di panduan
+  PDF ikut menyebut perilaku ini; PDF dibangun ulang.
+
+**Berkas:** baru: — · diubah: `src/pages/ProductsPage.tsx`, `scripts/verify-render.mjs`,
+`scripts/gen-panduan-pdf.mjs`, `public/panduan/panduan-mesinpos.pdf` (dibangun ulang), `README.md`,
+`worklog.md`.
+
+**Verifikasi:**
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bun scripts/verify-render.mjs` → percobaan pertama **exit 1** (`clickSelector is not defined`:
+  cek baru ditulis di blok harness yang memakai `klikKelola`, bukan `clickSelector`); setelah helper
+  yang benar dipakai → **1078/1078**, exit 0. Dua cek baru: kartu Ubah produk menyediakan tombol
+  **Buat SKU otomatis** beserta teks “menggantikan isi kolom”, dan tombol itu mengisi SKU berformat
+  `PBB-<nomor urut>` tanpa menyimpan dulu (SKU tersimpan tidak berubah sampai simpan ditekan). Cek
+  lama form Produk baru (tombol mati selama kolom terisi) tetap lulus.
+- `bun scripts/verify-panduan.mjs` → **14/14** `pemeriksaan lolos`.
+- `bun scripts/gen-panduan-pdf.mjs` → **exit 0** (35 halaman, 19 bagian, 12 gambar, 106.7 KB).
+- Tidak ada uji yang menulis ke deployment, jadi tidak ada akun uji yang perlu dibersihkan lewat
+  `bun run bersih:uji`.
+
+**Catatan / blocker:** nomor final SKU tetap ditentukan pihak yang menyimpan (server/store demo),
+sehingga saran tombol bisa sedikit berbeda dari nomor final bila ada percobaan yang bentrok —
+notis setelah menyimpan selalu menyebut SKU finalnya. Tabel **Status Phase 1–6** dan daftar
+**Blocker** diperiksa: tidak ada butir yang berubah.
+
+## 2026-10-21 — Sesuaikan stok & Modifier produk memakai pola kartu yang sama
+
+**Ruang lingkup:** permintaan pemilik — samakan pola kartu untuk alur **Sesuaikan stok** dan
+**Modifier produk** dengan form **Produk baru**. Sebelumnya dua alur itu satu-satunya yang menempel
+sebagai baris tambahan (`<tr>` ber-`colSpan`) di dalam tabel produk, sehingga terasa berbeda dari
+Produk baru/Ubah produk/Hapus produk yang semuanya kartu di atas daftar. Yang dikerjakan:
+
+- **Sesuaikan stok** kini satu kartu di atas daftar: judul + penjelasan (nama produk, SKU, stok saat
+  ini & satuannya), kolom **Jumlah penyesuaian** (dengan petunjuk angka negatif) dan **Catatan**,
+  pratinjau **Stok jadi** yang menghitung langsung, lalu tombol **Sesuaikan stok** dan **Batal** di
+  bawah. Tombol simpan di dalam kartu diberi `aria-label` sendiri (`Simpan penyesuaian stok <nama>`)
+  karena teksnya sama dengan tombol pembuka di baris.
+- **Modifier produk** juga kartu di atas daftar: judul + penjelasan (produk & SKU), editor modifier
+  yang sama (grup, batas pilihan, opsi, peringatan modul F&B), lalu **Simpan modifier** dan **Batal**.
+- **Satu kartu pada satu waktu** berlaku untuk kelima alur: membuka form Produk baru, kartu Ubah
+  produk, kartu Sesuaikan stok, kartu Modifier, atau kartu Hapus produk menutup empat lainnya (draf
+  stok & editor modifier ikut dibersihkan). Kelima kartu digulir ke layar saat dibuka; tombol baris
+  **Ubah produk**, **Sesuaikan stok**, dan **Modifier** berubah menjadi **Tutup** selama kartunya
+  terbuka (kartu Hapus produk punya tombol Tutup sendiri).
+- Blok `<tr>` lama untuk kedua alur dihapus (termasuk pembungkus `Fragment` yang tidak lagi perlu),
+  jadi tabel produk kembali hanya berisi satu baris per produk.
+- Panduan PDF ikut disesuaikan: langkah “Sesuaikan stok” menyebut kartunya terbuka **di atas daftar**,
+  dan Gambar 3 digambar ulang (kartu di atas, tabel di bawah) beserta keterangannya; PDF dibangun
+  ulang. README menambah kedua alur ke tabel pola kartu (lima alur) dan menyebut detail tombol
+  simpannya.
+
+**Berkas:** baru: — · diubah: `src/pages/ProductsPage.tsx`, `scripts/verify-render.mjs`,
+`scripts/gen-panduan-pdf.mjs`, `public/panduan/panduan-mesinpos.pdf` (dibangun ulang), `README.md`,
+`worklog.md`.
+
+**Verifikasi:**
+- `bun tsc -b --noEmit` → **exit 0**. (Satu percobaan sebelumnya kena batas 180 detik karena proses
+  `tsc` lama masih hidup; proses itu dihentikan lalu dijalankan ulang → exit 0.)
+- `bun scripts/verify-render.mjs` → percobaan pertama **exit 1** pada dua cek lama: teks “Stok jadi
+  50” kini terpecah jadi label + angka (markupnya diperbaiki agar tetap satu kalimat), lalu tombol
+  simpan panel tidak lagi bisa ditemukan dari teks karena kartunya di atas daftar sementara tombol
+  baris juga berteks “Sesuaikan stok” (harness diarahkan ke label ARIA baru). Ditambah empat cek
+  baru: kartu stok memakai pola kartu & berada di atas tabel, kartu Modifier sama polanya dan
+  menutup kartu stok, Batal menutup kartu Modifier, serta membuka kartu Ubah produk menutup kartu
+  stok. Hasil akhir → **1076/1076**, exit 0.
+- `bun scripts/verify-menus.mjs` → **427/427** `checks passed`.
+- `bun scripts/verify-panduan.mjs` → **14/14** `pemeriksaan lolos`.
+- `bun scripts/gen-panduan-pdf.mjs` → **exit 0** (35 halaman, 19 bagian, 12 gambar, 106.6 KB).
+- `bun scripts/verify-mobile-overflow.mjs` → **tidak bisa dijalankan** di workspace ini:
+  `error: Cannot find package 'playwright'` (exit 1). Jadi tata letak kartu di layar 360 px
+  **belum diverifikasi** oleh harness itu.
+- Tidak ada uji yang menulis ke deployment, jadi tidak ada akun uji yang perlu dibersihkan lewat
+  `bun run bersih:uji`.
+
+**Catatan / blocker:** stok tetap tidak bisa diubah dari kartu Ubah produk (jalurnya tetap Sesuaikan
+stok, supaya ledger punya alasan), dan editor modifier tetap menyimpan per produk lewat
+`products.setModifiers`. Tabel **Status Phase 1–6** dan daftar **Blocker** diperiksa: tidak ada butir
+yang berubah (perubahan pola tampilan). Verifikasi tata letak di browser sungguhan/360 px masih
+tertahan karena Playwright tidak terpasang di workspace ini.
+
+## 2026-10-21 — Ubah & hapus produk memakai pola form Produk baru
+
+**Ruang lingkup:** permintaan pemilik — sistem **edit** dan **hapus** produk harus mengikuti pola
+atau konsep yang dipakai saat **membuat produk baru**. Sebelumnya tiga alur produk itu terasa
+berbeda: form Produk baru adalah kartu di bawah judul halaman, sedangkan pengubahan produk memakai
+kartu **Atur harga** dengan susunan kolom sendiri dan penghapusan memakai dialog melayang. Yang
+dikerjakan:
+
+- Kolom inti produk dipindahkan ke satu komponen, `ProductCoreFields`, dipakai **form Produk baru dan kartu Ubah produk**: urutan **Nama produk → SKU → Kategori → Subkategori → Harga jual → Harga beli → Satuan dasar → Stok** tidak bisa lagi berbeda diam-diam antara membuat dan mengubah.
+  Bedanya hanya yang memang berbeda secara data — produk baru boleh mengosongkan SKU (dibuat
+  otomatis) dan memakai **Stok awal**; produk tersimpan menampilkan SKU apa adanya dan **stok saat
+  ini** sebagai bacaan (diubah lewat “Sesuaikan stok” supaya ledger tetap punya alasan).
+- Kartu **Atur harga** diganti menjadi kartu **Ubah produk** di **atas daftar** (bukan dialog di
+  dalam baris tabel), dengan judul + penjelasan + tombol simpan di bawah — bentuk yang sama dengan
+  form Produk baru, termasuk bagian gambar yang memakai `ProductImageEditor` yang sama.
+- **Hapus produk** juga menjadi kartu di atas daftar (bukan dialog melayang). Isinya tetap dari
+  server (`products.deletionCheck`): kalimat hasil pemeriksaan, alasan satu per satu untuk produk
+  yang masih dipakai, tombol **Nonaktifkan saja**, dan tombol **Hapus produk** yang baru hidup
+  setelah pagar lolos. Tombol **Hapus produk** di dalam kartu Ubah produk menutup kartu itu lalu
+  membuka kartu hapus.
+- **Satu kartu pada satu waktu:** membuka form Produk baru, kartu Ubah produk, atau kartu Hapus
+  produk menutup dua lainnya (gambar yang belum sempat diunggah di form Produk baru ikut dibuang,
+  karena produknya belum pernah tersimpan).
+- Label lama **“Atur harga”** diganti **“Ubah produk”** di seluruh aplikasi: tombol baris tabel,
+  teks bantuan di halaman Produk & Stok, tiket dukungan contoh (`src/data/demo.ts`), dan langkah
+  panduan di PDF.
+
+**Berkas:** baru: — · diubah: `src/pages/ProductsPage.tsx`, `scripts/verify-render.mjs`,
+`scripts/verify-menus.mjs`, `src/data/demo.ts`, `src/convex/lib/categories.ts` (komentar aturan
+subkategori), `scripts/gen-panduan-pdf.mjs`, `public/panduan/panduan-mesinpos.pdf` (dibangun ulang),
+`README.md`, `worklog.md`.
+
+**Verifikasi:**
+- `bun convex dev --once` → **exit 0**, `Convex functions ready! (4.94s)`.
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bun scripts/verify-render.mjs` → percobaan pertama **exit 1** pada cek “kategori bisa diaktifkan
+  kembali dan muncul lagi di pemilih”: harness membaca pemilih `[aria-label="Kategori produk baru"]`
+  setelah membuka kartu Ubah produk, padahal kartu itu kini (sesuai pola baru) menutup form Produk
+  baru. Assertion diperbaiki — ditambah dua cek untuk perilaku “satu form pada satu waktu” — lalu
+  dijalankan ulang → **1072/1072**, exit 0. Termasuk: kartu Ubah produk memakai pola kartu yang sama,
+  kolom nama/SKU/harga beli tersimpan tanpa mengubah harga jual, SKU kembar ditolak, kartu Hapus
+  produk berpagar (bukan dialog), “Nonaktifkan saja”, dan produk bersih benar-benar terhapus.
+- `bun scripts/verify-product-edit.mjs` → **36/36** `checks passed`.
+- `bun scripts/verify-menus.mjs` → **427/427** (halaman `/app/products` dikenali dari teks “Ubah produk”).
+- `bun scripts/verify-panduan.mjs` → **14/14** `pemeriksaan lolos`.
+- `bun scripts/gen-panduan-pdf.mjs` → **exit 0** (35 halaman, 19 bagian, 12 gambar, 106.5 KB).
+- Uji murni, render, menu, dan panduan berjalan lokal tanpa menulis ke deployment, jadi tidak ada
+  akun uji yang perlu dibersihkan lewat `bun run bersih:uji`; `convex dev --once` hanya mendorong
+  fungsi, tidak membuat data.
+
+**Catatan / blocker:** stok sengaja **tidak** ikut disimpan dari kartu Ubah produk (jalurnya tetap
+“Sesuaikan stok”, supaya setiap pergerakan punya alasan & jejak ledger), dan harga bertingkat,
+konversi satuan, serta modifier tetap berada di bagian khusus produk tersimpan di kartu yang sama.
+Tabel **Status Phase 1–6** dan daftar **Blocker** diperiksa: tidak ada butir yang berubah (ini
+perubahan pola tampilan, bukan aturan server).
+
+## 2026-10-21 — SKU produk menjadi `PBB-<nomor urut>` tanpa kode kategori
+
+**Ruang lingkup:** permintaan pemilik — cara penamaan SKU diubah menjadi `PBB-<nomor urut>`
+(contoh `PBB-0000042`); kolom SKU boleh dikosongkan lalu disimpan agar dibuat otomatis & unik;
+tombol **Buat otomatis** mengisi kolom dari daftar SKU yang sudah ada selama kolomnya belum diubah
+manual. Yang dikerjakan: format SKU kini hanya prefix `PBB` + nomor urut **tujuh digit** yang
+berjalan sekali per tenant (counter `product.sku`); `products.create` memakai nomor itu lalu
+melewati nomor yang sudah dipakai SKU manual berformat sama, sehingga SKU yang dihasilkan unik.
+Store demo memakai aturan yang sama, dan notis setelah menyimpan menyebut SKU final dari server.
+Kategori **tidak lagi** diselipkan ke dalam SKU, jadi mengganti kategori tidak menulis ulang SKU;
+SKU lama berformat `PBB-SAN-000042` tetap dipakai apa adanya dan tidak dimigrasikan. Tombol
+**Buat otomatis** di form Produk baru mengisi kolom dari daftar SKU yang sudah ada dan mati selama
+kolomnya berisi, supaya ketikan pemilik toko tidak tertimpa. Catatan API, panduan PDF, dan README
+yang masih menyebut kode kategori di tengah SKU ikut diperbaiki.
+
+**Berkas:** baru: — · diubah: `src/convex/lib/productSku.ts`, `src/lib/productSku.ts`,
+`src/convex/products.ts`, `src/convex/categories.ts`, `src/convex/lib/webhookEvents.ts`,
+`src/lib/store/demo.tsx`, `src/lib/store/convex.tsx`, `src/lib/store/types.ts`,
+`src/pages/ProductsPage.tsx`, `src/lib/apiDocs.ts`, `scripts/verify-product-sku.mjs`,
+`scripts/verify-render.mjs`, `scripts/verify-backend.mjs`, `scripts/gen-panduan-pdf.mjs`,
+`public/panduan/panduan-mesinpos.pdf` (dibangun ulang), `README.md`, `worklog.md`.
+
+**Verifikasi:**
+- `bun convex dev --once` → **exit 0**, `Convex functions ready! (4.66s)`.
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bun scripts/verify-product-sku.mjs` → **20/20** `checks passed`.
+- `bun scripts/verify-product-edit.mjs` → **36/36**.
+- `bun scripts/verify-api-docs.mjs` → **166/166**.
+- `bun scripts/verify-categories.mjs` → **46/46**.
+- `bun scripts/verify-panduan.mjs` → **14/14** `pemeriksaan lolos`.
+- `bun scripts/gen-panduan-pdf.mjs` → **exit 0** (35 halaman, 19 bagian, 12 gambar).
+- `bun scripts/verify-render.mjs` → percobaan pertama **exit 1** pada cek “kartu Kategori produk
+  menyediakan pengelolaan bagi pemilik/manajer” karena teks kartunya sudah berubah; assertion
+  disesuaikan ke kalimat baru, lalu dijalankan ulang → **1068/1068**, exit 0. Termasuk cek tombol
+  Buat otomatis, simpan dengan kolom SKU kosong, dan SKU yang tidak berubah saat kategori diganti.
+- `VITE_CONVEX_URL=https://mellow-narwhal-477.convex.cloud bun scripts/verify-backend.mjs` →
+  **960/960**, exit 0 (termasuk SKU otomatis tanpa kode kategori, bentrok dengan SKU manual, dan
+  kategori berganti tidak menulis ulang SKU).
+- `bun run bersih:uji` → **exit 0**: 29 akun uji dihapus (`purged: 29`, `skipped: 5`) di domain
+  `mesinpos.test` & `mesinpos.id`; sisa yang dilewati adalah akun platform/pemilik.
+- Uji murni, render, dan panduan berjalan lokal tanpa menulis ke deployment; hanya uji backend yang
+  menulis ke deployment awan, dan pembersihannya dijalankan sesudahnya.
+
+**Catatan / blocker:** tombol **Buat otomatis** sengaja mati selama kolom SKU berisi (termasuk hasil
+isian tombol itu sendiri) supaya ketikan pemilik tidak tertimpa; nomor final tetap ditentukan server
+atau store demo saat menyimpan. SKU lama berformat kategori tetap sah dan tidak dimigrasikan.
+Tabel **Status Phase 1–6** dan daftar **Blocker** diperiksa: tidak ada butir status maupun blocker
+yang berubah (angka verifikasi di tabel adalah snapshot saat entri itu ditulis).
+
+## 2026-10-21 — Kontak marketplace yang belum cocok tidak lagi berhenti di layar kosong
+
+**Ruang lingkup:** laporan pemilik — di halaman **Pengaturan**, langkah 1 “Cari vendor Anda” menjawab
+“belum ada kontak yang cocok dengan vendor mana pun”, langkah 2 kosong, dan alur pairing berhenti di
+titik itu. Penyebabnya bukan salah ejaan: direktori publik marketplace hanya membawa nama/kota/jumlah
+produk (tidak ada email/WA owner), sedangkan `PUSATBAHANBANGUNAN_PAIRING_LOOKUP_URL` belum diisi di
+deployment, jadi server memang tidak punya sumber untuk mencocokkan kontak. Yang dikerjakan: kalau
+pencarian kontak tidak menghasilkan kecocokan, kartu **membuka direktori toko secara otomatis**
+sesudah pencarian (satu permintaan `includeDirectory: true`), menampilkan catatan “Direktori dibuka
+otomatis…” di langkah 2, dan mengisi kontak yang diketik ke langkah 3 sebagai klaim pemilik — jadi
+pemilik bisa memilih tokonya dan menyelesaikan pairing tanpa mengetik ulang. Bila direktori juga
+gagal dibaca, keadaan kosong beserta tombol direktori yang lama tetap dipakai. Teks bantuan di kartu,
+catatan backend/demo, dan README disesuaikan; aturan server bahwa pencarian kontak **tidak**
+mengembalikan seluruh direktori tidak diubah (direktori tetap permintaan terpisah dari UI).
+
+**Berkas:** baru: — · diubah: `src/components/MarketplacePairingCard.tsx`,
+`src/convex/marketplace.ts`, `src/lib/store/demo.tsx`, `scripts/verify-render.mjs`, `README.md`,
+`worklog.md`.
+
+**Verifikasi:**
+- `bun convex dev --once` → **exit 0**, `Convex functions ready! (4.49s)`.
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bun scripts/verify-render.mjs` → **1068/1068** `checks passed` (naik dua cek: direktori terbuka
+otomatis untuk kontak yang belum cocok, dan kontak itu sudah terisi di langkah 3).
+- Uji render berjalan di DOM lokal tanpa menulis ke deployment, jadi tidak ada akun uji yang perlu
+dibersihkan lewat `bun run bersih:uji`.
+- `scripts/verify-marketplace-pairing.mjs` **tidak dijalankan** karena aturan server tidak berubah
+(hanya kalimat catatan); uji itu menulis akun uji ke deployment dan akan memerlukan pembersihan.
+
+**Catatan / blocker:** pencocokan email/WA **otomatis** tetap belum bisa dilakukan tanpa endpoint
+pencocokan di sisi pusatbahanbangunan.com (`PUSATBAHANBANGUNAN_PAIRING_LOOKUP_URL`, opsional
+`PUSATBAHANBANGUNAN_PAIRING_LOOKUP_TOKEN`). Sampai endpoint itu ada, kontak yang dipilih lewat
+direktori disimpan sebagai klaim (`contactVerified: false`) dan alur pairing tetap bisa selesai.
+Tabel Status Phase 1–6 dan daftar Blocker diperiksa: tidak ada butir yang berubah.
+
+## 2026-10-21 — Kartu Pengaturan menyebut syarat pencocokan kontak marketplace
+
+**Ruang lingkup:** permintaan pemilik — tambahkan penjelasan singkat di kartu **Pairing vendor
+marketplace** (halaman Pengaturan) bahwa pencocokan kontak bergantung pada endpoint marketplace.
+Yang dikerjakan: satu paragraf kecil di langkah 1 (di bawah hint email/WA, dengan
+`data-testid="marketplace-lookup-dependency"`) yang menyebut endpoint pencocokan milik
+`pusatbahanbangunan.com`, akibatnya bila endpoint belum aktif, dan jalan lain lewat direktori toko.
+Tidak ada perubahan perilaku maupun backend.
+
+**Berkas:** baru: — · diubah: `src/components/MarketplacePairingCard.tsx`, `scripts/verify-render.mjs`,
+`worklog.md`.
+
+**Verifikasi:**
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bun scripts/verify-render.mjs` → **1066/1066** `checks passed` (naik satu cek: penjelasan
+  “endpoint pencocokan” benar-benar tampil di kartu).
+- Uji ini berjalan di DOM lokal tanpa menulis ke deployment, jadi tidak ada akun uji yang perlu
+dibersihkan lewat `bun run bersih:uji`.
+
+**Catatan / blocker:** teksnya hanya menjelaskan keadaan; pencocokan tetap baru berjalan setelah
+`PUSATBAHANBANGUNAN_PAIRING_LOOKUP_URL` diisi di sisi marketplace.
+
+## 2026-10-21 — Langkah 2 pairing marketplace hanya menampilkan vendor yang terkait kontak
+
+**Ruang lingkup:** laporan pemilik — di halaman **Pengaturan**, langkah 2 “Pilih toko” menampilkan
+seluruh vendor marketplace (tiga toko) padahal kontak di langkah 1 belum dicari. Yang diminta: cukup
+vendor yang berhubungan dengan email/nomor WA yang dimasukkan. Yang dikerjakan: `lookupVendors`
+sekarang punya dua mode. Mode kontak (bawaan) hanya mengembalikan vendor yang marketplace nyatakan
+cocok — dan **tidak** membuang direktori ke layar; tanpa kontak hasilnya kosong beserta alasannya.
+Direktori lengkap hanya keluar lewat `includeDirectory: true`, yang dipicu tombol **“Tampilkan
+direktori toko”** di langkah 2. Kartu juga tidak lagi memuat direktori otomatis saat dibuka, dan
+store demo mengikuti aturan yang sama. Direktori dibaca untuk melengkapi kota/jumlah produk vendor
+yang cocok; kalau direktori sedang gagal, kecocokan kontak tetap tampil.
+
+**Berkas:** baru: — · diubah: `src/convex/marketplace.ts`, `src/lib/store/types.ts`,
+`src/lib/store/convex.tsx`, `src/lib/store/demo.tsx`, `src/components/MarketplacePairingCard.tsx`,
+`scripts/verify-marketplace-pairing.mjs`, `scripts/verify-render.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bunx convex dev --once` → `Convex functions ready! (10.09s)` (exit 0).
+- `bun scripts/verify-render.mjs` → **1065/1065** `checks passed`; termasuk cek baru “direktori vendor
+  tidak dimuat sebelum kontak dicari” dan “pencarian kontak hanya menampilkan vendor yang terkait”
+  (`owner@pusatbahanbangunan.com` → hanya *Pusat Bahan Bangunan Official*, dua toko demo lain tidak
+  ikut tampil).
+- `bun scripts/verify-marketplace-pairing.mjs` → **150/150** `pemeriksaan pairing marketplace lulus`;
+  cek baru: pencarian kontak mengembalikan **≤ 1** vendor, pencarian tanpa kontak mengembalikan **0**
+  vendor + alasan, dan direktori penuh hanya terbaca dengan `includeDirectory: true`.
+- Sapuan langsung ke direktori marketplace
+  (`POST https://scintillating-crane-800.convex.cloud/api/query` → `vendor:listVendors`) → **3 baris**
+  (Pusat Bahan Bangunan Official, Megah Jaya Bangunan, CV. Mitra Bangunan); tidak ada field email/WA
+  di balasannya, jadi pencocokan kontak memang hanya bisa lewat endpoint marketplace.
+- `bun run bersih:uji` → `platform:purgeFixtureTenantsAuto` `{"actorEmail":"phansugisoft@gmail.com","ran":true}`;
+  `platform:purgeFixtureUsers` `scanned: 5`, `purged: 0`, `skipped: 5`.
+
+**Catatan / blocker:** deployment marketplace **belum** punya endpoint pencocokan kontak
+(`PUSATBAHANBANGUNAN_PAIRING_LOOKUP_URL` kosong di dev maupun produksi; `vendor:listVendors` tidak
+membawa email/WA). Jadi pencarian email/WA saat ini akan menjawab “belum ada vendor yang terkait”,
+dan pairing diselesaikan lewat tombol **Tampilkan direktori toko** — kontaknya lalu dicatat sebagai
+klaim pemilik (`contactVerified: false`) sampai marketplace mencocokkannya. Berkas markdown
+(`README.md`, `worklog.md`) tidak memengaruhi build/tipe; hanya tipe & harness di atas yang dijalankan.## 2026-10-20 — 401 “Tanda tangan tidak cocok” pada `sale.completed`: padding SHA-256 salah di kelas panjang 55 mod 64
+
+
+
+**Ruang lingkup:** laporan pemilik — di **Riwayat kiriman** (halaman API & Webhook) baris `sale.completed`
+dijawab **401** “Tanda tangan tidak cocok — pastikan rahasia endpoint di MesinPOS sama dengan yang diisi di
+Pengaturan.”, sementara `stock.changed` di detik yang sama dijawab **200** “terkirim”. Yang dikerjakan:
+penelusuran data kiriman, pembuktian bahwa rahasianya **bukan** penyebabnya, perbaikan akar masalah di
+`src/convex/lib/hash.ts`, cek regresi di harness, lalu pembuktian ulang lewat jalur “Kirim ulang”.
+
+Temuan (diukur, bukan ditebak):
+
+- Kedua kiriman dibuat pada milidetik yang sama (`2026-10-20T17:16:15.805Z`) untuk **satu endpoint** yang
+  sama (`…/api/mesinpos/webhook`), jadi URL & rahasianya jelas identik: `sale.completed` 401 tiga kali,
+  `stock.changed` 200 sekali.
+- Tanda tangan dihitung atas `timestamp.body`. Badan `sale.completed` di baris itu **297 byte** → pesan
+  HMAC `13 + 1 + 297 = 311` byte, dan `311 ≡ 55 (mod 64)`. Badan `stock.changed` 343 byte → `357 ≡ 37`
+  (mod 64) — kelas yang aman.
+- Akar masalah: `sha256()` menghitung panjang blok dengan `(((len + 9) >> 6) + 1) << 6`. Saat `len + 9`
+  tepat kelipatan 64 (yaitu `len ≡ 55 mod 64`), rumus itu menambah **satu blok nol penuh**, sehingga
+  digest menyimpang dari SHA-256 standar. Disapu 0–700 byte: sebelum perbaikan **11 panjang salah**
+  (55, 119, 183, 247, 311, 375, 439, 503, 567, 631, 695); sesudah perbaikan **0**.
+- Jadi yang salah bukan rahasianya: badan kiriman yang panjangnya `≡ 41 mod 64` selalu menghasilkan tanda
+  tangan yang tidak bisa diverifikasi penerima, sedangkan badan lain lolos. Ini juga menjelaskan sebagian
+  401 lama yang dulu disimpulkan “rahasia belum cocok”.
+- Dampaknya lebih luas dari satu event: `signWebhookPayload` dipakai webhook keluar **dan** dorongan
+  katalog/stok/penjualan marketplace, jadi kiriman dengan panjang badan di kelas itu selalu ditolak.
+  Hashing kunci API tidak terpengaruh (`publicId:secret` = 43 byte), jadi tidak ada kunci yang perlu
+dibuat ulang.
+
+**Berkas:** baru: — · diubah: `src/convex/lib/hash.ts` (pembulatan padding `ceil`), `scripts/verify-api.mjs`
+(cek regresi padding 0–320 byte + tanda tangan header untuk badan 41 mod 64), `README.md`,
+`worklog.md`.
+
+**Verifikasi:**
+- sapuan HMAC/SHA-256 vs `node:crypto` panjang pesan 0–700 → sebelum: `total salah: 11`; sesudah: `total salah: 0`.
+- `bun tsc -p tsconfig.convex.json --noEmit` → **exit 0**.
+- `bun scripts/verify-api.mjs` → **316/316** (sebelumnya 314: +2 cek padding).
+- `bun convex dev --once` → `Convex functions ready! (3.22s)` (exit 0).
+- Jalur nyata, badan yang dulu gagal (297 byte) ditandatangani kode repo: kode repo **==** `node:crypto`,
+  lalu `POST` ke endpoint marketplace → **200** `{"ok":true,"duplicate":false,"event":"sale.completed"}`.
+- Tombol **Kirim ulang** (jalur yang sama dengan yang ditekan pemilik) lewat
+  `bun convex run apiAccess:retryDelivery …` → `{"status":"delivered","attempts":1,"error":null}`;
+  `bun convex data webhookDeliveries` sesudahnya: `sale.completed` **delivered 200** dan `stock.changed`
+  **delivered 200**.
+- `bun scripts/verify-webhook-retries.mjs` → **8/8**.
+- Bersih-bersih: `bun run bersih:uji` → `purged: 1`, `scanned: 6`, `skipped: 5` (pengguna uji
+  `retry+…@mesinpos.test`). Dua endpoint uji sisa harness (`https://tidak-ada.mesinpos.invalid/…`, tenant
+  “Toko Pekerja Webhook”) dihapus lewat `apiAccess:removeEndpoint` → `removedDeliveries: 1` masing-masing;
+  `bun convex data webhookEndpoints` kini **1** baris (endpoint marketplace).
+
+**Catatan / blocker:** baris lama yang sudah `failed`/`pending` di riwayat tidak berubah sendiri — tekan
+**Kirim ulang** (menyetel ulang jumlah percobaan) atau tunggu cron berikutnya. Rahasia endpoint **tidak**
+diubah. Entri 2026-10-20 “Marketplace: rahasia endpoint dipasang, tetapi penerima tetap menolak tanda
+tangan” adalah **koreksi sebagian**: pada saat itu rahasianya memang belum tentu sama, tetapi sejak rahasia
+disamakan pun kiriman dengan panjang badan `≡ 41 mod 64` tetap ditolak karena padding ini. Tabel **Status
+Phase 1–6** dan daftar **Blocker** diperiksa: tidak ada butir yang berubah, tidak ada blocker baru.
+
+## 2026-10-20 — Pilihan arah di laporan selisih: kirim stok POS atau tarik angka marketplace
+
+**Ruang lingkup:** permintaan “tambahkan pilihan arah pada tombol: kirim stok POS atau tarik angka
+marketplace untuk SKU yang berbeda saja”. Yang dibuat: action `pullStockDiffs` (khusus pemilik) +
+mutation `applyMarketplaceStockBySku`, tombol kedua di kartu, metode store, dan cek harness. Kedua
+tombol memakai **daftar SKU yang sama** (`stockDiffsToPush` → `stockDiffPushSkus`, hanya baris
+`kind: "both"`), jadi “SKU yang berbeda” tidak didefinisikan dua kali di dua tempat.
+
+**Berkas:** baru: — · diubah: `src/convex/lib/marketplace.ts` (tipe `MarketplaceStockDiffPullResult`),
+`src/convex/marketplace.ts` (`applyMarketplaceStockBySku`, `pullStockDiffs`),
+`src/lib/store/types.ts`, `src/lib/store/convex.tsx`, `src/lib/store/demo.tsx`,
+`src/components/MarketplacePairingCard.tsx` (dua tombol arah + teks),
+`scripts/verify-marketplace-pairing.mjs`, `README.md`.
+
+**Verifikasi:**
+`bun convex dev --once` → `Convex functions ready`; `bun tsc -p tsconfig.convex.json --noEmit` → **exit 0**;
+`bun tsc -p tsconfig.app.json --noEmit` → **exit 0**.
+`bun scripts/verify-marketplace-pairing.mjs` → **150/150** (sebelumnya 145).
+`MARKETPLACE_E2E=1 bun scripts/verify-marketplace-pairing.mjs` → **218/218**: setelah saldo digeser +3
+lalu diperiksa, `pullStockDiffs` melaporkan `requested: 1`, `adjusted: 1`, saldo POS **sama dengan angka
+marketplace yang dibaca ulang**, dan laporan langsung bersih (`differing: 0`); kasir ditolak; tanpa
+selisih kedua arah menolak dengan pesan “Tidak ada SKU dengan saldo berbeda”.
+`bun scripts/verify-store-gate.mjs` → **17/17**; `bun scripts/verify-render.mjs` → **1064/1064**.
+Bersih-bersih: `bun run bersih:uji` → `purged: 4`, `scanned: 9`, `skipped: 5`; penutup `purged: 0`,
+`scanned: 5`, `skipped: 5`.
+
+**Catatan / blocker:**
+
+- Arah **tarik** menulis saldo & ledger langsung (reason `adjustment`, `note` “Tarik stok dari laporan
+selisih marketplace”), **bukan** lewat `applyStockChange`: angka itu berasal dari marketplace, jadi
+melewati helper stok biasa akan memicu `stock.changed` dan antrean dorongan balik untuk nilai yang
+baru saja diterima. Ini sama dengan jalur impor katalog.
+- Cek lama “rekonsiliasi tidak menimpa stok siapa pun” sempat gagal karena regex-nya menangkap kata
+`applyStockChange` di **komentar** dokumen function baru. Regex diperketat menjadi pemanggilan
+`applyStockChange(ctx` (bukan melemahkan cek: pemanggilan sungguhan tetap terdeteksi).
+- Kedua tombol bekerja atas **laporan terakhir**; tanpa selisih tersimpan, tombolnya mati dan action
+menolak dengan arahan menekan “Periksa sekarang” dulu. Ini disengaja: yang dikirim harus sama dengan
+yang dilihat pemilik di tabel.
+- Tombol **tidak** ditekan pada workspace nyata — arah tarik akan menimpa saldo POS (376/109 → 373/103)
+untuk 2 SKU yang selisih, dan keputusan itu milik pemilik. Tabel Status Phase 1–6 dan daftar Blocker
+diperiksa: klausa marketplace diperbarui (dua arah per SKU); tidak ada butir blocker baru.
+
+## 2026-10-20 — Tombol “Kirim stok N SKU” di laporan selisih rekonsiliasi
+
+**Ruang lingkup:** permintaan “tambahkan tombol di laporan selisih untuk mengirim stok POS hanya pada
+SKU yang berbeda”. Yang dibuat: action `pushStockDiffs` (khusus pemilik) yang membaca laporan selisih
+terakhir, mengambil **hanya baris `both`** (saldo beda), lalu mengirimnya lewat jalur dorongan stok
+otomatis yang sudah ada (`pushCatalogToMarketplace` dengan `skus` + `automatic: true`, antrean/amplop/
+tanda tangan sama, tercatat di `lastStockSync*`); tombol di kartu; pemeriksaan ulang otomatis sesudah
+kiriman diterima. Baris `pos_only`/`marketplace_only` sengaja tidak ikut: `pos_only` akan **membuat**
+produk baru di marketplace (bukan memperbaiki stok), `marketplace_only` tidak punya produk POS.
+
+**Berkas:** baru: — · diubah: `src/convex/lib/marketplace.ts` (`stockDiffPushSkus`,
+`MARKETPLACE_STOCK_DIFF_PUSH_LIMIT`, tipe `MarketplaceStockDiffPushResult`), `src/convex/marketplace.ts`
+(`stockDiffsToPush`, `pushStockDiffs`), `src/lib/store/types.ts`, `src/lib/store/convex.tsx`,
+`src/lib/store/demo.tsx` (demo menolak dengan alasan yang bisa dibaca), 
+`src/components/MarketplacePairingCard.tsx` (tombol + teks arah tindakan),
+`scripts/verify-marketplace-pairing.mjs`, `README.md`.
+
+**Verifikasi:**
+`bun convex dev --once` → `Convex functions ready`; `bun tsc -p tsconfig.convex.json --noEmit` → **exit 0**;
+`bun tsc -p tsconfig.app.json --noEmit` → **exit 0**.
+`bun scripts/verify-marketplace-pairing.mjs` → **145/145** (sebelumnya 136; +9 cek pemilihan SKU &
+wiring). `MARKETPLACE_E2E=1 bun scripts/verify-marketplace-pairing.mjs` → **209/209**: tombol mengirim
+**1 SKU** (`counts.products === 1`) saat hanya 1 baris yang berbeda, menolak tanpa penerima tanpa
+mengklaim `delivered`, kasir ditolak, dan tanpa selisih action menolak dengan pesan “Tidak ada SKU
+dengan saldo berbeda”. `bun scripts/verify-store-gate.mjs` → **17/17**; `bun scripts/verify-render.mjs` →
+**1064/1064**.
+Tanpa menulis ke marketplace sungguhan: `bun convex run marketplace:stockDiffsToPush
+'{"tenantId":"ks7dtrcvxj0c3q0g7t4455mg198g4tep"}'` → `{differing: 2, skus: ["PBB-MAT-339501",
+"PBB-MAT-560212"]}` — tombol akan mengirim tepat 2 SKU itu, bukan seluruh katalog.
+Bersih-bersih sesudah E2E: `bun run bersih:uji` → `purged: 2`, `scanned: 7`, `skipped: 5`; penutup
+`purged: 0`, `scanned: 5`, `skipped: 5`.
+
+**Catatan / blocker:** tombolnya **tidak** ditekan pada workspace nyata di entri ini — pengiriman ke
+marketplace sungguhan mengubah stok sisi sana (373/103 menjadi 376/109), jadi keputusannya milik
+pemilik. Yang diverifikasi untuk workspace nyata hanya daftar SKU yang akan dikirim. Tabel Status
+Phase 1–6 dan daftar Blocker diperiksa: klausa akses API/marketplace diperbarui (tombol kirim per SKU);
+tidak ada butir blocker baru.
+
+## 2026-10-20 — Rekonsiliasi stok harian marketplace + laporan selisih per SKU
+
+**Ruang lingkup:** permintaan “tambahkan pekerja rekonsiliasi stok terjadwal antara MesinPOS dan
+marketplace, plus laporan selisih per SKU”. Yang dibuat: cron harian yang membaca katalog vendor
+lalu membandingkan saldo **lokasi jual** per SKU, tabel `marketplaceStockDiffs` untuk laporan
+terakhir, kolom `lastReconcile*` di baris pairing, tombol **Periksa sekarang** (pemilik), dan tabel
+selisih di kartu Pengaturan. Rekonsiliasi sengaja **melapor, tidak menimpa**: arah penimpaan tetap
+keputusan pemilik (Impor katalog = marketplace → POS, Sinkronkan produk = POS → marketplace), karena
+menimpa otomatis bisa menghapus penjualan yang baru terjadi di sisi lain.
+
+**Berkas:** baru: — · diubah: `src/convex/lib/marketplace.ts` (aturan murni `reconcileMarketplaceStock`,
+`parseMarketplaceStockRows`, kalimat laporan, tipe & konstanta), `src/convex/marketplace.ts`
+(`stockReconcileState`, `recordReconciliation`, `reconcileStock`, `reconcileNow`, `reconcileAllStocks`,
+`stockDiffs` di `pairingView`), `src/convex/schema.ts` (tabel `marketplaceStockDiffs` + kolom
+`lastReconcile*`), `src/convex/crons.ts` (jadwal harian 02.30 UTC),
+`src/components/MarketplacePairingCard.tsx` (kartu “Selisih stok per SKU” + tabel + tombol),
+`src/lib/store/types.ts`, `src/lib/store/convex.tsx`, `src/lib/store/demo.tsx` (metode store, demo
+menulis apa adanya bahwa ia tidak tersambung), `scripts/verify-marketplace-pairing.mjs`,
+`README.md`.
+
+**Verifikasi:**
+`bun convex dev --once` → `Convex functions ready` (indeks `marketplaceStockDiffs.by_tenant` dibuat).
+`bun tsc -p tsconfig.convex.json --noEmit` → **exit 0**.
+`bun tsc -p tsconfig.app.json --noEmit` → **exit 0**.
+(`bun tsc -b --noEmit` dicoba dua kali dan **tidak selesai** — batas waktu/workspace penuh; yang
+lulus adalah kedua project config di atas.)
+`bun scripts/verify-marketplace-pairing.mjs` → **136/136** (sebelum entri ini 117; +19 cek aturan &
+wiring rekonsiliasi).
+`MARKETPLACE_E2E=1 bun scripts/verify-marketplace-pairing.mjs` → **196/196** terhadap deployment:
+sesudah impor rekonsiliasi melaporkan 0 selisih & ≥ 1 SKU sama; setelah satu SKU digeser +2 laporan
+memuat baris `kind: both` dengan `delta = marketplace − POS` dan catatan “tidak ditimpa otomatis”;
+stok lokal **tidak** berubah karena pemeriksaan; kasir ditolak; setelah disamakan laporan bersih lagi.
+`bun scripts/verify-store-gate.mjs` → **17/17**. `bun scripts/verify-render.mjs` → **1064/1064**.
+`bun scripts/verify-marketplace-sales.mjs` → **20/20**.
+Jalur nyata pada workspace sungguhan: `bun convex run marketplace:reconcileStock
+'{"tenantId":"ks7dtrcvxj0c3q0g7t4455mg198g4tep"}'` → `status: checked`, counts
+`{pos:15, marketplace:15, matched:13, differing:2, posOnly:0, marketplaceOnly:0, truncated:false}`;
+dua baris selisih: `PBB-MAT-339501` 109 vs 103 (−6) dan `PBB-MAT-560212` 376 vs 373 (−3).
+`bun convex data marketplaceStockDiffs` → 2 baris tertulis; `bun convex data marketplacePairings` →
+`lastReconcileStatus: "checked"`, `lastReconcileAt` 14:51:33 UTC dengan counts yang sama.
+Bersih-bersih: `bun run bersih:uji` → `purged: 4` (lalu `purged: 0`, `scanned: 5`, `skipped: 5`),
+sesudah `verify-marketplace-sales.mjs` → `purged: 1`, `scanned: 6`, `skipped: 5`, dan sesudah E2E
+terakhir (196/196) → `purged: 2`, `scanned: 7`, `skipped: 5`; pemeriksaan penutup → `purged: 0`,
+`scanned: 5`, `skipped: 5`.
+
+**Catatan / blocker:**
+
+- **Cron hariannya belum pernah berjalan sungguhan** (jadwal 02.30 UTC). Yang terbukti adalah
+  action-nya lewat `convex run` untuk workspace nyata + registrasi cron saat deploy; menunggu jadwal
+  tidak bisa dilakukan di sesi ini.
+- **Lima cek E2E lama saya ubah** karena mengasumsikan “endpoint dorong kosong”, sedangkan deployment
+  dev kini punya `PUSATBAHANBANGUNAN_{PRODUCTS,STOCK,SALES}_URL`. Cek itu sekarang menguji kejujuran
+  status (tidak boleh `delivered` tanpa penerimaan, catatan penolakan menyebut HTTP, status kartu sama
+  dengan status action) alih-alih keadaan lingkungan. Tidak ada assertion yang dilemahkan pada perilaku
+  yang diminta entri ini — aturan rekonsiliasi tetap diperiksa ketat.
+- Jalur balik marketplace → POS (webhook masuk) **tetap belum dipasang** untuk workspace nyata; itu
+  sebabnya selisih di atas muncul, dan tetap tercatat di entri audit sebelumnya. Tabel **Status Phase
+  1–6** dan daftar **Blocker** diperiksa: klausa “sinkronisasi platform” kini menyebut rekonsiliasi
+  harian; tidak ada butir blocker baru selain webhook masuk yang sudah tercatat.
+
+## 2026-10-20 — Audit: kenapa stok MesinPOS berbeda dari marketplace (arah balik belum ada)
+
+**Ruang lingkup:** pertanyaan pemilik “kenapa stok MesinPOS berbeda dari marketplace, apakah sinkronnya tidak
+jalan?”. Yang dikerjakan: penelusuran jalur tulis stok (`applyStockChange` → `marketplaceStockQueue` →
+`pushQueuedStock`, `stock.changed` → `enqueueWebhookEvent`), pemeriksaan data deployment untuk workspace nyata
+`ks7dtrcvxj0c3q0g7t4455mg198g4tep` (Pusat Bahan Bangunan Official), dan pembandingan angka stok POS dengan
+katalog publik `marketplace:getProducts` vendor `mn74145s7vwr3ajmh1676tn7yd8d98ac`. Tidak ada perubahan kode.
+
+**Berkas:** diubah: `worklog.md` · baru: —
+
+**Temuan:**
+
+1. **Arah MesinPOS → marketplace berjalan.** `stock.changed` untuk penjualan terakhir (`A-00044`, 09:36:53 UTC)
+   dijawab **200** oleh `https://scintillating-crane-800.convex.site/api/mesinpos/webhook`, dan dorongan stok
+   otomatis tercatat `lastStockSyncStatus: delivered` (`lastStockSyncAt` 09:36:55 UTC, 1 produk). Endpoint
+   `PUSATBAHANBANGUNAN_STOCK_URL` / `_SALES_URL` / `_PRODUCTS_URL` memang terisi di deployment.
+2. **Arah marketplace → MesinPOS belum ada untuk workspace ini.** `inboundWebhookEndpoints` = **0 baris** dan
+   `inboundWebhookEvents` = **0 baris** untuk tenant itu. Jadi penjualan/penyesuaian yang terjadi **di marketplace**
+   tidak pernah masuk ke POS; yang tersedia hanya tombol **Impor katalog** manual.
+3. **Selisih hari ini memang berasal dari sisi marketplace.** Impor terakhir 14:25:13 UTC menyesuaikan 2 stok;
+   tujuh menit kemudian katalog publik marketplace sudah lebih rendah dari POS:
+   `PBB-MAT-339501` Talang Air PVC 4 inch **109 (POS) vs 103 (marketplace)**, dan baris SKU lama
+   `PBB-MAT-560212` (Semen Tiga Roda, diganti SKU-nya 09:42 UTC menjadi `PBB-SEM-560212`) masih hidup di
+   marketplace dengan stok **373**, sementara baris baru `PBB-SEM-560212` = **382** (sama dengan POS).
+   12 SKU lain sama persis. Tidak ada `stockMovements` MesinPOS sesudah 14:25:13, jadi angka POS tidak berubah —
+   yang berubah adalah angka marketplace.
+4. **Impor bukan rekonsiliasi.** Riwayat `stockMovements` hari ini menunjukkan tiga impor (09:36, 14:22, 14:25 UTC)
+   yang menimpa stok POS dengan angka marketplace — arah yang berlawanan dengan aturan “MesinPOS sumber utama”.
+   Tidak ada pekerja terjadwal yang merekonsiliasi stok; `crons.ts` hanya menyapu antrean yang tertinggal.
+5. **Sisa data uji di marketplace:** `PBB-UMU-000001` (stok 0) masih ada di katalog vendor, tidak ada di POS.
+
+**Verifikasi:**
+`bun convex data marketplacePairings` → baris tenant nyata `lastStockSyncStatus: delivered` (09:36:55 UTC),
+`lastSalesSyncStatus: delivered` (09:36:55 UTC), `lastCatalogStatus: imported` (14:25:13 UTC, 15 produk, 2 stok
+disesuaikan).
+`bun convex data marketplaceStockQueue` & `marketplaceSaleQueue` → **0 dokumen** (tidak ada antrean menggantung).
+`bun convex data inboundWebhookEndpoints | grep -c <tenant>` → **0**; `inboundWebhookEvents` → **0**.
+`bun convex data webhookEndpoints` → endpoint nyata `p57ect2sq…` aktif, 10 event termasuk `stock.changed`.
+`bun convex data webhookDeliveries` → kiriman `stock.changed` & `sale.completed` untuk endpoint itu **200 /
+delivered**; dua kiriman lama `failed` 401 (sebelum rahasia disepakati) lalu kiriman berikutnya 200.
+`bun -e` fetch `marketplace:getProducts` (vendor `mn74145s7vwr3ajmh1676tn7yd8d98ac`) pada 14:32:46 UTC → 15 baris,
+diulang 14:33:05 UTC dengan angka sama; dibandingkan
+dengan `bun convex data products` + `bun convex data stockLevels` → 12 SKU sama, 1 selisih (`PBB-MAT-339501`
+109 vs 103), 1 baris SKU lama (`PBB-MAT-560212` 373) yang sudah tidak ada di POS.
+`bun convex env list` (nama kunci saja, nilai disunting) → `PUSATBAHANBANGUNAN_{STOCK,PRODUCTS,SALES}_URL` terisi §.
+
+**Catatan / blocker:** penyebab utamanya bukan dorongan yang gagal, melainkan **tidak ada jalur balik**: tanpa
+endpoint webhook masuk yang dipasang marketplace, transaksi di marketplace tidak pernah mengurangi stok POS dan
+tidak ada rekonsiliasi berkala. Perbaikannya butuh tindakan di luar repo (pemilik membuat webhook masuk di
+`/app/api` lalu menempelkan URL + rahasianya ke Pengaturan marketplace) dan pembersihan baris SKU lama
+`PBB-MAT-560212` di sisi marketplace — keduanya tidak dikerjakan di entri ini. Tabel **Status Phase 1–6** dan
+daftar **Blocker** diperiksa: tidak ada klausa roadmap yang berubah status (butir baru: sinkronisasi dua arah /
+rekonsiliasi terjadwal belum ada).
+
+§ nama kunci saja; tidak ada nilainya yang dibaca atau disalin.
+
+## 2026-10-20 — Koreksi verifikasi: typecheck aplikasi ikut dijalankan dan lulus
+
+**Ruang lingkup:** entri di bawah (`product.created` di katalog webhook) menulis bahwa
+`bun tsc -b --noEmit` (typecheck aplikasi) tidak dijalankan dan menunggu pemeriksaan platform.
+Entri ini mengoreksi catatan itu: perintahnya dijalankan sesudahnya dan lulus. Tidak ada perubahan kode
+pada entri ini.
+
+**Berkas:** diubah: `worklog.md` · baru: —
+
+**Verifikasi:** `bun tsc -p tsconfig.app.json --noEmit` → **exit 0** (seluruh `src` di luar `src/convex`).
+Typecheck Convex (`bun tsc -p tsconfig.convex.json --noEmit`) sudah lulus exit 0 di entri sebelumnya;
+kedua berkas sumber tidak berubah sejak itu.
+
+**Catatan / blocker:** tidak ada. Tabel **Status Phase 1–6** dan daftar **Blocker** diperiksa: tidak ada
+butir yang berubah.
+
+## 2026-10-20 — Event `product.created` masuk katalog webhook, dan endpoint marketplace melangganinya
+
+**Ruang lingkup:** permintaan pemilik repo — tambahkan langganan `product.created` (dan `opname.posted`)
+pada endpoint webhook, karena tanpa langganan event itu tidak pernah dikirim. Yang dikerjakan: menambah
+event `product.created` ke katalog `WEBHOOK_EVENTS` beserta isinya, mengirimkannya dari jalur pembuatan
+produk (bukan hanya dari halaman), dan memasang langganan kedua event itu pada endpoint webhook yang
+sudah menunjuk marketplace.
+
+Temuan sebelum perubahan (diukur dari deployment dev):
+
+- `WEBHOOK_EVENTS` berisi 14 event dan **tidak punya** `product.created`; `sanitizeWebhookEvents`
+  membuang event di luar katalog, jadi `product.created` tidak bisa dilanggan sama sekali.
+- `products.create` hanya mengirim `product.updated` dengan `changed: ["created"]` — penerima yang
+  ingin “produk baru saja” harus menebak dari daftar `changed`.
+- `opname.posted` **sudah** ada di katalog dan sudah dikirim `opname.post` (`src/convex/opname.ts`);
+  yang belum ada hanyalah langganannya di baris endpoint marketplace.
+- Baris `webhookEndpoints` `p57ect2sq…` (URL `https://scintillating-crane-800.convex.site/api/mesinpos/webhook`)
+  melanggan 9 event — `opname.posted` sudah termasuk, `product.created` belum ada di katalog.
+
+Yang diubah:
+
+- `src/convex/lib/webhooks.ts`: event baru `product.created` (“Produk baru dibuat”) di katalog, jadi
+  bisa dilanggan lewat halaman API & Webhook maupun dokumentasi `/dokumentasi-api` (keduanya membaca
+  katalog yang sama). Katalog kini 15 event.
+- `src/convex/lib/webhookEvents.ts`: `productCreatedEventData` — `sku`, `name`, `price`, `unit`,
+  `active`, `category`, `subcategory`, `createdAt`, tanpa daftar `changed` (event ini hanya sekali per
+  produk).
+- `src/convex/products.ts`: isi produk (termasuk nama kategori dari id) disusun satu helper
+  `productEventBase`; `emitProductCreated` mengirim `product.created`, dan `products.create` menulis
+  **keduanya** — `product.created` untuk penerima “produk baru”, plus `product.updated`
+  (`changed: ["created"]`) yang sudah dipakai platform supaya katalognya tidak kehilangan produk baru.
+  Keduanya dijadwalkan dalam **satu** putaran pekerja (`pendingBefore`), bukan dua.
+- Langganan endpoint marketplace ditambah `product.created` lewat `apiAccess.updateEndpoint` (bukan
+  ditulis langsung ke DB): 10 event kini — `sale.completed`, `sale.voided`, `stock.low`,
+  `opname.posted`, `payable.due`, `receivable.overdue`, `product.created`, `product.updated`,
+  `stock.changed`, `purchase.received`.
+- `scripts/verify-api.mjs`: cek isi `product.created` dan cek “peristiwa nyata memicunya” di
+  `products.ts` (daftar pemicu yang sama dengan `sale.completed`/`opname.posted`).
+- `README.md`: jumlah event webhook keluar 14 → 15, daftar event, dan pemicu `product.created`.
+
+**Berkas:** diubah: `src/convex/lib/webhooks.ts`, `src/convex/lib/webhookEvents.ts`,
+`src/convex/products.ts`, `scripts/verify-api.mjs`, `README.md`, `worklog.md` · baru: —
+
+**Verifikasi:**
+
+- `bun tsc -p tsconfig.convex.json --noEmit` → exit 0
+- `bun scripts/verify-api.mjs` → **314/314** lulus (sebelumnya 312; dua cek baru: isi `product.created`
+  dan pemicunya di `products.ts`)
+- `bun scripts/verify-platform-sync.mjs` → **43/43** lulus
+- `bun scripts/verify-api-docs.mjs` → **166/166** lulus (dokumentasi publik ikut memuat katalog baru)
+- `bun convex dev --once` → `Convex functions ready` (exit 0)
+- `apiAccess:updateEndpoint` untuk `p57ect2sq…` → exit 0; `bun convex data webhookEndpoints` menunjukkan
+  `opname.posted` **dan** `product.created` di daftar langganannya (10 event)
+- **Jalur nyata:** endpoint uji sementara (`https://example.com/mesinpos-webhook-uji`, dilanggan hanya
+  `product.created`) + `products:create` (“Produk uji langganan product.created”) → satu baris
+  `webhookDeliveries` `product.created` untuk endpoint itu, id `evt_…_product.created_PBB-UMU-000001`,
+  isi memuat SKU/harga/kategori, percobaan dijawab **405** oleh example.com (memang bukan penerima) —
+  jadi penulisan kiriman dan pengirimannya terbukti, bukan hanya type-checked.
+- Endpoint yang sudah dilanggan `product.created` juga menerima kiriman produk uji itu: `product.created`
+  ke marketplace dijawab **200**; `product.updated` (created) dijawab **401** “Tanda tangan tidak cocok”
+  (masalah rahasia yang sudah tercatat di entri sebelumnya, bukan akibat perubahan ini).
+- Bersih-bersih: produk uji dihapus lewat `products:remove` (exit 0, `usage` semua 0), endpoint uji
+  dihapus lewat `apiAccess.removeEndpoint` (1 kiriman ikut terhapus), lalu `bun convex data products`
+  tidak lagi memuat `PBB-UMU-000001` dan `bun convex data webhookEndpoints` hanya menyisakan `p57ect2sq…`.
+  Penghapusan mengirim `product.updated` (`deleted`) ke marketplace dan dijawab **200**.
+- `bun run bersih:uji` → `purged: 0`, `scanned: 5`, `skipped: 5` (tidak ada akun uji baru; 5 baris yang
+  dilewati masih tercatat sebagai anggota workspace).
+- `bun tsc -b --noEmit` (aplikasi) **tidak dijalankan** — perubahan hanya di `src/convex/**`,
+  `scripts/**`, dan markdown; `tsconfig.app.json` tidak memuat `src/convex`. Pemeriksaan platform yang
+  menjalankannya sesudah giliran ini.
+
+**Catatan / blocker:** produk uji sempat dikirim ke marketplace sebagai `product.created` (200) sebelum
+dihapus; penghapusannya mengirim `product.updated` `deleted` (200), tetapi apakah penerima benar-benar
+melepas produk itu ditentukan sisi marketplace. Tabel **Status Phase 1–6** dan daftar **Blocker**
+diperiksa: tidak ada butir yang berubah. Langganan `product.created` hanya terpasang di endpoint dev
+(`p57ect2sq…`); endpoint lain di deployment/produksi perlu mencentangnya di halaman API & Webhook karena
+langganan tersimpan per baris endpoint.
+
+## 2026-10-20 — Marketplace menolak dorongan stok & penjualan (HTTP 400): kiriman kini memakai amplop `id` + `event`
+
+**Ruang lingkup:** pemilik repo melaporkan dua kotak merah di kartu pairing: *“Dorongan stok otomatis gagal:
+HTTP 400 — Event MesinPOS tidak menyebut `id` atau `event`”* dan kalimat yang sama untuk penjualan, ditambah
+katalog yang masih 401. Yang dikerjakan: menyamakan bentuk kiriman tulis MesinPOS → marketplace dengan
+amplop webhook keluar (`id`, `event`, `createdAt`, `data`) dan membuktikannya ke endpoint sungguhan.
+
+Temuan terukur (bukan tebakan):
+
+- Ketiga kunci env menunjuk **satu** endpoint: `PUSATBAHANBANGUNAN_PRODUCTS_URL` = `…_STOCK_URL` =
+  `…_SALES_URL` = `https://scintillating-crane-800.convex.site/api/mesinpos/webhook`.
+- Probe langsung ke endpoint itu dengan tanda tangan yang sengaja salah menjawab **401 di semua bentuk
+  badan** (tanpa `id`/`event` maupun dengan) → penerima memeriksa **tanda tangan lebih dulu**, baru amplop.
+  Itu sebabnya workspace yang rahasianya benar mendapat **400** (amplop), sementara kiriman uji dengan
+  rahasia palsu tetap 401: teks 400 di layar memang soal amplop, bukan soal rahasia.
+- Riwayat webhook keluar di halaman API (200) memakai amplop `{id, event, createdAt, data}` — bentuk yang
+  sudah diterima penerima. Dorongan katalog/stok/penjualan tadinya mengirim badan datar tanpa `id`/`event`.
+
+Yang diubah (minimal, tanpa mengubah isi data):
+
+- `marketplacePushEnvelope()` di `src/convex/lib/marketplace.ts`: amplop sama dengan webhook keluar
+  (`id` = `evt_<waktu>_<event>_<penanda>`, `event`, `createdAt`), ditambah flag upsert di akar
+  (`version`, `mode`, `upsertKey`, `createMissing`, `trigger`, `pairing`) dan isi kiriman di `data` —
+  daftar produk/nota **tidak** digandakan, jadi ukuran kiriman tidak bertambah.
+- Event per jalur: `product.updated` (tombol Sinkronkan produk), `stock.changed` (stok otomatis),
+  `sale.completed` / `sale.voided` (nota; `sale.voided` hanya bila seluruh nota di kiriman itu pembatalan).
+- Harness ikut memeriksa amplop + penanda `id` (nomor nota tunggal vs `2nota`).
+
+**Berkas:** diubah: `src/convex/lib/marketplace.ts`, `src/convex/marketplace.ts`,
+`scripts/verify-marketplace-sales.mjs`, `scripts/verify-marketplace-pairing.mjs`, `README.md`, `worklog.md` ·
+baru: —
+
+**Verifikasi:**
+
+- `bun tsc -p tsconfig.convex.json --noEmit` → exit 0
+- `bun scripts/verify-marketplace-pairing.mjs` → **118/118** pemeriksaan lulus
+- `bun scripts/verify-marketplace-sales.mjs` → **20/20** lulus terhadap `https://mellow-narwhal-477.convex.cloud`
+- **Jalur nyata ke marketplace** (workspace `ks7dtrcvx…` = *Pusat Bahan Bangunan*, rahasianya benar):
+  `bun convex run marketplace:syncProducts …` → `delivered: true`, *“Katalog 13 produk diterima marketplace”*
+  (sebelumnya 401) · antrean stok satu SKU → `delivered`, *“Stok 1 produk diterima marketplace”* (sebelumnya
+  400) · antrean penjualan nota `A-00043` → `delivered`, *“Penjualan 1 nota (1 item) dan stok 1 SKU diterima
+  marketplace”* (sebelumnya 400). Antrean uji diisi lewat `bun convex import` lalu **dikosongkan oleh
+  action-nya sendiri** (dua tabel antrean kosong sesudahnya); nota lama hanya di-upsert, tidak ada nota baru.
+- `bun run bersih:uji` → purged **2** pengguna `@mesinpos.test`; jalankan kedua: purged **0**, scanned 5,
+  skipped 5 (masih tercatat sebagai anggota workspace).
+- `bun tsc -b --noEmit` → **exit 124** (timeout 180 detik, workspace jenuh; `bun tsc -p tsconfig.app.json`
+  juga tidak dapat giliran CPU). Perubahan sesi ini hanya di `src/convex/**`, `scripts/**`, dan markdown,
+  sementara `tsconfig.app.json` tidak memuat `src/convex` — jadi typecheck aplikasi belum terkonfirmasi
+  dari sisi saya dan akan dijalankan pemeriksaan platform.
+
+**Catatan / blocker:** baris `marketplacePairings` milik workspace uji yang tenant-nya sudah dihapus masih
+tertinggal (12 baris “Vendor Uji”, 1 “Vendor Probe”, 1 “Pusat Bahan Bangunan Official” `ks7f2ra1…`); tidak
+saya hapus karena tidak ada mutation yang menghapusnya persatuan dan itu data bersama — perlu keputusan
+pemilik kalau mau dibersihkan. Tombol **Sinkronkan** (dorongan snapshot ke `PUSATBAHANBANGUNAN_SYNC_URL`)
+belum diberi amplop/tanda tangan; kunci itu belum diisi, jadi hasilnya masih jujur `ready`.
+
+## 2026-10-20 — Marketplace: rahasia endpoint dipasang, tetapi penerima tetap menolak tanda tangan
+
+**Ruang lingkup:** pemilik repo mengirim nilai rahasia `LmGf…I4KN` untuk endpoint
+`https://scintillating-crane-800.convex.site/api/mesinpos/webhook`. Yang dikerjakan: memastikan nilai itu
+dipasang di sisi MesinPOS (kartu pairing **dan** endpoint webhook yang URL-nya sama), lalu menguji
+pengiriman nyata.
+
+Temuan (diukur, bukan ditebak):
+
+- Endpoint MesinPOS yang menunjuk URL itu (`p57ect2sq…`) menyimpan rahasia berakhiran **I4KN** — sama
+dengan nilai yang dikirim. Kiriman webhook terakhir ke sana **2026-10-19** dijawab **200** (8 baris
+`delivered`).
+- Setelah rahasia pairing disetel ke nilai itu, `marketplace:syncProducts` → **HTTP 401**
+  `Tanda tangan tidak cocok — pastikan rahasia endpoint di MesinPOS sama dengan yang diisi di Pengaturan.`
+- Uji jalur webhook lama (tombol Kirim uji, `apiAccess:testEndpoint`) juga **401 dengan pesan yang
+  sama** — padahal jalur itu yang dulu dijawab 200. Jadi penerima **sudah tidak menerima rahasia/skema
+  yang sama** seperti kemarin, bukan hanya dorongan marketplace yang salah bentuk.
+- Skema tanda tangan dicoba langsung ke endpoint dengan kode pairing & token asli (`PBB-11AE-8B1E`):
+  `HMAC(secret, ts.body)` (skema MesinPOS), `HMAC(secret, body)`, `body.ts`, `ts+body`, `ts:body`,
+  kunci `sha256(secret)`, kunci base64, tanda tangan base64, timestamp detik — **semuanya 401**.
+  Satu-satunya yang berbeda: timestamp detik menjawab “kiriman basi (toleransi 5 menit)”, jadi
+  penerima memang memakai **milidetik**.
+
+Yang dikerjakan di kode:
+
+- **Rahasia endpoint dipakai lebih dulu** sebelum rahasia kartu: query `marketplace.pushSecretForUrl`
+  mencari endpoint webhook aktif dengan URL yang sama, lalu dorongan katalog/stok/penjualan ditandatangani
+  dengan rahasianya. Workspace yang sudah punya endpoint ke marketplace tidak perlu menyalin rahasia dua kali,
+dan tanda tangannya identik dengan kiriman webhook biasa.
+- Nilai yang dikirim pemilik sudah disimpan sebagai rahasia pairing **dan** sebagai rahasia endpoint
+  webhook `p57ect2sq…` (nilai tidak ditulis di berkas repo).
+
+**Berkas:** diubah: `src/convex/marketplace.ts` (fallback rahasia endpoint), `scripts/verify-marketplace-sales.mjs`
+(opsi `MARKETPLACE_PUSH_SECRET`) · baru: —
+
+**Verifikasi:**
+
+- `bun scripts/verify-marketplace-sales.mjs` → **17/17** (tanpa rahasia asli: tanda tangan terkirim dan
+  penerima menjawab “tanda tangan tidak cocok”, bukan header hilang)
+- `bun scripts/verify-marketplace-pairing.mjs` → **117/117**
+- `bun tsc -p tsconfig.convex.json --noEmit` → exit 0
+- `marketplace:syncProducts` ke endpoint nyata → **401** “Tanda tangan tidak cocok” (gagal, ditulis apa adanya)
+- `apiAccess:testEndpoint` ke endpoint yang sama → **401** “Tanda tangan tidak cocok” (gagal)
+- `bun run bersih:uji` → `purged: 2`, `skipped: 5`
+
+**Catatan / blocker:** pengiriman **belum diterima** marketplace. Nilai yang dikirim tidak cocok dengan
+apa yang dipegang penerima sekarang (atau skemanya berubah sejak 2026-10-19). Yang dibutuhkan: nilai
+**rahasia endpoint yang sedang aktif di Pengaturan marketplace** (salin ulang dari sana), atau spesifikasi
+skema tanda tangannya. Perhatian: rahasia endpoint webhook `p57ect2sq…` di MesinPOS kini disetel ke nilai
+baru itu; kalau nilai itu keliru, kiriman webhook lama ke marketplace juga ikut ditolak sampai nilai yang
+benar dipasang. Tidak ada rahasia yang ditulis ke repo; kunci deployment hanya berisi URL.
+
+## 2026-10-20 — Marketplace: endpoint webhook diisi & kiriman ditandatangani (rahasia disepakati)
+
+**Ruang lingkup:** pemilik repo memberi alamat endpoint marketplace
+`https://scintillating-crane-800.convex.site/api/mesinpos/webhook`, jadi dorongan otomatis bisa
+diarahkan ke sana. Yang dikerjakan: memasang kunci endpoint di deployment dev, memeriksa cara
+autentikasi yang dituntut penerima, lalu melengkapinya di MesinPOS.
+
+Temuan dari pemeriksaan langsung ke endpoint (bukan ditebak):
+
+- Alamat itu hidup: POST tanpa header → **401** `Header x-mesinpos-timestamp tidak ada atau bukan angka.`
+- Dengan timestamp saja → **401** `Header x-mesinpos-signature tidak berformat sha256=<hex>.`
+- Dengan tanda tangan memakai token pairing MesinPOS maupun kode pairing → **401**
+  `Tanda tangan tidak cocok — pastikan rahasia endpoint di MesinPOS sama dengan yang diisi di Pengaturan.`
+  Artinya penerima memverifikasi HMAC dengan **rahasia yang disepakati di kedua Pengaturan**, bukan
+token pairing yang kita terbitkan sendiri.
+
+Yang dikerjakan:
+
+- `PUSATBAHANBANGUNAN_SALES_URL` dan `PUSATBAHANBANGUNAN_STOCK_URL` disetel ke alamat di atas pada
+deployment dev (`bun convex env set`, terlihat di `bun convex env list --names-only`).
+- **Rahasia penanda tangan per pairing**: kolom `pushSecret`/`pushSecretLastFour`, mutation
+  `marketplace.setPushSecret` (pemilik, izin `billing.manage`, validasi `validateWebhookSecret`,
+  kosong = hapus), dan tampilan “tersimpan: ••••abcd” tanpa membocorkan nilainya.
+- **Semua dorongan ditandatangani**: `marketplacePushHeaders` mengirim
+  `x-mesinpos-timestamp`, `x-mesinpos-signature = sha256=HMAC(rahasia, timestamp + "." + badan)`,
+  `x-mesinpos-pairing`, dan `Authorization: Bearer <token pairing>` — skema yang sama dengan webhook
+  keluar. Dipakai dorongan katalog, stok otomatis, dan penjualan otomatis; tanpa rahasia, header
+tanda tangan tidak dikirim dan statusnya jujur gagal.
+- **Sebab penolakan ikut dicatat**: badan `error` dari marketplace (mis. “Tanda tangan tidak cocok”)
+  ditambahkan ke `lastStockSyncNote` / `lastSalesSyncNote` / catatan katalog, menggantikan “HTTP 401”
+  yang tidak bisa ditindaklanjuti.
+- **UI**: kartu Pengaturan punya kolom rahasia + tombol Simpan/Hapus; store Convex & demo ikut
+  menyediakannya (`setMarketplacePushSecret`).
+
+**Berkas:** diubah: `src/convex/schema.ts`, `src/convex/marketplace.ts`,
+`src/convex/lib/marketplace.ts`, `src/components/MarketplacePairingCard.tsx`,
+`src/lib/store/types.ts`, `src/lib/store/convex.tsx`, `src/lib/store/demo.tsx`,
+`scripts/verify-marketplace-sales.mjs`, `README.md` · baru: —
+
+**Verifikasi:**
+
+- `bun convex dev --once` → `Convex functions ready` (kolom pairing baru ter-push)
+- `bun scripts/verify-marketplace-sales.mjs` → **17/17**: termasuk “kiriman selalu membawa timestamp +
+tanda tangan + token” dan uji nyata — dengan rahasia uji, penerima menjawab **“Tanda tangan tidak
+cocok”** (bukan “header tidak ada”), jadi header & HMAC benar-benar sampai; nota + stok tetap benar
+(10 → 8 → 10) lewat snapshot
+- `bun scripts/verify-marketplace-pairing.mjs` → **117/117** · `bun scripts/verify-render.mjs` →
+  **1064/1064**
+- `bun tsc -p tsconfig.convex.json --noEmit` → exit 0 · `bun tsc -p tsconfig.app.json --noEmit` →
+  exit 0
+- `bun run bersih:uji` → `purged: 5`, `skipped: 5`
+
+**Catatan / blocker:** **rahasia endpoint marketplace belum diketahui**, jadi kiriman nyata masih
+dijawab 401 “tanda tangan tidak cocok” dan statusnya `failed` — bukan klaim tersedia. Yang perlu
+dilakukan pemilik: salin “rahasia endpoint” dari Pengaturan marketplace ke kartu **Pairing vendor
+marketplace → Rahasia penanda tangan marketplace** di MesinPOS (nilai yang sama di kedua sisi).
+Sesudah itu tekan tombol sinkron / buat satu penjualan; status `delivered` akan muncul jika penerima
+menerimanya. Selain itu, penerima marketplace tetap harus benar-benar menulis stok/nota (entri
+2026-10-19 mencatat ia menjawab 200 tanpa mengubah stok). Kunci deployment berisi URL, bukan rahasia;
+tidak ada token yang ditulis di berkas repo. Blok rahasia di kartu belum diklik di browser sungguhan.
+
+## 2026-10-20 — Marketplace: penjualan otomatis ikut dikirim (nota + stok), bukan hanya stok
+
+**Ruang lingkup:** pertanyaan pemilik repo: apakah lewat API MesinPOS sudah bisa mengupdate
+**penjualan serta stok** di MesinPOS dan di platform marketplace yang terpasang; kalau belum,
+kerjakan. Audit menemukan: arah marketplace → MesinPOS sudah lengkap (webhook masuk
+`order.created`/`stock.adjusted`/`product.updated`/`sale.voided`, diuji 42/42 di entri sebelumnya),
+tetapi arah MesinPOS → marketplace baru mengirim **stok**; nota penjualan tidak pernah didorong, dan
+snapshot hanya memuat penjualan **selesai** sehingga pembatalan tidak pernah terlihat marketplace.
+
+Yang dikerjakan:
+
+- **Antrean penjualan** `marketplaceSaleQueue`, ditulis **di dalam transaksi** penjualan (kasir, KDS,
+  dan `POST /api/v1/sales`) serta pembatalan (`pos.voidSale`). Satu baris per tenant, id nota
+digabung tanpa duplikat; nota terbaru dipertahankan saat antrean penuh.
+- **Action `pushQueuedSales`**: mengirim nota + **stok lokasi jual terbaru tiap SKU** dalam satu
+  permintaan ke `PUSATBAHANBANGUNAN_SALES_URL` (jatuh ke `STOCK_URL` → `PRODUCTS_URL` → `SYNC_URL`),
+  `Authorization: Bearer <token pairing>` + `x-mesinpos-pairing`. Badan kiriman `version 1`,
+  `upsertKey: "number"` (kiriman ulang tidak menjadi penjualan kedua), `trigger: "sale"`, berisi
+  nomor, status `completed`/`void`, subtotal/diskon/pajak/total, metode bayar, kode pelanggan/member,
+  item (SKU, nama, kuantitas, harga, label modifier), dan saldo stok per SKU.
+- **Jaring pengaman**: cron 5 menit menyapu antrean penjualan yang tertinggal; melepas pairing ikut
+  menghapus antrean stok & penjualan supaya tidak menumpuk tanpa tujuan.
+- **Status yang jujur**: `lastSalesSync*` di baris pairing (terpisah dari `lastStockSync*`), kalimat
+  kartu Pengaturan “Penjualan otomatis ke marketplace”, dan kegagalan tanpa endpoint ditulis apa
+  adanya (“endpoint dorong belum diisi”) — bukan “tersinkron”.
+- **Snapshot tetap jalur yang bisa dipakai tanpa endpoint**: harness membuktikan marketplace membaca
+  `GET /api/marketplace/snapshot?token=…` dan menerima nota **beserta stok terbarunya**.
+
+**Berkas:** baru: `src/convex/lib/marketplaceSaleQueue.ts`, `scripts/verify-marketplace-sales.mjs` ·
+diubah: `src/convex/marketplace.ts`, `src/convex/schema.ts`, `src/convex/pos.ts`,
+`src/convex/crons.ts`, `src/convex/lib/marketplace.ts`,
+`src/components/MarketplacePairingCard.tsx`, `README.md`
+
+**Verifikasi:**
+
+- `bun convex dev --once` → `Convex functions ready` (indeks `marketplaceSaleQueue.by_tenant` &
+  `by_created` dibuat)
+- `VITE_CONVEX_URL=https://mellow-narwhal-477.convex.cloud bun scripts/verify-marketplace-sales.mjs`
+  → **15/15**: bentuk badan & penggabungan antrean; lalu jalur nyata — penjualan 2 × 25.000 (total
+  55.500) memotong stok **10 → 8**, antrean otomatis tercatat di pairing (`counts.sales = 1`,
+  `counts.stock = 1`) **tanpa menekan tombol**, snapshot marketplace memuat nota + stok 8,
+  pembatalan membuat kiriman baru dan stok snapshot kembali **10**; tanpa endpoint, statusnya
+  `failed` dengan catatan “endpoint dorong belum diisi”
+- `bun scripts/verify-marketplace-pairing.mjs` → **117/117** ·`bun scripts/verify-api-writes.mjs` →
+  **42/42** · `bun scripts/verify-render.mjs` → **1064/1064**
+- `bun tsc -p tsconfig.convex.json --noEmit` → exit 0 · `bun tsc -p tsconfig.app.json --noEmit` →
+  exit 0
+- `bun run bersih:uji` → `purged: 4`, `skipped: 5` (akun `mksale+…@mesinpos.test` beserta sisa
+  harness API sebelumnya)
+
+**Catatan / blocker:** pengiriman **sungguhan** ke marketplace belum terbukti karena deployment dev
+belum punya kunci `PUSATBAHANBANGUNAN_*` (hanya 6 kunci lain yang terpasang) — jadi status yang benar
+adalah `failed` + sebab, dan snapshot tetap bisa ditarik. Dua hal di sisi marketplace masih di luar
+kendali repo ini: (1) endpoint tulis harus disediakan/diisi, dan (2) penerima marketplace harus
+benar-benar menulis stok/nota — entri 2026-10-19 mencatat penerimanya menjawab **200** tetapi tidak
+mengubah stok. Snapshot hanya memuat penjualan selesai, jadi pembatalan hanya sampai lewat dorongan
+ini atau webhook `sale.voided`. Blok status baru di kartu hanya lolos typecheck + kalimat uji murni
+(kartu baru dirender saat workspace dipasangkan), belum diklik di browser. Tabel **Status Phase 4**
+diperbarui (angka & catatan marketplace); daftar **Blocker** diperiksa — tidak ada butir yang berubah
+status karena blokirnya tetap di sisi marketplace.
+
+## 2026-10-20 — API v1: tulis produk/harga/stok, pelanggan & member, modifier pesanan, webhook masuk
+
+**Ruang lingkup:** permintaan pemilik repo melengkapi API v1: mengubah/menghapus produk, harga, dan
+stok lewat API; membuat pelanggan/member baru yang `customerCode`/`memberCode`-nya sudah ada di
+workspace; memilih toko selain toko pertama; modifier produk (level pedas, topping) pada pesanan
+masuk; paginasi kursor + penyaringan tanggal eksplisit `from`/`to`; webhook **masuk** dari platform
+mitra (webhook yang ada selama ini keluar); serta endpoint pembatalan/penyesuaian penjualan dengan
+pembatalan tetap dijalankan jalur kasir.
+
+Yang dikerjakan:
+
+- **Tulis katalog** — `PATCH /api/v1/products` (`product.manage`) mengubah nama, harga, satuan,
+  modal, dan status aktif lewat `products.update`/`setPricing`/`setActive`; `DELETE /api/v1/products`
+  memakai pagar `products.remove` yang sama (produk yang sudah dipakai transaksi ditolak 409).
+- **Stok** — `POST /api/v1/stock/adjust` (`stock.adjust`) menerima `delta` relatif **atau**
+  `quantity` mutlak (dua-duanya sekaligus ditolak 400) dan memakai `products.adjustStock` pada
+  lokasi jual toko terpilih.
+- **Pelanggan & member** — `POST /api/v1/customers` (`ar.manage`) dan `POST /api/v1/members`
+  (`member.manage`). `code` yang dikirim dihormati; kalau kosong server membuatnya; kode kembar 409.
+- **Pemilihan toko** — `?storeCode=` diselesaikan sekali di `authenticate` dan dipakai jalur baca
+  maupun tulis; kode asing dijawab 404 beserta daftar kode yang sah, bukan diam-diam memakai toko
+  pertama. `GET /api/v1/ping` mengirim daftar toko supaya platform bisa menemukan kodenya.
+- **Modifier pesanan masuk** — `lines[].modifiers` berisi `groupCode` + `optionCodes`; bentuknya
+  diperiksa `lib/apiOrders.ts` (400), aturan wajib/batas pilihan tetap di `applyModifiers` jalur
+  kasir (409), dan kode modifier tampil di `GET /api/v1/products` supaya platform tidak menebak.
+- **Paginasi & tanggal** — kursor untuk katalog (SKU) dan untuk daftar bertanggal
+  (`waktu|kunci`, aman untuk milidetik kembar), serta `from`/`to` inklusif-eksklusif yang diperiksa
+  bentuknya sebelum data disentuh (400).
+- **Webhook masuk** — tabel `inboundWebhookEndpoints`/`inboundWebhookEvents`, endpoint
+  `GET|POST|DELETE /api/v1/webhooks` (scope `api.manage`) dan
+  `POST /api/v1/webhooks/incoming/<token>`. Token di URL hanya penunjuk; yang membuktikan kiriman
+  adalah HMAC `x-mesinpos-signature` atas `timestamp.body` (toleransi 5 menit, skema yang sama
+  dengan webhook keluar). `id` peristiwa dari mitra menjadi kunci idempotensi, event di luar
+  langganan ditolak 400 dengan daftar yang dilanggan, dan operasinya (`order.created`,
+  `stock.adjusted`, `product.updated`, `sale.voided`) dijalankan fungsi aplikasi yang sama — bukan
+  jalur logika kedua.
+- **Pembatalan** — `POST /api/v1/sales/void` (`pos.void`) memakai `pos.voidSale`: stok kembali,
+  piutang yang belum dibayar ikut batal, dan pagar “piutang yang sudah menerima uang” tetap
+  berlaku. Pembatalan kedua dijawab idempoten (`alreadyVoided`, `restocked: false`).
+
+Tiga bug nyata tertangkap uji HTTP dan diperbaiki di entri ini: (1) `storeId` ikut terkirim ke
+mutasi katalog/pelanggan/member/webhook sehingga Convex menjawab 500 — kini hanya endpoint yang
+punya lokasi yang menerimanya; (2) kunci idempotensi webhook masuk melebihi batas 64 karakter
+sehingga semua pesanan mitra ditolak 400 — kini sidik jari `sha256` deterministik; (3) pesan galat
+membocorkan `Uncaught Error:` + stack trace Convex ke klien API — kini hanya baris pertamanya.
+
+**Berkas:** baru: `src/convex/lib/apiWrites.ts`, `src/convex/lib/apiQuery.ts`,
+`src/convex/lib/inboundWebhooks.ts`, `scripts/verify-api-writes.mjs` · diubah: `src/convex/http.ts`,
+`src/convex/apiAccess.ts`, `src/convex/schema.ts`, `src/convex/lib/apiKeys.ts`,
+`src/convex/lib/apiOrders.ts`, `src/convex/lib/webhooks.ts`, `src/lib/apiDocs.ts`,
+`src/pages/ApiDocsPage.tsx`, `src/pages/ApiPage.tsx`, `README.md`, `scripts/verify-api.mjs`,
+`scripts/verify-api-docs.mjs`, `scripts/verify-platform-sync.mjs`, `scripts/verify-backend.mjs`,
+`scripts/verify-webhook-retries.mjs`, `scripts/verify-render.mjs`
+
+**Verifikasi:**
+
+- `bun convex dev --once` → `Convex functions ready`
+- `bun scripts/verify-api-writes.mjs` → **42/42 checks passed** melawan
+  `https://mellow-narwhal-477.convex.cloud` (HTTP sungguhan: kunci API, `storeCode`, kursor,
+  `from`/`to`, modifier 2 × 35.000 + PPN = 77.700, stok 20 → 18 → 20, pembatalan idempoten,
+  webhook masuk 202/200-duplicate/401/400, hapus endpoint → 404)
+- `bun scripts/verify-api.mjs` → **312/312** · `bun scripts/verify-api-docs.mjs` → **166/166** ·
+  `bun scripts/verify-platform-sync.mjs` → **43/43** · `bun scripts/verify-render.mjs` →
+  **1064/1064** · `bun scripts/verify-webhook-retries.mjs` → **8/8**
+- `bun tsc -p tsconfig.convex.json --noEmit` → exit 0 · `bun tsc -p tsconfig.app.json --noEmit` →
+  exit 0
+- `bun run bersih:uji` → `purged: 7`, `skipped: 5`, `dryRun: false` (akun `apiv1+…@mesinpos.test`
+  dari harness ini beserta sisa harness webhook; yang dilewati adalah akun non-uji/anggota
+  workspace)
+
+**Catatan / blocker:** pembuatan workspace saat ini hanya melahirkan **satu** toko (`MAIN`), jadi
+pemilihan “toko selain toko pertama” baru terbukti lewat mekanismenya (kode sah diterima, kode asing
+404 dengan daftar kode, dipakai jalur baca & tulis) — belum ada alur aplikasi untuk menambah toko
+kedua, sehingga pemilihan dua toko nyata belum bisa dijalankan end-to-end. Endpoint tulis API v1
+diuji di berkas harness tersendiri (`verify-api-writes.mjs`), bukan di `verify-backend.mjs`.
+Halaman `/app/api` dan `/dokumentasi-api` hanya diuji render (DOM tiruan), belum diklik di browser
+sungguhan. Tabel **Status Phase 4** diperbarui (klausa API akses penuh & webhook); daftar **Blocker**
+diperiksa dan tidak ada butir yang berubah status.
+
+## 2026-10-19 — Stok marketplace: kiriman MesinPOS sudah **diterima 200**, tetapi penerimanya tidak mengubah stok
+
+**Ruang lingkup:** laporan pemilik repo: “masih belum langsung otomatis sinkron / update stok produk
+marketplace jika terjadi penjualan di mesinpos.” Yang dikerjakan: memeriksa keadaan deployment sekarang
+(bukan mengulang diagnosis lama), mengukur jalur kirim dari penjualan sampai ke marketplace, lalu
+menguji langsung apa yang dilakukan penerima marketplace atas kiriman `stock.changed`. Tidak ada
+perubahan kode aplikasi pada entri ini.
+
+**Temuan (diukur, bukan ditebak):**
+
+- **Blocker 401 dari entri sebelumnya sudah tertutup.** Baris endpoint diperbarui
+  `2026-10-19T07:47:56Z`; kiriman sesudahnya berhasil: `07:48:02` `sale.completed` → **200**,
+  `07:51:47` kiriman uji → **200**, `08:06:27` `sale.completed` **dan** `stock.changed` → **200**.
+  Riwayat sekarang 4 baris, semuanya `delivered` (5 baris `failed` lama sudah tidak ada).
+- **Penjualan nyata memang langsung mengirim stok.** Penjualan `A-00040` pukul `08:06:27Z` memotong
+  `PBB-SAN-263572` dari 16 → 15 dan menulis `stock.changed`
+  `{"sku":"PBB-SAN-263572","delta":-1,"balance":15,"reason":"sale"}` yang dijawab **200**.
+- **Tetapi stok marketplace tidak berubah:** `marketplace:getProducts` untuk vendor
+  `mn74145s7vwr3ajmh1676tn7yd8d98ac` masih membaca `PBB-SAN-263572 = 16`, sedangkan POS `= 15`
+  (12 SKU lain sama).
+- **Uji langsung ke penerima** (ditandatangani dengan rahasia endpoint yang sekarang, `x-mesinpos-*`,
+  lalu dipulihkan sehingga angka akhirnya tidak berubah):
+  - `stock.changed` `{delta:-1, balance:396}` untuk SKU `PBB-MAT-560212` (stok 397) → **200**
+    `{"ok":true,"duplicate":false,"event":"stock.changed"}`, stok marketplace tetap **397**.
+  - Kiriman pemulih `{delta:+1, balance:397}` → **200**, stok tetap **397**.
+  - `stock.changed` dengan tambahan alias field (`stock`, `quantity`, `newStock`, `newBalance`,
+    `delta:-1`, `balance:395`) → **200**, stok tetap **397**; kiriman pemulih `{delta:+2, balance:397}`
+    → **200**, stok tetap **397**.
+  - `product.updated` `{sku, name, price:68000, unit:"sak", stock:396}` → **200**, stok tetap **397**;
+    kiriman pemulih `{…, stock:397}` → **200**, stok tetap **397**.
+  - Kesimpulan: penerima marketplace **mengakui** kiriman (200, `ok:true`) tetapi tidak menulis stok
+    ke katalognya — bukan masalah tanda tangan, bukan masalah bentuk payload, dan bukan masalah
+    penjadwalan di MesinPOS.
+- Kanal tarik juga belum dipakai marketplace: `lastPullAt` pairing masih kosong, dan kunci
+  `PUSATBAHANBANGUNAN_STOCK_URL`/`PRODUCTS_URL`/`SYNC_URL` tetap tidak ada
+  (`bun convex env list --names-only` → 6 kunci, tanpa `PUSATBAHANBANGUNAN_*`).
+
+**Berkas:** baru: — · diubah: `worklog.md`.
+
+**Verifikasi:**
+
+- `bun convex run --inline-query` membaca `webhookEndpoints` + `webhookDeliveries` → 1 endpoint aktif
+  (9 event, termasuk `stock.changed`), 4 kiriman, semuanya `delivered`, `lastStatusCode: 200`.
+- `bun convex run marketplace:pairingMeta '{"tenantId":"ks7dtrcvxj0c3q0g7t4455mg198g4tep"}'` → exit 0,
+  pairing `rd7agvjkv6nqyspa67tk7fzje18gh06y` / vendor `mn74145s7vwr3ajmh1676tn7yd8d98ac`.
+- `bun convex run marketplace:stockQueueForTenant …` → kosong (antrean dorong tidak dipakai karena
+  kunci endpoint dorong memang tidak diisi).
+- `POST https://scintillating-crane-800.convex.cloud/api/query` `marketplace:getProducts` → 13 produk;
+  stok 12 SKU sama dengan POS, `PBB-SAN-263572` beda 16 vs 15.
+- Enam `POST` bertanda tangan ke `https://scintillating-crane-800.convex.site/api/mesinpos/webhook`
+  (3 uji + 3 pemulih, lihat Temuan) → semuanya **200** `{"ok":true,…}`, stok marketplace **tidak
+  berubah** pada setiap uji, dan angka akhir tetap **397** (nilai sebelum uji).
+- `worklog.md` hanya dokumentasi: tidak memengaruhi build/tipe, jadi tidak ada typecheck/test tambahan.
+
+**Catatan / blocker:** pengiriman otomatis dari MesinPOS **sudah jalan dan sudah diterima**. Sisa
+pekerjaan ada di aplikasi marketplace: handler `/api/mesinpos/webhook` harus menerapkan
+`data.balance` (atau `delta`) ke produk vendornya, atau marketplace harus menarik
+`/api/marketplace/snapshot?token=…` / `GET /api/v1/products` secara berkala — sekarang keduanya tidak
+terjadi, sehingga stok marketplace hanya berubah kalau ada yang menyentuhnya dari sisi marketplace.
+Tidak ada perubahan di repo ini yang bisa menulis ke basis data aplikasi lain; menambah field/alias
+pada payload sudah diuji dan tidak berpengaruh. Tabel Status Phase 1–6 dan daftar Blocker tidak memuat
+klausa roadmap yang berubah oleh temuan ini.
+
+## 2026-10-19 — Nilai yang benar untuk `PUSATBAHANBANGUNAN_STOCK_URL` / `PUSATBAHANBANGUNAN_PRODUCTS_URL`
+
+**Ruang lingkup:** pertanyaan pemilik repo: “apa value untuk PUSATBAHANBANGUNAN_STOCK_URL dan
+PUSATBAHANBANGUNAN_PRODUCTS_URL”. Yang dikerjakan: memeriksa arti kedua kunci di kode, memeriksa apakah
+keduanya sudah terisi, lalu memeriksa langsung ke deployment marketplace apakah endpoint penerima
+kiriman katalog/stok memang ada. Tidak ada perubahan kode.
+
+**Temuan:**
+
+- Kedua kunci adalah **endpoint tulis opsional**, bukan alamat query. Nilainya harus URL **absolut**
+  yang menerima `POST` JSON (katalog utuh untuk `..._PRODUCTS_URL`, katalog terbatas SKU yang baru
+  bergerak untuk `..._STOCK_URL`), dengan header `Authorization: Bearer <token pairing>` dan
+  `x-mesinpos-pairing`. Kode memakai nilainya apa adanya lewat `fetch(endpoint)`
+  (`src/convex/marketplace.ts`), tanpa menambahkan path.
+- `PUSATBAHANBANGUNAN_STOCK_URL` → jatuh ke `PUSATBAHANBANGUNAN_PRODUCTS_URL` → `PUSATBAHANBANGUNAN_SYNC_URL`
+  (`marketplaceStockPushUrl`), jadi stok otomatis tetap berjalan cukup dengan kunci produk diisi.
+- Kunci itu **belum ada sama sekali**: `bun convex env list --names-only` (deployment dev) hanya berisi
+  `JWKS`, `JWT_PRIVATE_KEY`, `OTP_DEV_CODE`, `OTP_EMAIL_FROM`, `RESEND_API_KEY`, `SITE_URL`; `freebuff-env
+  list` untuk `.env.local` hanya menyebut kunci Convex/Resend. Jadi tidak ada nilai lama yang bisa dipakai.
+- Deployment marketplace `https://scintillating-crane-800.convex.site` **belum punya penerima dorongan**:
+  `POST` ke 21 kandidat path (`/api/mesinpos/products`, `/api/mesinpos/catalog`, `/api/mesinpos/stock`,
+  `/api/mesinpos/sync`, `/api/mesinpos/push`, `/api/marketplace/*`, dst.) semuanya `404 No matching
+  routes found`, sedangkan kontrol `POST /api/mesinpos/webhook` menjawab `401` dengan pesan sungguhan
+  (“Header x-mesinpos-timestamp tidak ada atau bukan angka.”) — jadi 404 itu memang “tidak ada route”,
+  bukan penolakan.
+- Konsekuensinya: URL webhook `.../api/mesinpos/webhook` **tidak boleh** dipakai untuk kedua kunci ini
+  (endpoint itu menuntut tanda tangan `x-mesinpos-*`, jadi kiriman katalog akan ditolak 401).
+- Kanal stok yang sudah ada dan seharusnya bekerja adalah webhook keluar `stock.changed` ke endpoint itu;
+  yang menahannya adalah rahasia penanda tangan yang belum sama (401, lihat entri di bawah), bukan kunci
+  URL ini.
+
+**Berkas:** baru: — · diubah: `worklog.md`.
+
+**Verifikasi:**
+
+- `grep -rn "PUSATBAHANBANGUNAN_STOCK_URL\|PUSATBAHANBANGUNAN_PRODUCTS_URL"` → pemakaian ada di
+  `src/convex/lib/marketplace.ts` (`MARKETPLACE_ENV`), `src/convex/marketplace.ts` (pemilihan endpoint),
+  `src/components/MarketplacePairingCard.tsx` (teks status), README, dan harness.
+- `bun convex env list --names-only` → exit 0, 6 kunci, tidak ada `PUSATBAHANBANGUNAN_*`.
+- `curl -X POST` ke 21 kandidat path di `https://scintillating-crane-800.convex.site` → semuanya
+  **404** `No matching routes found`; kontrol `POST /api/mesinpos/webhook` → **401** dengan pesan
+  validasi tanda tangan (route ada). Hasil ini yang dipakai sebagai dasar jawaban, bukan dugaan.
+- `worklog.md` hanya dokumentasi: tidak memengaruhi build/tipe, jadi tidak ada pemeriksaan tambahan.
+
+**Catatan / blocker:** jawabannya adalah **biarkan kosong** sampai marketplace menyediakan endpoint
+penerima; nilainya nanti berbentuk `https://scintillating-crane-800.convex.site/api/mesinpos/<jalur-yang-disepakati>`.
+Selama kosong, kartu Pengaturan menulis “ready/belum aktif” (jujur), stok tetap sampai lewat webhook
+`stock.changed` atau lewat tarikan snapshot. Blocker yang sebenarnya tetap rahasia webhook 401 di sisi
+marketplace. Tabel Status Phase 1–6 dan daftar Blocker diperiksa: tidak ada butir yang berubah.
+
+## 2026-10-19 — Stok marketplace masih diam: kiriman webhook-nya berhenti di 401 “tanda tangan tidak cocok”
+
+**Ruang lingkup:** laporan pemilik repo: “stok produk yg ada di marketplace masih belum terupdate/
+tersinkron.” Yang dicari: apakah MesinPOS tidak mengirim, atau penerimanya yang menolak. Jawabannya
+yang kedua — dan penyebabnya ditemukan dari data deployment, bukan dari tebakan.
+
+**Temuan (dari deployment, tanpa menebak):**
+
+- Workspace nyata (`tenantId ks7dtrcvxj0c3q0g7t4455mg198g4tep`) punya endpoint webhook
+  `https://scintillating-crane-800.convex.site/api/mesinpos/webhook` (event termasuk `stock.changed`).
+- Riwayat kirimannya: **9 baris, 5 `failed` + 4 `pending`, semuanya 401**. Termasuk
+  `stock.changed` untuk SKU `PBB-SAN-263572` — kiriman dari penjualan yang membuat stoknya turun 3.
+- Saldo yang dibaca marketplace (query publik `marketplace:getProducts`) untuk vendor
+  `mn74145s7vwr3ajmh1676tn7yd8d98ac`: 12 dari 13 SKU **sama** dengan POS, satu SKU tertinggal
+  (`PBB-SAN-263572`: marketplace 18 vs POS 15) — persis SKU yang kirimannya 401 itu.
+- Penerimanya menjawab dengan alasan yang bisa ditindaklanjuti:
+  `{"error":"Tanda tangan tidak cocok — pastikan rahasia endpoint di MesinPOS sama dengan yang diisi
+  di Pengaturan."}` (diprobe ulang dari sandbox dengan tanda tangan lokal; hasilnya 401).
+- Tautan snapshot (`/api/marketplace/snapshot?token=…`) belum pernah ditarik marketplace ini
+  (`lastPullAt` kosong), dan tombol “Sinkronkan produk” berakhir `ready` karena kunci lingkungan
+  endpoint dorong memang belum diisi. Jadi satu-satunya kanal yang jalan hanyalah pembacaan API oleh
+  marketplace (kunci API “Pusat Bahan Bangunan”), dan kanal itu tertinggal dari penjualan terakhir.
+
+**Yang dikerjakan (sisi MesinPOS, supaya pemilik bisa menutup 401 itu sendiri):**
+
+- **Alasan penerima ikut disimpan** (`lib/webhooks.ts` + `apiAccess.postSignedDelivery`): balasan
+  non-2xx dibaca (JSON `error`/`message`/`detail` atau teks apa adanya, dipotong 200 karakter lewat
+  `describeReceiverFailure`) dan ditulis ke `lastError` — bukan hanya “Penerima menjawab 401”.
+- **Tombol Kirim ulang per baris riwayat** (`apiAccess.retryDelivery` + `beginRetryDelivery`): kiriman
+  yang `pending`/`failed` dikembalikan ke antrean (percobaan direset) lalu dikirim **seketika** dengan
+  badan kiriman yang sama (`id` tidak berubah, jadi penerima mengenalinya sebagai kiriman yang sama).
+  Yang sudah `delivered` ditolak; endpoint yang sudah dihapus/dimatikan menjelaskan alasannya. Gerbang
+  fiturnya tidak dipakai, mengikuti alasan pekerja percobaan ulang.
+- **Rahasia penanda tangan boleh disamakan dengan milik penerima** (`validateWebhookSecret` +
+  argumen `secret` pada `apiAccess.updateEndpoint` + form di kartu endpoint): inilah jalan yang
+  selama ini tidak ada — kalau penerima yang lebih dulu memegang rahasianya, pemilik hanya bisa
+  memutar rahasia MesinPOS dan menyalinnya ke sana. Rahasia yang diketik tidak ditampilkan kembali.
+- **Halaman & store:** kolom **Aksi** di riwayat + tombol kunci di baris endpoint; `retryWebhookDelivery`
+  ditambahkan ke kedua store (Convex nyata & demo, yang di demo benar-benar mengubah baris riwayatnya).
+
+**Berkas:** baru: — · diubah: `src/convex/lib/webhooks.ts`, `src/convex/apiAccess.ts`,
+`src/pages/ApiPage.tsx`, `src/lib/store/types.ts`, `src/lib/store/convex.tsx`, `src/lib/store/demo.tsx`,
+`scripts/verify-api.mjs`, `scripts/verify-render.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+
+- `bun convex dev --once` → **exit 0** (“Convex functions ready! (4.47s)”).
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bun scripts/verify-api.mjs` → **243/243**, exit 0 (226 → 243: pesan penerima, validasi rahasia bersama,
+  kirim ulang, dan wiring kedua store + halaman).
+- `bun scripts/verify-render.mjs` → **1064/1064**, exit 0 (1058 → 1064). Percobaan pertama **gagal**
+  karena cek saya menuntut 4 huruf terakhir “i123” padahal rahasia ujinya berakhir “a123”; assertion-nya
+  diperbaiki ke nilai yang benar, perilakunya tidak dilonggarkan — cek rahasia-pendek yang ditolak tetap
+  ada. Alurnya sekarang benar-benar diklik di DOM: kiriman `whd-3` yang menyerah dikirim ulang →
+  “terkirim”, form rahasia dibuka → nilai `pendek` ditolak (“Rahasia minimal 16 karakter”) → nilai sah
+  tersimpan dan hanya `a123` yang tampil.
+- `MAX_WAIT_SECONDS=170 bun scripts/verify-webhook-retries.mjs` → **8/8**, exit 0 terhadap
+  `https://mellow-narwhal-477.convex.cloud`. Dua cek baru di harness itu menguji jalur rahasia ke server
+  sungguhan: `secret: "pendek"` **ditolak** (“Rahasia minimal 16 karakter…”), dan
+  `secret: "RahasiaBersamaDariPenerima123"` tersimpan (hanya `a123` yang tersisa di `overview`) tanpa
+  dikembalikan sebagai rahasia baru. Empat cek lamanya membuktikan pekerja retry tetap jalan sesudah
+  perubahan jalur kirim.
+- Bukti jalur baru di deployment nyata:
+  `bun convex run apiAccess:retryDelivery '{"tenantId":"ks7dtrcvxj0c3q0g7t4455mg198g4tep","actorId":"kx7ax4ckpm1mnk9n0za0xz6p8s8g45ss","deliveryId":"p174srbrsrf4qexvqqpy20zy758gjvrb"}'`
+  → **exit 0**, `status: "pending"`, `error: "Penerima menjawab 401. Pesan penerima: Tanda tangan tidak
+  cocok — pastikan rahasia endpoint di MesinPOS sama dengan yang diisi di Pengaturan."` — kiriman
+  `stock.changed` yang tertinggal kini membawa alasan sebenarnya di kartu pemilik.
+- `bun run bersih:uji` sesudah kedua uji deployment → masing-masing **1 akun uji dihapus**, **5 dilewati**,
+  **6 dipindai**, `remainingScan: false` (uji webhook-retries pertama & kedua).
+- `README.md` dan entri ini hanya dokumentasi: tidak memengaruhi build/tipe, jadi tidak ada
+  pemeriksaan tambahan untuk keduanya. `src/convex/_generated/api.d.ts` ikut berubah karena codegen,
+  bukan disunting tangan.
+
+**Catatan / blocker:** stok marketplace **tetap belum berubah** sampai rahasia penanda tangan disamakan
+— dan itu ada di sisi marketplace (Pengaturan di sana), di luar repo ini. Dua jalan yang sekarang
+terbuka: (a) tombol kunci di baris endpoint → tempel rahasia yang dipakai penerima, lalu **Kirim uji**;
+atau (b) **Putar rahasia** di MesinPOS lalu tempel nilai barunya ke Pengaturan marketplace. Sesudah itu
+kiriman yang tertinggal (khususnya `stock.changed` `PBB-SAN-263572`) bisa dikirim ulang dari riwayat.
+Dua hal lain yang perlu diketahui pemilik: marketplace ini **belum pernah** menarik tautan snapshot
+(`lastPullAt` kosong), jadi kanal tarik tidak dipakai olehnya; dan catatan operasional — `bun convex env
+list` pada CLI versi ini **mencetak nilai**, bukan hanya nama (yang aman: `--names-only`); perintah itu
+sempat dijalankan untuk memeriksa keberadaan kunci `PUSATBAHANBANGUNAN_*` (hasilnya: tidak ada), dan
+tidak ada nilainya yang dipakai atau disalin ke berkas mana pun. Tabel **Status Phase 1–6** dan daftar
+**Blocker** diperiksa: tidak ada klausa roadmap yang berubah.
+
+## 2026-10-19 — Stok otomatis dikirim ke marketplace sesudah penjualan (bukan menunggu tombol)
+
+**Ruang lingkup:** pertanyaan pemilik repo: “kenapa jika terjadi penjualan di mesinpos tidak langsung
+otomatis sinkron stok atau tidak langsung motong stok otomatis yg ada di platform marketplace? Perbaiki
+ya.” Penyebabnya bukan bug pemotongan stok lokal (stok POS memang langsung berkurang), melainkan
+**arah keluar ke marketplace**: dorongan stok hanya berjalan kalau ada orang menekan **Sinkronkan
+produk**. Sekarang setiap pergerakan stok mengirim dirinya sendiri.
+
+**Yang dikerjakan:**
+
+- **Antrean stok di dalam transaksi** (`src/convex/lib/marketplaceStockQueue.ts`, tabel
+  `marketplaceStockQueue`): `applyStockChange` menitipkan produk yang bergerak ke satu baris antrean per
+  workspace, id-nya digabung & duplikat dibuang (batas 200 produk; lebih dari itu menjadi “kirim seluruh
+  katalog”), lalu satu action dijadwalkan ± 2 detik sesudah transaksi tersimpan. Penjualan yang batal
+  membatalkan antreannya juga, karena barisnya ditulis di transaksi yang sama. Tanpa endpoint dorong atau
+  tanpa pairing, tidak ada baris antrean yang ditulis — biayanya nol.
+- **Dorongan stok otomatis** (`src/convex/marketplace.ts`): action `pushQueuedStock` membaca antrean,
+  menerjemahkannya ke SKU, **menghapus barisnya dulu** (supaya pergerakan yang datang saat kiriman
+  berjalan tetap membuat jadwal baru), lalu mengirim katalog dengan bentuk upsert yang **sama** seperti
+  tombol Sinkronkan produk — hanya barisnya dibatasi SKU yang bergerak (`productCatalogForTenant`
+  menerima `skus`). Badan kirimannya menambah penanda `trigger: "stock" | "manual"`, jadi marketplace
+  bisa membedakan dorongan otomatis dari kiriman penuh. Hanya pergerakan **lokasi jual** yang dikabarkan
+  (gudang tambahan tidak dipakai marketplace).
+- **Pencatatan terpisah** (`lastStockSyncAt`/`Status`/`Note`/`Counts`): dorongan otomatis tidak menimpa
+  catatan tombol, dan kegagalan ditulis apa adanya (HTTP non-2xx, endpoint tak terjangkau) — perubahan
+  stok berikutnya otomatis mencobanya lagi. Cron baru tiap 5 menit menyapu antrean yang tertinggal
+  (`sweepStockQueues`).
+- **Endpoint** (`MARKETPLACE_ENV.stockUrl` + `marketplaceStockPushUrl`): urutan kunci
+  `PUSATBAHANBANGUNAN_STOCK_URL` → `PUSATBAHANBANGUNAN_PRODUCTS_URL` → `PUSATBAHANBANGUNAN_SYNC_URL`,
+  jadi workspace yang sudah punya endpoint katalog langsung memakai jalur yang sama tanpa konfigurasi
+  baru.
+- **Kartu Pengaturan:** blok **Stok otomatis sesudah transaksi** menampilkan kapan kiriman terakhir
+  berangkat beserta jumlah produknya; kalau endpoint belum diisi, kartu menulis “belum aktif” dan
+  menyebut kunci yang harus diisi — bukan mengklaim tersinkron. Status `pushEndpointReady` dibaca dari
+  server, bukan ditebak klien.
+- **Harness & dokumen:** 23 cek baru di `verify-marketplace-pairing.mjs` (fallback endpoint, penggabungan
+  antrean, batas → kirim seluruh katalog, kalimat status, wiring hook/action/cron/kartu) dan E2E baru:
+  penjualan nyata 1 unit → snapshot marketplace **langsung** memuat stok −1, tanpa endpoint tidak ada
+  klaim “tersinkron” (`lastStockSyncAt` tetap `null`), lalu impor katalog memulihkan saldonya. README
+  menjelaskan alur & kuncinya.
+
+**Berkas:** baru: `src/convex/lib/marketplaceStockQueue.ts` · diubah: `src/convex/lib/marketplace.ts`,
+`src/convex/lib/access.ts`, `src/convex/marketplace.ts`, `src/convex/schema.ts`, `src/convex/crons.ts`,
+`src/components/MarketplacePairingCard.tsx`, `src/lib/store/convex.tsx`, `src/lib/store/demo.tsx`,
+`scripts/verify-marketplace-pairing.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+
+- `bun convex dev --once` → **exit 1** dua kali di percobaan pertama (kurung `});` tersisa dari action
+  lama, lalu `internalAction` belum diimpor) → diperbaiki → **exit 0** (“Convex functions ready! (3.66s)”,
+  menambah indeks `marketplaceStockQueue.by_tenant` & `by_created`).
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bun scripts/verify-marketplace-pairing.mjs` → **117/117**, exit 0 (94 → 117).
+- `bun convex run marketplace:sweepStockQueues '{"limit":5}'` → exit 0, `{"scanned":0,"scheduled":0}`
+  (penyapu jalan di deployment nyata; antreannya memang kosong).
+- `MARKETPLACE_E2E=1 bun scripts/verify-marketplace-pairing.mjs` → **170/170**, exit 0 (142 → 170).
+  Intinya: penjualan 1 unit lewat `pos.createSale` → snapshot yang dibaca marketplace memuat
+  `stockBeforeSale − 1`; `pushEndpointReady === false` dan `lastStockSyncAt === null` di deployment dev
+  yang belum punya endpoint (tanpa klaim palsu); impor katalog memulihkan saldo (`stock = 1`
+  disesuaikan).
+- `bun scripts/verify-render.mjs` → **1058/1058**, exit 0 (2 cek baru: blok “Stok otomatis sesudah transaksi” benar-benar tampil di kartu terpasang, dan di mode demo tanpa endpoint kartu tidak mengklaim stok tersinkron — percobaan pertama gagal karena cek saya menuntut frasa yang tidak dipakai teks kartu, lalu diperbaiki ke bunyi teks yang sebenarnya).
+- `bun run bersih:uji` sesudah E2E → **2 akun uji dihapus**, **5 dilewati**, **7 dipindai**,
+  `remainingScan: false`.
+
+**Catatan / blocker:** jalur **kirim**-nya (fetch ke endpoint marketplace) hanya terverifikasi sampai
+rule murni, wiring, dan kondisi “endpoint belum ada”; belum pernah benar-benar dijalankan terhadap
+endpoint marketplace sungguhan karena deployment dev tidak punya `PUSATBAHANBANGUNAN_STOCK_URL`/
+`PRODUCTS_URL` (mengisinya sementara berarti mengirim data dev ke layanan luar — tidak dilakukan tanpa
+permintaan). Begitu kunci itu diisi di deployment, dorongan berjalan sendiri; kegagalannya tercatat di
+`lastStockSync*`. Konsekuensi yang tetap berlaku dari entri sebelumnya: impor katalog marketplace masih
+menjadikan angka marketplace sebagai acuan, jadi impor yang dijalankan **sesudah** penjualan bisa
+menimpa saldo lokal — itu sifat impor, bukan bug dorongan otomatis. Tabel **Status Phase 1–6** dan daftar
+**Blocker** diperiksa: tidak ada klausa roadmap yang berubah.
+
+## 2026-10-19 — Perbaikan: jumlah stok produk ikut tersinkron saat impor katalog marketplace
+
+**Ruang lingkup:** laporan pemilik repo: “Jumlah stok produk nya kenapa tidak ikut tersinkron?
+Perbaiki ya.” Entri sebelumnya memang sengaja menahan stok; sekarang impor katalog marketplace juga
+menyalin saldo stok ke MesinPOS, sesuai permintaan.
+
+**Yang dikerjakan:**
+
+- **Backend** (`src/convex/marketplace.ts`): `applyCatalogImport` kini membaca stok **lokasi jual toko
+  utama** (bucket `stockLevels` tanpa `warehouseId`), menyamakan saldonya dengan `stock` dari
+  marketplace, dan menulis satu baris `stockMovements` beralasan `adjustment` (catatan “Impor katalog
+  marketplace”, `refType: "marketplace"`) untuk tiap produk yang berubah. Produk baru langsung dibuat
+  dengan saldo itu; stok gudang tambahan tidak disentuh. Perubahan tidak memakai `applyStockChange`
+  per produk supaya satu tombol impor tidak mengirim ratusan `stock.changed`; jejaknya tetap ada di
+  ledger dan log audit.
+- **Hitungan & tampilan:** `MarketplaceCatalogCounts.stock` menghitung produk yang saldonya berubah,
+  kalimat hasil impor menyebut “N stok disesuaikan”, kartu menampilkan angka stok, dan teks kartu tidak
+  lagi mengatakan stok tidak ditimpa. Baris pairing lama tanpa `stock` dibaca sebagai `0`
+  (`v.optional` di skema) supaya dokumen lama tetap sah.
+- **Harness & dokumen:** cek murni menuntut `stockLevels`/`stockMovements` dan kalimat hasil impor; E2E
+  membandingkan stok produk impor dengan stok katalog marketplace (bukan lagi menuntut 0), menggeser
+  saldo satu produk **lama** lalu membuktikan impor berikutnya memulihkannya, dan memastikan impor
+  kedua tidak menggeser stok lagi. README menjelaskan aturan ini.
+
+**Berkas:** diubah: `src/convex/lib/marketplace.ts`, `src/convex/marketplace.ts`, `src/convex/schema.ts`,
+`src/components/MarketplacePairingCard.tsx`, `scripts/verify-marketplace-pairing.mjs`, `README.md`,
+`worklog.md`.
+
+**Verifikasi:**
+
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bun scripts/verify-marketplace-pairing.mjs` → **94/94**, exit 0.
+- `bun convex dev --once` → **exit 0** dua kali (`4.3s`, lalu `3.6s` setelah kueri stok per produk).
+- `MARKETPLACE_E2E=1 bun scripts/verify-marketplace-pairing.mjs` → **142/142**, exit 0. Stok produk
+  impor sama dengan stok katalog sumber (mis. 397), `counts.stock > 0` pada impor pertama, impor kedua
+  `stock = 0`, dan setelah saldo satu produk lokal sengaja digeser, impor berikutnya mengembalikannya
+  ke angka marketplace (`stock = 1` produk disesuaikan).
+- `bun scripts/verify-render.mjs` → **1056/1056**, exit 0 (tombol impor tetap bekerja di kartu).
+- `bun run bersih:uji` sesudah E2E → pengguna uji **2 dihapus**, **5 dilewati**, **7 dipindai**,
+  `remainingScan: false`.
+
+**Catatan / blocker:** stok marketplace menjadi acuan untuk produk yang diimpor, jadi penjualan POS
+setelah marketplace mengambil angkanya bisa tertimpa saat impor berikutnya — itu konsekuensi langsung
+dari permintaan “stok ikut tersinkron”. Hanya lokasi jual toko utama yang disamakan; stok gudang
+terpisah, harga modal, dan riwayat penjualan tidak diubah. Tabel **Status Phase 1–6** dan daftar
+**Blocker** diperiksa: tidak ada yang berubah.
+
+## 2026-10-19 — Impor katalog marketplace → MesinPOS (kategori, subkategori, produk, gambar)
+
+**Ruang lingkup:** pertanyaan pemilik repo: “Bagaimana cara agar kategori/subkategori produk serta
+produk-produk yang ada di dalamnya bisa tersinkron dari platform marketplace ke MesinPOS?” Sampai entri
+ini sinkronisasi baru berjalan **satu arah** (POS → marketplace). Sekarang arah sebaliknya tersedia:
+tombol **Impor katalog** di kartu Pairing vendor menarik katalog vendor yang dipasangkan, membuat
+kategori/subkategori yang belum ada, lalu meng-upsert produk berdasarkan SKU.
+
+**Yang dikerjakan:**
+
+- **Aturan murni** (`src/convex/lib/marketplace.ts`): query katalog `marketplace:getProducts`, parser
+  `parseMarketplaceCatalogProducts` (buang baris tanpa SKU/nama, harga bukan angka/negatif, SKU
+  duplikat; rapikan spasi kategori; saring URL gambar hanya `http(s)`), pohon kategori
+  `marketplaceCatalogTree`, hitungan `MarketplaceCatalogCounts`, kalimat hasil impor, serta kolom
+  `lastCatalog*` pada tampilan pairing.
+- **Backend** (`src/convex/marketplace.ts`): action `pullCatalog` (hanya pemilik; memakai query publik
+  dengan `vendorId` pairing; batas 500 produk sekali tarik) mengunduh gambar marketplace ke penyimpanan
+  MesinPOS (maksimal 3/produk, anggaran 150 unduhan; hanya untuk produk baru atau produk lokal tanpa
+  gambar), lalu satu mutation `applyCatalogImport` menulis semuanya secara transaksional: kategori &
+  subkategori baru dibuat, produk di-upsert per SKU dengan **nama, harga, satuan, kategori, dan status
+  aktif mengikuti marketplace**. **Stok dan harga modal tidak ditimpa** — stok milik transaksi POS.
+  Hasilnya dicatat di baris pairing (`lastCatalogAt/Status/Note/Counts`) + satu log audit
+  `marketplace.catalog.import`.
+- **Skema** (`src/convex/schema.ts`): kolom `lastCatalogAt`, `lastCatalogStatus`, `lastCatalogNote`,
+  `lastCatalogCounts` pada `marketplacePairings`.
+- **Store & UI:** `pullMarketplaceCatalog()` di kedua store (mode demo menjawab jujur bahwa tidak ada
+  unduhan), dan blok **Katalog dari marketplace** di kartu Pengaturan dengan tombol **Impor katalog**,
+  waktu impor terakhir, angka hasil, dan catatan hasil. Kasir/manajer ditolak server.
+- **Harness:** `verify-marketplace-pairing.mjs` menambah 23 cek murni (parser, pohon kategori, kalimat,
+  wiring) dan 12 cek E2E (katalog sumber nyata, kategori/subkategori/gambar masuk, stok POS tidak
+  tertimpa, impor ulang tidak menggandakan, hasil tercatat, kasir ditolak); `verify-render.mjs`
+  menambah 2 cek yang menekan tombol **Impor katalog** di DOM.
+
+**Berkas:** diubah: `src/convex/lib/marketplace.ts`, `src/convex/marketplace.ts`, `src/convex/schema.ts`,
+`src/lib/store/types.ts`, `src/lib/store/convex.tsx`, `src/lib/store/demo.tsx`,
+`src/components/MarketplacePairingCard.tsx`, `scripts/verify-marketplace-pairing.mjs`, `README.md`,
+`worklog.md`.
+
+**Verifikasi:**
+
+- `bun convex dev --once` → **exit 0** dua kali (sesudah kode awal `4.23s`, sesudah perbaikan parser `3.67s`).
+- `bun tsc -b --noEmit` → **exit 0** (dijalankan ulang setelah perubahan terakhir).
+- `bun scripts/verify-marketplace-pairing.mjs` → **94/94**, exit 0.
+- `MARKETPLACE_E2E=1 bun scripts/verify-marketplace-pairing.mjs` → **140/140**, exit 0 (dua kali: sebelum
+  dan sesudah parser terakhir ter-deploy; keduanya lulus). Termasuk: 13
+  produk vendor nyata diimpor, kategori & subkategori dibuat, **gambar marketplace tersimpan**, harga &
+  nama mengikuti marketplace, **stok lokal tetap 0** (stok marketplace 397 tidak menimpa), impor kedua
+  `created=0`, `updated=0`, `unchanged=13`, dan status `lastCatalogStatus=imported` tercatat.
+- `bun scripts/verify-render.mjs` → **1056/1056**, exit 0. Dua cek baru menekan tombol **Impor
+  katalog** di kartu Pengaturan yang terpasang (mode demo) dan memastikan catatan hasilnya tampil;
+  kartu tetap tanpa error konsol.
+- `bun run bersih:uji` sesudah **setiap** E2E → tenant uji `ran: true`; pengguna uji **2 dihapus**,
+  **5 dilewati**, **7 dipindai**, `remainingScan: false` (hasil sama pada kedua putaran).
+
+**Catatan / blocker:** impor berjalan saat tombol ditekan (belum ada cron/webhook marketplace → POS),
+produk yang dihapus di marketplace tidak dihapus otomatis dari POS, kategori lokal yang sudah nonaktif
+bila namanya sama tetap dipakai apa adanya, dan stok/harga modal sengaja tidak disentuh. Batas 500
+produk serta 3 gambar/produk (150 unduhan/impor) ditulis di README. Tabel **Status Phase 1–6** dan daftar
+**Blocker** diperiksa: tidak ada klausa roadmap atau blocker yang berubah.
+
+## 2026-10-19 — Koreksi: kunci API dicabut yang tersisa dibersihkan otomatis (dan tidak lagi ada di demo)
+
+**Ruang lingkup:** laporan pemilik repo sesudah entri sebelumnya: “Kunci api yg sudah dicabut masih ada
+belum dihapus.” Ternyata penyebabnya dua: (1) data contoh demo masih memuat satu kunci berstatus
+`dicabut`, dan (2) di workspace yang sudah berjalan, baris peninggalan cara lama hanya terhapus bila
+pemilik menekan tombol pembersih. Keduanya diperbaiki di entri ini; entri sebelumnya tidak diubah.
+
+**Yang dikerjakan:**
+
+- **Demo:** kunci contoh `key-lama` (“Integrasi toko lama”, `active: false`) dihapus dari
+  `src/data/demo.ts`, jadi mode demo tidak lagi menampilkan kunci dicabut sama sekali.
+- **Pembersihan otomatis:** halaman API & Webhook (`src/pages/ApiPage.tsx`) menjalankan
+  `purgeRevokedApiKeys` **sekali saat dibuka** bila ringkasannya masih memuat kunci dicabut dan pemanggil
+  memegang `api.manage`. Panel & tombol manual tetap ada sebagai cadangan bila pembersihan otomatis gagal.
+- **Harness:** pemeriksaan render tidak lagi menuntut teks “dicabut” pada data contoh (sekarang justru
+  menolaknya), dan pemeriksaan aksi store menyesuaikan jumlah kunci setelah pencabutan (3 → 2 karena
+  tidak ada lagi baris lama) dengan `purge` = 0.
+
+**Berkas:** diubah: `src/data/demo.ts`, `src/pages/ApiPage.tsx`, `scripts/verify-render.mjs`, `README.md`,
+`worklog.md`.
+
+**Verifikasi:**
+
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bun scripts/verify-api.mjs` → **226/226**, exit 0.
+- `bun scripts/verify-render.mjs` → **1054/1054**, exit 0. Pemeriksaan baru: halaman contoh **tidak**
+  memuat status “dicabut”; setelah kunci uji dicabut, daftar berhenti di 2 kunci (tidak ada sisa), cabut
+  kedua gagal “tidak ditemukan”, dan `revoked_sisa = 0`.
+
+**Catatan / blocker:** pembersihan otomatis berjalan di sisi halaman, bukan cron, karena hanya pemegang
+`api.manage` yang boleh menghapus kunci dan halaman itulah tempat kunci terlihat. Workspace yang belum
+dibuka ulang setelah pembaruan ini masih menyimpan baris lama sampai halaman API & Webhook dibuka
+(atau tombol **Hapus kunci dicabut** ditekan). Tabel Status Phase 1–6 dan daftar Blocker tidak berubah.
+
+## 2026-10-19 — Kunci API yang dicabut dihapus, bukan disimpan mati
+
+**Ruang lingkup:** permintaan pemilik repo: “kunci api yg sudah dicabut seharusnya dihapus.” Sebelumnya
+`apiAccess.revokeKey` hanya menandai baris `active: false` + `revokedAt`, sehingga kunci mati menumpuk di
+daftar dan namanya tetap terpakai. Sekarang pencabutan **menghapus baris** kunci, dan baris peninggalan
+cara lama dibersihkan lewat aksi terpisah.
+
+**Yang dikerjakan:**
+
+- **Backend** (`src/convex/apiAccess.ts`): `revokeKey` menghapus baris `apiKeys`; jejak pencabutan tetap
+ditulis ke **log audit** (`apiKey.revoke`, nama + `publicId`, tanpa hash rahasia). Baris lama yang masih
+`active: false` juga dihapus saat dicabut ulang. Mutation baru `purgeRevokedKeys` membersihkan baris
+peninggalan (`active: false` / `revokedAt` terisi) dan **tidak** menyentuh kunci aktif maupun yang hanya
+kedaluwarsa.
+- **Skema** (`src/convex/schema.ts`): kolom `active`/`revokedAt` diberi keterangan bahwa keduanya hanya
+untuk baris peninggalan; pencabutan normal menghapus baris. Tidak ada migrasi data otomatis — baris lama
+dibersihkan lewat tombol di halaman.
+- **Halaman API & Webhook** (`src/pages/ApiPage.tsx`): tombol **Cabut** kini meminta konfirmasi inline
+(**Ya, hapus** / Batal) karena tindakannya permanen; notisnya menyebut “dicabut dan dihapus permanen”.
+Bila masih ada baris dicabut cara lama, muncul panel **Hapus kunci dicabut** beserta jumlahnya. Keterangan
+kartu menyebut jejak pencabutan ada di log audit.
+- **Kedua store** menambah `purgeRevokedApiKeys`; `revokeApiKey` di demo menghapus baris dari daftar (bukan
+menandainya mati).
+- **Dokumentasi**: README bagian akses API & `src/lib/apiDocs.ts` + `src/pages/ApiDocsPage.tsx` menyebut
+kunci yang dicabut dihapus (alasan 401 “tidak dikenal” bila dipakai lagi), sementara kunci kedaluwarsa
+tetap tersimpan sampai dicabut.
+
+**Berkas:** diubah: `src/convex/apiAccess.ts`, `src/convex/schema.ts`, `src/pages/ApiPage.tsx`,
+`src/lib/store/types.ts`, `src/lib/store/convex.tsx`, `src/lib/store/demo.tsx`, `src/lib/apiDocs.ts`,
+`src/pages/ApiDocsPage.tsx`, `scripts/verify-backend.mjs`, `scripts/verify-render.mjs`, `README.md`,
+`worklog.md`.
+
+**Verifikasi:**
+
+- `bun tsc -b --noEmit` → **exit 0**. `bun convex dev --once` → `Convex functions ready!`, exit 0.
+- `bun scripts/verify-api.mjs` → **226/226**, exit 0 (termasuk pemeriksaan bahwa setiap anggota baru
+  `StoreApi` diimplementasikan kedua store, jadi `purgeRevokedApiKeys` ikut terjaga).
+- `bun scripts/verify-render.mjs` → **1054/1054**, exit 0. Cek baru: setelah dicabut, baris kunci baru
+  hilang (`status_kunci = ?`, total 4 → 2 setelah baris lama dibersihkan), percobaan cabut kedua gagal
+  dengan “tidak ditemukan”, pembersih menghapus 1 baris lama, dan `revoked_sisa = 0`.
+- `bun scripts/verify-backend.mjs` → **962/962**, exit 0 terhadap `mellow-narwhal-477`:
+kunci yang dicabut hilang dari `apiAccess.overview` (`summary.revokedKeys === 0`), HTTP 401 berikutnya
+  berbunyi “tidak dikenal”, cabut kedua gagal “tidak ditemukan”, dan `purgeRevokedKeys` tidak menghapus
+  kunci aktif (`removed: 0`).
+- `bun run bersih:uji` sesudah uji tulis ke deployment → run pertama `scanned: 34`, `skipped: 5`; run
+  pemeriksaan ulang `purged: 0`, `remainingScan: false`, exit 0. Jumlah `purged` run pertama tidak
+  tercatat karena keluaran yang ditampilkan terpotong (hanya `samples`/`scanned`/`skipped`).
+
+**Catatan / blocker:** perilaku lama sengaja diubah, jadi dua pemeriksaan harness ikut disesuaikan:
+verifikasi backend tidak lagi menuntut pesan “sudah dicabut”/“dicabut” (barisnya sudah tidak ada, jadi
+jawabannya “tidak dikenal” dan cabut kedua “tidak ditemukan”), dan pemeriksaan render tidak lagi menuntut
+baris berstatus “dicabut” setelah pencabutan. Kunci **kedaluwarsa** tidak dihapus otomatis — kedaluwarsa
+bukan pencabutan, dan barisnya masih berguna sebagai catatan sampai pemilik mencabutnya. Tabel Status
+Phase 1–6 dan daftar Blocker diperiksa: tidak ada butir roadmap yang berubah status oleh entri ini.
+
+## 2026-10-19 — Katalog marketplace: gambar ikut, seluruh field, dan dorongan produk ke platform
+
+**Ruang lingkup:** permintaan pemilik repo: “Buat juga gambar produknya ikut disinkronkan dan semua field
+yang ada ikut tersinkron, jika field yang akan disinkronkan tidak ada, buat seperti sumbernya. Kemudian
+untuk produk yang ada di MesinPOS disinkronkan ke platform.” Yang dikerjakan: katalog yang dikirim ke
+marketplace `pusatbahanbangunan.com` kini membawa **seluruh** field tabel `products` + **URL gambar** +
+pohon kategori/subkategori, menyatakan `upsert` per SKU dengan `createMissing: true`, dan mendapat tombol
+baru **Sinkronkan produk** yang mendorong katalog itu ke endpoint platform (bukan hanya bisa ditarik).
+
+**Yang dikerjakan:**
+
+- **Katalog utuh** (`src/convex/marketplace.ts`): satu penyusun `buildProductCatalog` dipakai snapshot
+  bertoken **dan** dorongan katalog, jadi kedua jalur tidak mungkin berbeda. Tiap produk membawa `sku`,
+  `name`, `category`, `subcategory`, `price`, `cost`, `unit`, `stock` (lokasi jual, dijumlahkan),
+  `active`, `trackStock`, `tiers`, `units`, `modifiers`, `images` (URL `ctx.storage.getUrl`), `imageCount`,
+  dan `createdAt`. `categories` membawa nama + status + urutan + subkategorinya.
+- **Gambar**: maksimal 8 gambar/produk dan 1.500 URL per susunan; yang terpotong ditandai
+  `truncated.images`, bukan dihilangkan diam-diam. `imageCount` tetap jumlah gambar sumber.
+- **“Buat seperti sumbernya”**: badan snapshot & dorongan memuat `productFields` (daftar field +
+  `createIfMissing: true`), `sync: { mode: "upsert", upsertKey: "sku", createMissing: true }`, dan
+  `categories`; platform yang belum punya kolom/produk/kategori membuatnya mengikuti sumber.
+- **Terima kasih ke aturan murni** (`src/convex/lib/marketplace.ts`): `MARKETPLACE_PRODUCT_FIELDS`,
+  tipe `MarketplaceProductPayload`/`MarketplaceCategoryPayload`, dan
+  `parseMarketplaceProductPushResponse` (membaca `created`/`updated`/`skipped`/`fieldsCreated`, termasuk
+  pembungkus `value`/`result`/`data`; balasan tanpa angka → `null`, bukan nol karangan).
+- **Dorong produk** (`marketplace.syncProducts`): hanya pemilik; memakai endpoint
+  `PUSATBAHANBANGUNAN_PRODUCTS_URL` (jatuh ke `PUSATBAHANBANGUNAN_SYNC_URL` bila kosong) dengan
+  `Authorization: Bearer <token pairing>`; hasilnya disimpan di baris pairing
+  (`lastProductSyncAt/Status/Note/Counts`) dan tampil di kartu. Tanpa endpoint hasilnya jujur `ready`:
+  katalog siap ditarik lewat tautan snapshot.
+- **Kartu Pengaturan** (`src/components/MarketplacePairingCard.tsx`): blok **Katalog & gambar produk**
+  dengan tombol **Sinkronkan produk**, waktu kirim terakhir, hitungan dibuat/diperbarui/field baru (hanya
+  bila platform melaporkannya), dan catatan hasil apa adanya. Kedua store (Convex & demo) memakai
+  kontrak yang sama (`pushMarketplaceProducts`).
+
+**Berkas:** diubah: `src/convex/lib/marketplace.ts`, `src/convex/marketplace.ts`, `src/convex/schema.ts`,
+`src/components/MarketplacePairingCard.tsx`, `src/lib/store/types.ts`, `src/lib/store/convex.tsx`,
+`src/lib/store/demo.tsx`, `scripts/verify-marketplace-pairing.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+
+- `bun convex dev --once` → `Convex functions ready!`, exit 0 (skema `marketplacePairings` dengan
+  `lastProductSync*` ikut terpasang).
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bun scripts/verify-marketplace-pairing.mjs` → **71/71**, exit 0. Cakupan baru: setiap kolom tabel
+  `products` di `schema.ts` punya padanan field katalog (alias `categoryId → category`,
+  `subcategoryId → subcategory`), seluruh field menyatakan `createIfMissing`, dan balasan dorongan
+  dibaca tanpa menebak.
+- `MARKETPLACE_E2E=1 bun scripts/verify-marketplace-pairing.mjs` → **105/105**, exit 0 terhadap
+  deployment dev: unggah PNG sungguhan lewat `products.generateImageUploadUrl` → `addImage`, snapshot
+  HTTP 200 memuat produk dengan **seluruh 16 field**, `images.length === 1`, `imageCount === 1`, URL
+  gambar bisa diunduh (HTTP 200), `sync.createMissing === true`, `productFields` lengkap, pohon kategori
+  ada, `truncated.images === false`, `syncProducts` menyusun semua produk, kasir ditolak saat dorong
+  produk, dan hasil dorong tercatat di status pairing.
+- `bun scripts/verify-render.mjs` → **1053/1053**, exit 0 (kartu Pengaturan dengan blok katalog baru tetap
+  dirender tanpa error konsol).
+- `bun run bersih:uji` → `purged: 4`, `skipped: 5`, `remainingScan: false`, exit 0 (dua kali jalan uji
+  E2E: satu percobaan gagal + satu percobaan lulus; semua akun `marketplace*@mesinpos.test` terhapus).
+
+**Catatan / blocker:** percobaan E2E pertama **gagal** karena `productCatalogForTenant` mengembalikan
+`Map` (`skuById`) dan Convex menolaknya sebagai tipe balik (`Map[…] is not a supported Convex type`);
+perbaikan: bagian yang dikirim ke action hanya `products/categories/truncated`, `Map` tetap dipakai di
+query snapshot. Endpoint tulis marketplace untuk katalog **belum diketahui** — dorongan memakai katalog
+kontrak di atas; selama `PUSATBAHANBANGUNAN_PRODUCTS_URL`/`PUSATBAHANBANGUNAN_SYNC_URL` kosong, hasilnya
+`ready` dan marketplace tetap menarik lewat tautan pairing. URL gambar bertanda tangan punya masa
+berlaku, jadi marketplace perlu menyimpan berkasnya saat menerima katalog. `/api/v1/products` sengaja
+**tidak** diubah (kontrak publik lama tetap): jalur katalog penuh adalah snapshot & dorongan pairing.
+Tabel **Status Phase 1–6** dan daftar **Blocker** diperiksa: tidak ada butir roadmap yang berubah status
+oleh entri ini.
+
+## 2026-10-18 — Pairing vendor marketplace pusatbahanbangunan.com dari Pengaturan
+
+**Ruang lingkup:** permintaan pemilik repo: “buatkan pilihan di pengaturan untuk memilih vendor
+berdasarkan email atau nomor WA yang terdaftar di platform marketplace pusatbahanbangunan.com lalu
+sinkronkan data antara POS ini dengan platform, agar sistem di POS bisa dipairing sesuai owner
+bisnis.” Yang dikerjakan: kartu pairing di `/app/settings` (direktori vendor → konfirmasi email/WA
+→ pasang/lepas), penyimpanan pairing per workspace, dan endpoint snapshot bertoken yang bisa ditarik
+marketplace.
+
+**Yang dikerjakan:**
+
+- **Kartu Pengaturan** (`src/components/MarketplacePairingCard.tsx`): direktori vendor dimuat otomatis,
+pencarian email/WA, pemilih toko, konfirmasi kontak, status terpasang (kode `PBB-XXXX-XXXX`, kontak
+tersamar, pemasang), tautan snapshot bertoken yang **tersembunyi secara bawaan**, tombol
+**Sinkronkan**, dan **Lepas pairing** dengan konfirmasi. Kasir/manajer hanya membaca; pemasangan
+ditolak server untuk selain pemilik.
+- **Aturan murni** (`src/convex/lib/marketplace.ts`): normalisasi email & WA memakai aturan OTP/undangan
+yang sudah ada, penyaringan balasan direktori marketplace yang tidak dipercaya apa adanya, kode
+pairing, penyamaran kontak, daftar entitas sinkron, dan hitungan snapshot.
+- **Backend** (`src/convex/marketplace.ts`, tabel `marketplacePairings`): query status, action direktori
+(panggilan publik `vendor:listVendors` marketplace, alamat bisa diganti lewat
+`PUSATBAHANBANGUNAN_QUERY_URL`), mutation pasang/lepas (izin `billing.manage` + hanya peran `owner`),
+action sinkron, dan query snapshot. Endpoint publik `GET /api/marketplace/snapshot?token=mp_…`
+(`src/convex/http.ts`) mengembalikan identitas usaha, katalog + stok lokasi jual, penjualan 30 hari
+beserta item, penerimaan barang, dan hutang terbuka — serta mencatat `lastPullAt`/jumlah baris.
+Melepas pairing menghapus baris sehingga token lama langsung ditolak 401.
+- **Kedua store** (Convex & demo) menyediakan kontrak yang sama (`marketplace`, cari vendor, pasang,
+lepas, sinkron); mode demo memakai tiga vendor contoh dan menandai tokennya sebagai demo.
+- **Sinkronisasi satu arah**: POS sumber utama, marketplace menarik snapshot. Bila marketplace kelak
+menyediakan endpoint tulis, `PUSATBAHANBANGUNAN_SYNC_URL` membuat tombol Sinkron mengirim snapshot
+yang sama; tanpa itu hasilnya ditulis “siap ditarik”, bukan “terkirim”.
+
+**Berkas:** baru: `src/convex/lib/marketplace.ts`, `src/lib/marketplace.ts`,
+`src/convex/marketplace.ts`, `src/components/MarketplacePairingCard.tsx`,
+`scripts/verify-marketplace-pairing.mjs` · diubah: `src/convex/schema.ts`, `src/convex/http.ts`,
+`src/lib/store/types.ts`, `src/lib/store/convex.tsx`, `src/lib/store/demo.tsx`,
+`src/pages/SettingsPage.tsx`, `scripts/verify-render.mjs`, `README.md`, `worklog.md`.
+
+**Verifikasi:**
+
+- `bun convex dev --once` → `Convex functions ready!`, tabel/index `marketplacePairings.by_tenant` &
+  `.by_token` dibuat, exit 0.
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bun scripts/verify-marketplace-pairing.mjs` → **37/37**, exit 0 (normalisasi email/WA, direktori,
+kode pairing, snapshot, wiring kartu/store/backend).
+- `MARKETPLACE_E2E=1 bun scripts/verify-marketplace-pairing.mjs` → **59/59**, exit 0 terhadap
+deployment dev: direktori **nyata** marketplace terbaca (3 vendor), pairing lewat email, snapshot
+HTTP 200 berisi produk + kontak klaim untuk verifikasi marketplace, tarikan tercatat, kasir ditolak
+saat melepas, token lama 401 setelah unpair.
+- `bun scripts/verify-render.mjs` → **1053/1053**, exit 0 (kartu tampil di Pengaturan, direktori demo
+otomatis, pasang lewat email, tautan token tersembunyi lalu bisa ditampilkan, lepas pairing, kasir
+hanya membaca; tanpa error konsol).
+- `bun scripts/verify-platform-sync.mjs` → **42/42**, exit 0; `bun scripts/verify-api-docs.mjs` →
+  **76/76**, exit 0 (tidak ada kontrak API lama yang rusak).
+- `bun run bersih:uji` → empat kali sesudah uji E2E: `purged: 3`, lalu `purged: 2` tiga kali,
+  `skipped: 5`, `remainingScan: false` (total 9 akun `marketplace*@mesinpos.test`; tidak ada sisa
+  yang terlewat).
+- `freebuff-preview status` → `running: true`, HTTP 200.
+
+**Catatan / blocker:** percobaan E2E pertama **gagal** karena harness mengirim `verticals: ["grosir"]`
+sementara validator backend memakai `"wholesale"`; harness diperbaiki lalu 59/59. Akun uji dari
+percobaan itu ikut dibersihkan. Direktori publik marketplace **tidak memuat email/WA** pemilik. Selama
+marketplace belum menyediakan endpoint pencocokan kontak, kartu memilih vendor dari direktori nyata
+dan menyimpan kontak sebagai **klaim pemilik** (`contactVerified: false`); bila
+`PUSATBAHANBANGUNAN_PAIRING_LOOKUP_URL` (dan token opsionalnya,
+`PUSATBAHANBANGUNAN_PAIRING_LOOKUP_TOKEN`) diisi, pencocokan otomatis langsung dipakai. Sinkronisasi
+default bersifat **tarik** (marketplace memanggil snapshot bertoken); dorong hanya aktif bila
+`PUSATBAHANBANGUNAN_SYNC_URL` diisi. Pemeriksaan tata letak di lebar HP/mode gelap belum dijalankan
+karena `playwright` tidak terpasang di sandbox. Tabel Status Phase 1–6 dan daftar Blocker diperiksa:
+tidak ada butir roadmap yang berubah status oleh fitur ini.
+
+## 2026-10-18 — Katalog kasir: filter kategori dua tingkat yang bisa dipilih
+
+**Ruang lingkup:** permintaan pemilik repo: “buat tampilan tombol yang cantik agar kategori & subkategori
+produk di halaman kasir (POS) bisa dipilih”. Sebelumnya POS hanya punya deretan pil kategori datar;
+subkategori hanya terlihat di halaman Produk & Stok.
+
+**Yang dikerjakan (semua di `src/pages/PosPage.tsx`):**
+
+- **Bar filter berkartu** dengan header bergradasi halus (`from-primary/10 … to-accent/10`), label
+  “Kategori produk”, dan penghitung “N dari M produk” yang ikut berubah saat filter dipakai.
+- **Pil kategori** besar yang bisa digulir mendatar (bukan membungkus jadi beberapa baris yang menggeser
+  grid produk), dengan penanda aktif bergeser halus (`motion` `layoutId`, spring) dan titik aksen kecil di
+  tiap kategori. “Semua” memakai ikon grid.
+- **Baris subkategori** muncul hanya setelah kategori dipilih: pil “Semua” + subkategori kategori itu,
+  bergaya aksen hangat saat aktif. Subkategori **aktif** tampil semua (walau belum dipakai produk), dan
+  subkategori **nonaktif yang masih dipakai** produk tetap punya pil — aturan yang sama dengan tab
+  kategori (`posCategoryChips`).
+- **Saringan produk** memakai `product.subcategory` dengan pembanding yang sama seperti katalog
+  (`categoryNameKey`), jadi besar-kecil huruf/spasi tidak membuat pil tidak cocok dengan produknya.
+- **Pindah kategori mereset subkategori** ke “Semua”; tanpa itu saringan lama bisa membuat daftar produk
+  kosong tanpa sebab yang terlihat. Kembali ke “Semua” kategori menutup baris subkategori.
+
+**Berkas:** diubah: `src/pages/PosPage.tsx`, `scripts/verify-render.mjs`, `worklog.md`.
+
+**Verifikasi:**
+
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bun scripts/verify-render.mjs` → **1043/1043** (6 cek baru: baris subkategori tersembunyi sebelum
+  kategori dipilih, pilihan subkategori muncul, memilih “Keran” menyaring “Keran Air Uji” dan
+  menyembunyikan “Pipa PVC Uji”, “Semua” mengembalikan keduanya, kembali ke “Semua” kategori menutup baris
+  subkategori, tanpa error konsol), exit 0.
+- `bun scripts/verify-shift-pos.mjs` → **20/20**, exit 0.
+- `bun scripts/verify-mobile-overflow.mjs` → **gagal dijalankan**: `Cannot find package 'playwright'`, exit 1
+  — jadi tata letak di lebar HP belum diperiksa otomatis.
+- `freebuff-preview status` → `running: true`, HTTP 200.
+
+**Catatan / blocker:** pemeriksaan visual di peramban sungguhan (lebar HP & mode gelap) belum bisa
+dijalankan karena Playwright tidak terpasang di sandbox; pil sengaja digulir mendatar agar tidak menambah
+tinggi halaman di layar kecil. Tidak ada perubahan data/server — semuanya filter di sisi kasir.
+
+## 2026-10-18 — Inventaris master produk per kategori/subkategori bisnis
+
+**Ruang lingkup:** permintaan pemilik repo: “tuliskan semua master produk yg ada di project pos ini yg
+sesuai dengan kategori/subkategori bisnis yg ada”. Yang dikerjakan: membaca `BUSINESS_CATEGORIES` dan
+`PRESETS_BY_SUBCATEGORY`, mencocokkannya dengan katalog bisnis **tersimpan** di deployment dev, lalu
+menuliskannya lengkap — tanpa mengubah kode.
+
+**Hasil:** **6 kategori bisnis / 26 subkategori bisnis**; semuanya menghasilkan master kategori produk.
+**24 subkategori punya preset spesifik**, 2 (`usaha-umum`, `belum-termasuk`) memakai preset kategori
+“Lainnya” (Umum, Lainnya). Katalog kode dan katalog tersimpan **identik** (key & label).
+
+**Berkas:** diubah: `worklog.md` (tidak ada perubahan kode).
+
+**Verifikasi:** `bun convex run tenants:listBusinessCategories '{"actorId":"…"}'` → 6 kategori / 26
+subkategori, exit 0; perbandingan key/label kode vs tersimpan → “katalog kode & tersimpan identik”. Skrip
+inventaris (`bun -e` yang mengimpor `productCatalogPresetFor` untuk tiap subkategori) → tidak ada subkategori
+`fallback`/kosong. Berkas markdown ini tidak memengaruhi build/tipe.
+
+**Catatan / blocker:** daftar ini adalah **master yang didefinisikan**, bukan isi katalog tiap workspace —
+workspace hanya mendapatkannya setelah memilih bisnis atau menekan tombol sinkronisasi. Subkategori bisnis
+baru yang ditambahkan lewat backstage tetapi belum punya preset akan menghasilkan **satu** kategori produk
+dari labelnya (fallback), bukan master terperinci.
+
+## 2026-10-18 — “Buah & Sayur” punya master sendiri, bukan lagi warisan preset minimarket
+
+**Ruang lingkup:** pertanyaan pemilik repo: “untuk kategori/subkategori bisnis ‘Buah & Sayur’ apakah sudah
+ada master kategori produknya?”. Jawabannya waktu itu: **ada, tetapi salah** — kunci `buah-sayur` memang
+ada di katalog bisnis **tersimpan** (ditambahkan lewat backstage), tetapi tidak ada di katalog kode dan
+tidak punya preset. Akibatnya `productCatalogPresetFor` jatuh ke `PRESETS_BY_CATEGORY.retail`, yang isinya
+preset **minimarket** (Sembako, Minuman, Makanan Ringan, Kebutuhan Rumah) — master yang tidak menjawab
+barang dagangan toko buah/sayur.
+
+**Yang dikerjakan:**
+
+- `BUSINESS_CATEGORIES` (`retail`) kini memuat `buah-sayur` / “Buah & Sayur”, sehingga deployment baru
+  mendapat subkategori itu tanpa harus menambahkannya lewat backstage lebih dulu.
+- Preset khusus `buah-sayur`: **Buah Segar** (Buah Lokal, Buah Impor, Buah Potong & Kemasan) · **Sayur
+  Segar** (Sayur Daun, Sayur Buah, Sayur Akar & Umbi) · **Bumbu & Pelengkap** (Bumbu Dapur, Cabai &
+  Bawang, Rempah & Daun) · **Olahan & Kemasan** (Produk Olahan, Kantong & Kemasan) — 4 kategori, 11
+  subkategori.
+- Workspace **Toko Buah Segar** (`retail › buah-sayur`) disemai ulang lewat
+  `categories:backfillFromBusinessCategory`; tombol “Tambahkan master kategori” di Produk & Stok juga
+  otomatis memakai preset baru ini untuk pemilihan berikutnya.
+
+**Berkas:** diubah: `src/convex/lib/businessCategory.ts`, `src/convex/lib/productCatalogPresets.ts`,
+`scripts/verify-product-presets.mjs`, `worklog.md`.
+
+**Verifikasi:**
+
+- `bun tsc -b --noEmit` → **exit 0**.
+- `bun scripts/verify-product-presets.mjs` → **24/24** (3 cek baru: preset khusus buah/sayur, tiap kategori
+  punya ≥2 subkategori, `buah-sayur` ada di katalog bisnis bawaan), exit 0.
+- `bun scripts/verify-business-category.mjs` → **73/73**, exit 0 · `bun scripts/verify-render.mjs` →
+  **1037/1037**, exit 0.
+- `bun convex dev --once` → “Convex functions ready!”, exit 0.
+- `bun convex run categories:backfillFromBusinessCategory '{}'` (setelah kode ter-push) →
+  `workspaceDisemai: 1` (Toko Buah Segar: **4 kategori** Buah Segar/Sayur Segar/Bumbu & Pelengkap/Olahan
+  & Kemasan + **11 subkategori**), `workspaceSudahSesuai: 1`, `workspaceTanpaKategoriBisnis: 1`, exit 0.
+  Dijalankan lagi → `workspaceDisemai: 0`, `workspaceSudahSesuai: 2` (idempoten), exit 0.
+- `bun run bersih:uji` → `purged: 0`, `scanned: 5`, `skipped: 5`, exit 0.
+
+**Catatan / blocker:** sapuan pertama dijalankan **sebelum** kode baru ter-push sehingga masih memakai
+preset lama dan sempat menambah 4 kategori generik (Sembako, Minuman, Makanan Ringan, Kebutuhan Rumah) ke
+Toko Buah Segar. Kategori itu **tidak dihapus otomatis** — penyemaian memang hanya menambah, dan
+penghapusan/nonaktifkan kategori adalah keputusan pemilik (bisa dari halaman Produk & Stok). Kategori
+produk yang sudah ada juga tidak diganti namanya oleh penyemaian ulang.
+
 ## 2026-10-18 — “Master kategori hilang”: ternyata workspace belum memilih bisnis, kini halaman yang bilang
 
 **Ruang lingkup:** pertanyaan pemilik repo: “master kategori & subkategori yg sesuai bisnis tenant kenapa
@@ -12879,7 +15554,7 @@ webhook: aturan murni `lib/apiKeys.ts` + `lib/webhooks.ts` + `lib/hash.ts`, tabe
 |---|---|---|
 | **Advanced BI & analitik** (`report.advanced`) | Selesai (aturan murni `lib/analytics.ts`; query `reports.advanced`; periode 7/30/90 hari dengan batas **tengah malam lokal**; margin kotor dari omzet bersih + pemisahan omzet tanpa harga beli; produk/kategori/metode/jam/hari; perbandingan periode sama panjang; temuan berambang) | `verify-analytics.mjs` 65/65 · `verify-backend.mjs` 375/375 (14 cek analitik) · `verify-render.mjs` 237/237 |
 | **Peran kustom** (`rbac.custom`) | Selesai (aturan murni `lib/rbac.ts` + `lib/roleSettings.ts`; tabel `customRoles` + `memberships.customRoleId` + **`roleSettings`**; fungsi `roles.*` untuk peran kustom **dan peran bawaan** (`setBuiltin`/`removeBuiltin`/`restoreBuiltin`/`resetBuiltin`); **lingkup semua peran termasuk bawaan** — izin peran bawaan bisa disesuaikan, dinonaktifkan, dihapus dari penugasan, dan dikembalikan; nama peran bawaan tetap & Pemilik terkunci; `requirePermission` memakai izin efektif; gerbang fitur tidak seragam — lihat catatan di bawah; halaman `/app/team` + menu + rute; izin `team.manage`; **satu daftar peran (bawaan + tambahan) & satu pemilih peran** saat mendaftarkan anggota; peran tambahan **berdiri sendiri** — `memberships.role` opsional, satu anggota menyimpan `role` **atau** `customRoleId`, dan tidak ada peran dasar tersembunyi; **pembersih baris lama** `members.cleanupLegacyRoles` + laporan `members.legacyRoleReport` — 113 baris lama di `mellow-narwhal-477` dirapikan tanpa mengubah akses, sisa 0) | `verify-rbac.mjs` 48/48 · `verify-role-settings.mjs` 66/66 · `verify-team.mjs` 61/61 · `verify-backend.mjs` 959/959 (peran kustom + peran bawaan) · `verify-render.mjs` 992/992 |
-| **API akses penuh & webhook** (`api.access`) | Selesai (aturan murni `lib/apiKeys.ts` + `lib/webhooks.ts` + `lib/apiOrders.ts` + `lib/webhookEvents.ts` + kripto `lib/hash.ts`; tabel `apiKeys`/`webhookEndpoints`/`webhookDeliveries` + indeks antrean `by_status_next_attempt`; fungsi `apiAccess.*` + HTTP action baca & **tulis** `/api/v1/*` (`POST /api/v1/sales`, scope tulis `pos.sell`); scope dibatasi izin efektif pembuat; halaman `/app/api` + menu + rute; izin `api.manage`; **pekerja terjadwal `crons.ts` yang benar-benar mengirim ulang webhook gagal** + **pemicu seluruh katalog**: transaksi (penjualan selesai/dibatalkan, stok menembus ambang, opname diposting), dokumen jatuh tempo (`payable.due`/`receivable.overdue`, pekerja harian), dan tiket dukungan (`support.*`) — tidak ada lagi entri katalog yang bisa dilanggan tanpa pemicu; **dokumentasi API publik `/dokumentasi-api`** yang isinya diturunkan dari `API_RESOURCES`/`WEBHOOK_EVENTS`; **sinkronisasi platform** dengan MesinPOS sebagai sumber utama — event `product.updated`/`stock.changed`/`purchase.received`, endpoint tarik `purchases` + `since`/`cursor`, kontrak `SYNC_DOC`, dan **katalog dua tingkat**: `GET /api/v1/products` mengirim `category` & `subcategory` (nama, bukan id) yang juga ikut di `product.updated`) | `verify-api.mjs` 226/226 · `verify-backend.mjs` 489/489 (penjualan nyata lewat `POST /api/v1/sales`, pemicu event transaksi, **pemicu kalender end-to-end**, + 29 cek baca) · `verify-render.mjs` 309/309 · `verify-webhook-retries.mjs` 6/6 (E2E, menunggu jadwal sungguhan) · `verify-api-docs.mjs` 76/76 · `verify-platform-sync.mjs` 39/39 |
+| **API akses penuh & webhook** (`api.access`) | Selesai (aturan murni `lib/apiKeys.ts` + `lib/webhooks.ts` + `lib/apiOrders.ts` + `lib/webhookEvents.ts` + kripto `lib/hash.ts`; tabel `apiKeys`/`webhookEndpoints`/`webhookDeliveries` + indeks antrean `by_status_next_attempt`; fungsi `apiAccess.*` + HTTP action baca & **tulis** `/api/v1/*` (`POST /api/v1/sales`, scope tulis `pos.sell`); scope dibatasi izin efektif pembuat; halaman `/app/api` + menu + rute; izin `api.manage`; **pekerja terjadwal `crons.ts` yang benar-benar mengirim ulang webhook gagal** + **pemicu seluruh katalog**: transaksi (penjualan selesai/dibatalkan, stok menembus ambang, opname diposting), dokumen jatuh tempo (`payable.due`/`receivable.overdue`, pekerja harian), dan tiket dukungan (`support.*`) — tidak ada lagi entri katalog yang bisa dilanggan tanpa pemicu; **dokumentasi API publik `/dokumentasi-api`** yang isinya diturunkan dari `API_RESOURCES`/`WEBHOOK_EVENTS`; **sinkronisasi platform** dengan MesinPOS sebagai sumber utama — event `product.updated`/`stock.changed`/`purchase.received`, endpoint tarik `purchases` + `since`/`cursor`, kontrak `SYNC_DOC`, dan **katalog dua tingkat**: `GET /api/v1/products` mengirim `category` & `subcategory` (nama, bukan id) yang juga ikut di `product.updated`) | `verify-api.mjs` 312/312 · `verify-backend.mjs` 489/489 (penjualan nyata lewat `POST /api/v1/sales`, pemicu event transaksi, **pemicu kalender end-to-end**, + 29 cek baca) · `verify-render.mjs` 1064/1064 · `verify-webhook-retries.mjs` 8/8 (E2E, menunggu jadwal sungguhan) · `verify-api-docs.mjs` 166/166 · `verify-platform-sync.mjs` 43/43 · `verify-api-writes.mjs` 42/42 (**HTTP sungguhan** ke deployment, 2026-10-20) — **Pembaruan 2026-10-20:** permukaan tulisnya kini penuh (`PATCH`/`DELETE /api/v1/products`, `POST /api/v1/stock/adjust`, `POST /api/v1/customers`, `POST /api/v1/members`, `POST /api/v1/sales/void`) dan ada **webhook masuk** mitra (`GET|POST|DELETE /api/v1/webhooks` + `POST /api/v1/webhooks/incoming/<token>` bertanda tangan HMAC, idempoten per `id`); `storeCode` memilih toko di jalur baca **dan** tulis, `lines[].modifiers` membawa level/topping, dan daftar baca memakai kursor + `from`/`to`. **Pembaruan 2026-10-20 (marketplace):** arah MesinPOS → marketplace kini juga mengirim **penjualan** otomatis (antrean `marketplaceSaleQueue` → `pushQueuedSales`, nota + stok SKU dalam satu kiriman, idempoten per nomor nota, status di `lastSalesSync*`), bukan hanya stok; `verify-marketplace-sales.mjs` **17/17** membuktikan stok 10 → 8 → 10, snapshot marketplace memuat nota + stok terbaru, dan kiriman sudah **bertanda tangan** (penerima menjawab “tanda tangan tidak cocok” untuk rahasia uji, bukan “header tidak ada”). Endpoint `PUSATBAHANBANGUNAN_SALES_URL`/`STOCK_URL`/`PRODUCTS_URL` sudah diisi dan rahasia dari pemilik sudah dipasang di pairing **dan** endpoint webhook-nya, tetapi penerima masih menjawab 401 “Tanda tangan tidak cocok” (termasuk untuk tombol Kirim uji yang dulu 200) — jadi nilai/skema di sisi marketplace masih perlu dipastikan sebelum `delivered`. **Pembaruan 2026-10-20 (rekonsiliasi stok):** sinkronisasi marketplace kini punya **pemeriksaan terjadwal** — cron harian 02.30 UTC (`marketplace.reconcileAllStocks` → `reconcileStock` per workspace) yang membandingkan saldo lokasi jual dengan katalog vendor, menyimpan laporan selisih per SKU (`marketplaceStockDiffs`, kolom `lastReconcile*`) dan menampilkannya di kartu Pengaturan; bersifat **melapor, tidak menimpa**, pemeriksaan yang gagal tidak menghapus laporan terakhir, dan laporan itu punya dua tombol arah — **Kirim stok** (POS → marketplace) dan **Tarik angka** (marketplace → POS, tercatat sebagai `adjustment`) — yang hanya menyentuh baris yang saldonya berbeda (`verify-marketplace-pairing.mjs` 150/150, E2E 218/218) |
 
 **Pembaruan 2026-10-16 (analitik enterprise, entri teratas):** klausa **Advanced BI & analitik**
 bertambah **proyeksi akhir periode** (laju hari-hari penuh, pembanding jumlah hari penuh yang sama)
@@ -13296,6 +15971,18 @@ kasir yang menunjuk tagihan yang sudah lunas tetap boleh disimpan), dan
    thermal USB (dan satu portabel Bluetooth), cetak satu nota, lalu periksa kertasnya — lebar kolom,
    potongan, logo, dan teks beraksen yang disaring. Sampai itu terjadi, kemampuan ini di sebut
    “teruji di peramban dengan perangkat tiruan”, bukan “teruji di printer”.
+11. **Pesanan marketplace sampai lewat `/api/v1/sales`, dan pengirimnya di luar repo ini.**
+   **Pembaruan 2026-10-22:** koreksi — aplikasi marketplace ternyata **sudah mengirim** pesanan
+   lunas lewat `POST /api/v1/sales` dengan kunci `pbb-order-…`; workspace dev sudah menerima tiga nota
+   (`A-00007`–`A-00009`, terakhir 12:16 UTC). Yang belum dipakai adalah endpoint langsung
+   `POST /api/marketplace/orders` (alamatnya tetap ikut snapshot sebagai `pairing.inbound.url`).
+   MesinPOS sengaja **tidak** menarik pesanan dari marketplace: query pesanan di sana bersifat privat
+   (menuntut sesi vendor), jadi menebak bentuknya akan menghasilkan data ganda. Yang bisa dijamin dari
+   repo ini: kiriman marketplace diterima lebih toleran (field tambahan/baris kembar/angka teks/alias
+   metode bayar), SKU yang bergeser dicocokkan lewat nama unik, dan penolakan lewat `/api/v1/sales`
+   tercatat sebagai baris `rejected` di kartu Pengaturan. Kalau pesanan baru tetap tidak muncul dan
+   tidak ada baris `rejected`, berarti marketplace belum mengirimnya (belum lunas, integrasi dijeda,
+   atau antrean tertahan) — itu di luar repo ini.
 
 ## Perintah verifikasi rutin
 
@@ -13400,7 +16087,7 @@ bun scripts/verify-scan-beep.mjs              # bunyi bip kasir + nada notifikas
 #     sudah dikirim ke dapur, lalu notanya terbukti menunggu di halaman Dapur & Meja beserta penanda
 #     lunasnya — isi pesanannya ikut terbaca dapur (100/100)
 bun scripts/verify-team.mjs                   # tim: nomor WA (`62…`), pesan & tautan wa.me, pagar ubah/nonaktif/hapus anggota (murni, 47/47)
-bun scripts/verify-api.mjs                    # kunci API, webhook, pekerja retry, pemicu event/kalender & pesanan masuk api.access (murni, 226/226)
+bun scripts/verify-api.mjs                    # kunci API, webhook, pekerja retry, pemicu event/kalender & pesanan masuk api.access, plus SHA-256/HMAC vs node:crypto untuk panjang pesan 0–320 (murni, 316/316)
 bun scripts/verify-api-docs.mjs               # dokumentasi API publik /dokumentasi-api: sinkron dengan API_RESOURCES & WEBHOOK_EVENTS, contoh JSON sah, kategori & subkategori katalog terdokumentasi, tanda tangan webhook, rute tetap di luar sesi (murni, 76/76)
 bun scripts/verify-platform-sync.mjs          # sinkronisasi platform: event harga/katalog (kategori & subkategori ikut) /stok/pembelian, pemicunya di jalur tulis domain, endpoint tarik since/cursor, kontrak MesinPOS sumber utama (murni, 39/39)
 bun scripts/verify-support.mjs                # dukungan khusus support.dedicated: janji tanggap, SLA, transisi & kanal keluar (murni, 61/61)
@@ -13410,14 +16097,14 @@ bun scripts/verify-qr.mjs                     # kode QR tagihan bisa dipindai: p
 bun scripts/verify-otp.mjs                    # masuk tanpa kata sandi otp.auth: email valid, hash & umur kode, batas kirim, sekali pakai (murni, 79/79)
 bun scripts/verify-sync.mjs                   # sinkronisasi real-time sync.realtime: kehadiran, kursor tarik & konflik (murni, 47/47)
 bun scripts/verify-render.mjs                # render sisi klien di DOM tiruan (happy-dom), termasuk lencana sumber data “Terhubung ke server”/
-# “Data demo” beserta penjelasan halaman-halamannya, termasuk alur ketik email → kode OTP → sesi, klik kasir, kode QR di dialog + halaman Pembayaran, aksi store sinkronisasi, backstage platform terkunci + baris “Workspace saya”, header beranda yang menempel saat digulir, notis kegagalan sambung-tenant & tombol naik paket yang benar-benar pindah paket, plus halaman Panduan beserta tautan unduhan PDF-nya & lencana 18 bagian · 12 gambar, alur isi stok yang benar-benar diklik, unggah/hapus gambar produk dari kartu Produk baru & Atur harga sampai batas 8, serta tombol Buat otomatis, simpan dengan kolom SKU kosong, SKU yang ikut kategori baru dari form & dari kartu Atur harga, pengelolaan kategori produk (tambah/ubah nama/nonaktifkan-aktifkan/hapus + tab POS & gerbang izinnya), onboarding yang menahan formulir
+# “Data demo” beserta penjelasan halaman-halamannya, termasuk alur ketik email → kode OTP → sesi, klik kasir, kode QR di dialog + halaman Pembayaran, aksi store sinkronisasi, backstage platform terkunci + baris “Workspace saya”, header beranda yang menempel saat digulir, notis kegagalan sambung-tenant & tombol naik paket yang benar-benar pindah paket, plus halaman Panduan beserta tautan unduhan PDF-nya & lencana 18 bagian · 12 gambar, alur isi stok yang benar-benar diklik, unggah/hapus gambar produk dari kartu Produk baru & Atur harga sampai batas 8, serta tombol Buat otomatis, simpan dengan kolom SKU kosong, SKU yang tidak berubah saat kategori diganti dari form & dari kartu Atur harga, pengelolaan kategori produk (tambah/ubah nama/nonaktifkan-aktifkan/hapus + tab POS & gerbang izinnya), onboarding yang menahan formulir
 bisnisnya selama identitas workspace dipulihkan, pendaftaran anggota tim dari halaman Tim & Peran,
 kolom Undangan beserta tombol Kirim ulang, kolom WhatsApp + tombol Kirim via WA yang benar-benar membuka tautan wa.me, serta Ubah/Nonaktifkan/Hapus anggota, plus rute `/app/pos` sungguhan yang membuktikan header & sidebar berada di luar satu-satunya area gulir, dan lencana sumber data “Terhubung ke server”/“Data demo”, kelola produk tersimpan — ubah nama/SKU/harga beli, nonaktifkan/aktifkan, dan dialog hapus berpagar — gambar produk di kartu kasir & baris keranjang, serta tombol Layar penuh yang benar-benar diklik di beranda, halaman masuk, dan backstage, alur setelan PPN (ubah tarif → aktif 0% ditolak → matikan PPN → kasir & tagihan langganan mengikuti), serta notis keanggotaan yang dinonaktifkan beserta petunjuknya, dan tombol undangan yang mati selama workspace belum tersambung ke server, plus pajak & pungutan F&B (PBJT 10% + biaya layanan 7% disimpan dari halaman Pengaturan, struk kasir 28.000 → 32.760, “aktif 0%” ditolak, pengecualian usaha mikro & peringatan batas omzet), baris pembeli struk (“Member : Cash” saat kasir tidak memilih member → nama member begitu dipilih), dan logo toko (unggah/hapus dari kartu struk, kotak 110 px × 110 px hitam putih di pratinjau dan di setiap lembar struk kasir, tidak ikut melebar di kertas 241 mm, jadi penanda workspace di sidebar, dan kartu identitas di halaman Panduan), serta pembayaran tunai (lima tombol pecahan uang Rp 10.000…Rp 500.000 diklik di dialog kasir: Rp 10.000 belum cukup → kembalian Rp 0 & simpan terkunci, Rp 100.000 cukup → kembalian + TOTAL/Bayar/Kembali di struk sementara, kolom tetap bisa diketik sendiri, dan penjualan Tunai tercatat) plus dialog struk sesudah lunas (cetak/unduh PDF/kirim WA member: pilihannya ada, belum mencetak apa pun sampai Cetak ditekan, Unduh PDF melaporkan nama berkas + ukurannya, struk pembeli umum & member tanpa nomor WA masing-masing diberi kolom nomor di dialognya (kirim tanpa nomor ditolak dengan petunjuk kolomnya, nomor yang sah tinggal berhenti di ketiadaan kanvas), member bernomor pun berhenti di titik yang sama, menutup dialog tidak menghapus notanya), gerbang alur struk (keranjang yang belum dibayar belum menawarkan Cetak/Struk & kirim sama sekali, pembayaran lunas memunculkan keduanya beserta catatan nomor & total notanya, keranjang berikutnya tidak menggantikan struk yang dicetak, dan judul tombol cetaknya menyebut printer + kertas + rangkap), dan tombol “Transaksi terakhir (shift ini)” yang membuka lembar dari bawah (jumlah barisnya sama dengan angka di tombol, Escape menutupnya), serta kartu saran setelan otomatis di halaman Pengaturan (toko grosir disarankan dot matrix 76 mm dua rangkap beserta alasannya, menekan “Pakai saran ini” memindahkan pilihan mesin tanpa menghapus catatan kaki, lalu tombolnya membaca “Sudah sesuai”) dan aturan `@page` ukuran struk yang ditulis halaman kasir (76 mm × tinggi notanya, bukan A4), plus **satu jalur bagikan**: dialognya menawarkan “Bagikan gambar struk” dan **tidak** lagi menawarkan tombol kedua, dan di DOM tiruan yang tidak punya kanvas jawabannya mengarahkan ke Unduh PDF serta **tidak ada berkas kosong yang diserahkan** walaupun `navigator.share`/`canShare` dipasang; tombol **Kirim ke WhatsApp pembeli** pun berhenti di titik yang sama dengan laporan yang menyebut sebabnya (bukan klaim terkirim) — baik untuk member yang punya nomor, member yang baru diisi nomornya, maupun pembeli umum, plus halaman Panduan memuat kartu panduan singkat kirim struk ke WhatsApp pembeli dengan langkah, syarat kanal, jalan lain saat kanalnya belum tersambung, dan kedua tautannya, plus halaman tamu meja (pembatalan pesanan sendiri: tombol, konfirmasi, kalimat penolakan saat sudah lunas) dan denah meja di layar Dapur & Meja (Ubah mengisi nilai meja yang sekarang, nama kembar ditolak, dialog Hapus membaca pagar hapusnya lebih dulu, meja yang belum pernah dipakai benar-benar hilang, tombol Geser mati di ujung denah & urutan kartunya benar-benar berpindah, serta panel Impor: jumlah meja + kolom tiap barisnya di pratinjau, penolakan bernomor baris, dan meja hasil impor masuk di akhir denah, serta alur tamu → dapur → halaman Pembayaran dalam **satu store**: dapur tidak menampilkan pesanan QR yang belum dibayar (hanya notis jumlahnya + tautan ke Pembayaran), tiket yang lahir dari pelunasan membawa penanda kanal & momen pelunasannya, dan tagihan yang dibatalkan dari halaman Pembayaran berhenti menunggu, serta penghitung + tombol ke halaman Pembayaran yang menempel di kartu antrean dapur — bukan di kolom denah — dan bunyi + kilat notifikasi tagihan QR baru yang berbunyi sekali per tagihan, serta bayar di kasir (tunai) dengan tekan produk → Bayar → Rp 100.000 → Selesaikan pembayaran: dialog struk menyebut “dikirim ke dapur”, stok bergerak sekali, tiketnya muncul sebagai `settled` bertanda “Lunas Tunai”, daftar Pesanan di dapur menandainya “sudah lunas”, lalu Selesai di dapur mengeluarkan tiketnya tanpa mengurangi stok lagi, serta **tombol Hold** (keranjang ditahan → pembeli berikutnya dilayani → transaksinya dilanjutkan dengan nominal yang sama, tahanan bisa dibuang) dan **kunci meja** (meja terkunci begitu uangnya diterima & tidak bisa diklik, kartu dapur menandainya terisi, terbuka lagi setelah Selesai diklik)), plus **pengingat tutup shift** (badge kasir dari shift perangkat yang sebenarnya, banner kasir + kartu halaman Shift & Kas, saklar & ambangnya dari kartu di halaman Pengaturan, termasuk penolakan jam 99), plus **gerbang kasir** (tanpa shift: kartu produk & Bayar nonaktif, keranjang tetap “0 item” walau produknya ditekan, gerbangnya menautkan `/app/shift`; shift yang tersemai membuka gerbangnya kembali)), plus **kabar ke pemilik toko** (kas belum dibuka di jam operasional / shift belum ditutup: banner kasir `pos-pemberitahuan-pemilik` beserta status laporannya, kartu “Pemberitahuan ke pemilik toko” di halaman Shift & Kas beserta “Tandai ditangani”, dan kolom jam buka/tutup + saklar pemberitahuan di halaman Pengaturan — jam 24 ditolak, 06:00/23:00 dengan saklar mati benar-benar tersimpan), plus **pengaturan peran** (kartu peran bawaan: ubah izin lewat checklist, penolakan izin di luar wewenang terbaca sebagai pesan (bukan simpan diam-diam), nonaktifkan/aktifkan, kembalikan izin bawaan, pulihkan peran yang dihapus, dan hapus dengan konfirmasi dua langkah; izin Pemilik tidak menawarkan tombol apa pun) (903/903)
 bun scripts/verify-shift.mjs                 # shift kas & pengingat tutup shift: data shift yang rusak dibuang, label jam & lama shift, ambang pengingat (21:00 bawaan, shift 14 jam, shift kemarin, jam perangkat mundur), plus setelannya — jam 0–23 & ambang 1–24 jam yang diatur workspace, bidang rusak kembali ke bawaan, nilai janggal ditolak beralasan, dan pengingat yang benar-benar mengikuti setelan (jam 23:00, ambang 2 jam, saklar mati), plus gerbang kasir: kas tanpa shift terkunci dengan pesan “Buka shift (kas) terlebih dahulu” & tombol “Buka shift sekarang”, shift terbuka (walau dibuka kemarin) membukanya kembali, waktu buka rusak tetap terkunci, dan gerbang terbuka tidak meninggalkan kalimat sisa, plus **kabar ke pemilik toko**: jeda 30 menit dari jam buka, di luar jam operasional diam, lintas malam & toko 24 jam, alasan cross-day/after-close/long-shift, saklar pemilik mati, serta siklus hook pelapor di DOM tiruan (terkirim, duplikat, gagal, penanda perangkat) (murni, 69/69)
 bun scripts/verify-product-images.mjs        # gambar produk: batas 8, tepat 2 MB diterima & di atasnya ditolak, tipe berkas, label slot & ringkasan kolom (murni, 25/25)
 bun scripts/verify-product-edit.mjs          # produk tersimpan: ubah identitas (nama/SKU/harga beli), aktif/nonaktif, pagar hapus (murni, 36/36)
 bun scripts/verify-fullscreen.mjs            # mode layar penuh: label/hint (backstage vs halaman tanpa sidebar), sembunyikan sidebar, requestFullscreen gagal tidak melempar, exitFullscreen tepat (murni, 14/14)
-bun scripts/verify-product-sku.mjs           # SKU otomatis PBB-<KATEGORI>-<nomor urut>: kode kategori dari nama, nomor urut per tenant, SKU di luar format, dan recode saat kategori produk berganti (murni, 39/39)
+bun scripts/verify-product-sku.mjs           # SKU otomatis PBB-<nomor urut> (tujuh digit): format, nomor urut per tenant, SKU di luar format tidak dianggap buatan sistem, kategori tidak ikut SKU (murni, 20/20)
 bun scripts/verify-tax.mjs                   # setelan PPN workspace: tarif 0–100% & pembulatan dua desimal, pembacaan “11,5”, tenant lama tetap aktif, “aktif 0%” ditolak, kalimat & contoh perhitungan (murni, 71/71)
 bun scripts/verify-fnb-tax.mjs               # pajak & pungutan F&B: PBJT menggantikan PPN dengan batas 10%, pengecualian usaha mikro, biaya layanan bukan pajak, PPh final UMKM (bagian bebas Rp 500 juta setahun + batas 7/4/3 tahun per bentuk badan), PPh 21, PPh 4 ayat (2) sewa, ringkasan setoran & omzet tercatat (murni, 105/105)
 bun scripts/verify-struk.mjs                 # struk belanja: katalog tiga jenis printer (thermal/dot matrix/portable) beserta cara kerja, kelebihan, kekurangan, cocok untuk & contoh produknya, kolom per lebar kertas, bawaan dari tenant lama, rangkap ditolak di printer non-impact, catatan kaki 2×40, baris pembeli (nama member / “Cash” saat kosong atau spasi, dipotong selebar kertas), baris kasir (dilewati kalau namanya kosong), logo toko (kotak tetap 110 px × 110 px di semua printer & kertas, masih muat di kertas 58 mm, hitam putih lewat saringan grayscale, kosong/spasi = tanpa logo), tata letak baris, plus tiga hal yang bekerja otomatis: kertas terdekat saat printer diganti (76 mm → 80 mm, bukan 58 mm; lebar tak terbaca jatuh ke kertas pertama), aturan `@page` yang menulis sendiri lebar × tinggi kertas struknya (58/80/241 mm, margin 2 mm di kertas sempit), dan saran setelan dari modul workspace (grosir tanpa F&B → dot matrix 76 mm 2 lembar, F&B → thermal 80 mm, ritel → thermal 80 mm) (murni, 111/111)
@@ -13448,9 +16135,10 @@ PLAYWRIGHT_DIR=/tmp/pw bun scripts/verify-meja-browser.mjs http://localhost:5173
 PLAYWRIGHT_DIR=/tmp/pw bun scripts/diag-struk-cetak.mjs http://localhost:5173   # diagnostik: letak area cetak struk vs gulir halaman kasir (ponsel & desktop), jumlah halaman PDF (kertas struk & A4), piksel pita atas, & leluhur ber-containing-block
 bun scripts/diag-render.mjs / /app/pos       # SSR per rute (diagnostik layar putih)
 SPAWN_BACKEND=1 bun scripts/verify-backend.mjs   # end-to-end terhadap backend lokal
-VITE_CONVEX_URL=https://mellow-narwhal-477.convex.cloud bun scripts/verify-backend.mjs   # 890/890 terhadap deployment awan — termasuk penjualan lunas yang langsung menjadi tiket dapur (tunai **maupun QRIS**, labelnya ikut kanalnya) dan meja yang **terkunci** selama tiketnya menunggu dapur (pesanan kedua di meja itu ditolak "sudah dibayar", nonaktifkan mejanya juga ditolak; meja bebas & bisa dipakai penjualan berikutnya setelah `kitchenDone`) (dua bisnis bernama sama → dua workspace + isolasinya, undangan anggota tim + jejak kirim emailnya, undangan WhatsApp (nomor ternormalisasi + jejak buka tautan) & kelola anggota (ubah/nonaktif/hapus) beserta pagarnya, HTTP /api/v1 baca & tulis, pemicu event transaksi + kalender, OTP dengan saluran email siap, dukungan khusus, laporan lintas cabang, tagihan digital + sambungannya ke penjualan kasir, hub sinkronisasi, pesanan QR meja (kartu QR → menu publik tanpa sesi → pesanan QRIS **dan** Virtual Account + gerbang pilihan bank → tagihan → lunas dari halaman Pembayaran → tiket dapur → pembatalan oleh tamunya sendiri, plus tagihan QR meja yang dibatalkan kasir melepas pagar hapus meja), ubah/hapus meja beserta pagar hapusnya (tables.update/deletionCheck/remove: izin table.manage, nama unik, pagar terisi/tagihan menunggu/riwayat penjualan), urutan denah & impor sekaligus (tables.move/importBatch: meja baru di akhir, geser satu langkah + penolakan di ujung denah, impor semua-atau-tidak-sama-sekali dengan nomor baris, batas 40 baris, izin table.manage), akun platform & sesi pendampingan, unggah gambar produk ke penyimpanan + batas 8 di server + berkas terhapus jadi 404, SKU otomatis PBB-<KATEGORI>-<nomor urut> + bentroknya dengan SKU manual + pindah kategori produk yang ikut mengganti kode SKU-nya + CRUD kategori produk category.manage beserta pagar izin & pelepasan produk saat dihapus + kelola produk tersimpan (products.update/setActive/deletionCheck/remove: izin product.manage, SKU kembar, pagar hapus, produk nonaktif ditolak kasir) + setelan PPN (tenants.updateTax: izin billing.manage, struk & tagihan langganan memakai tarif setelan, “aktif 0%”/130%/negatif ditolak tanpa mengubah setelan tersimpan, tenant lama tanpa taxActive dibaca aktif) + pajak & pungutan F&B (tenants.updateFnbTax: izin billing.manage, PBJT di atas 10% ditolak utuh tanpa menyimpan sebagian, struk mencatat taxKind/serviceCharge, pengecualian usaha mikro mengembalikan PPN, ringkasan omzet reports.fnbTaxMonth hanya menghitung penjualan yang tercatat) + gerbang langganan klien (roles.myAccess kasir tanpa product.manage, kasir ditolak `products.listAll`, keanggotaan nonaktif tetap terlihat di `listMine` dengan `active:false`, logo toko (tenants.generateLogoUploadUrl/setLogo/removeLogo: izin billing.manage, berkas bukan gambar & >1 MB ditolak tanpa menyisakan logo setengah jadi, logo sah tersimpan sebagai id berkas & dibaca kasir, ganti logo menunjuk berkas baru, hapus logo mengosongkan kolomnya)) + kirim struk `receiptWa.send` (struk pembeli umum tanpa `memberId` diterima & nomornya ditolak beralasan dengan petunjuk kolom nomor pembeli, nomor tersimpan di data member tetap menang, member tanpa nomor ditolak beserta namanya, orang di luar workspace tidak bisa mengirim) + setelan pengingat tutup shift (tenants.updateShift: izin billing.manage, jam 24 & ambang 0 ditolak tanpa menulis apa pun, setelan sah dibaca kembali pemilik & kasir, keadaan “mati” tersimpan) + pemberitahuan ke pemilik toko (shiftAlerts.report/list/resolve: kabar “kas belum dibuka” tercatat, penerima emailnya alamat pemilik workspace & alamat uji ditandai `uji` oleh aksi terjadwal `shiftAlertEmail.send`, kabar kedua di hari yang sama duplikat, jenis yang tidak cocok & hari yang bukan YYYY-MM-DD ditolak, di luar jam operasional tidak jadi pemberitahuan, saklar pemilik mati menghentikan kabar, `after-close` untuk shift yang belum ditutup, kiriman masuk antrean webhook, daftar terbaru dulu, `resolve` idempoten, orang luar ditolak, tenant professional ditolak modul `api.access`)
+VITE_CONVEX_URL=https://mellow-narwhal-477.convex.cloud bun scripts/verify-backend.mjs   # 960/960 terhadap deployment awan — termasuk penjualan lunas yang langsung menjadi tiket dapur (tunai **maupun QRIS**, labelnya ikut kanalnya) dan meja yang **terkunci** selama tiketnya menunggu dapur (pesanan kedua di meja itu ditolak "sudah dibayar", nonaktifkan mejanya juga ditolak; meja bebas & bisa dipakai penjualan berikutnya setelah `kitchenDone`) (dua bisnis bernama sama → dua workspace + isolasinya, undangan anggota tim + jejak kirim emailnya, undangan WhatsApp (nomor ternormalisasi + jejak buka tautan) & kelola anggota (ubah/nonaktif/hapus) beserta pagarnya, HTTP /api/v1 baca & tulis, pemicu event transaksi + kalender, OTP dengan saluran email siap, dukungan khusus, laporan lintas cabang, tagihan digital + sambungannya ke penjualan kasir, hub sinkronisasi, pesanan QR meja (kartu QR → menu publik tanpa sesi → pesanan QRIS **dan** Virtual Account + gerbang pilihan bank → tagihan → lunas dari halaman Pembayaran → tiket dapur → pembatalan oleh tamunya sendiri, plus tagihan QR meja yang dibatalkan kasir melepas pagar hapus meja), ubah/hapus meja beserta pagar hapusnya (tables.update/deletionCheck/remove: izin table.manage, nama unik, pagar terisi/tagihan menunggu/riwayat penjualan), urutan denah & impor sekaligus (tables.move/importBatch: meja baru di akhir, geser satu langkah + penolakan di ujung denah, impor semua-atau-tidak-sama-sekali dengan nomor baris, batas 40 baris, izin table.manage), akun platform & sesi pendampingan, unggah gambar produk ke penyimpanan + batas 8 di server + berkas terhapus jadi 404, SKU otomatis PBB-<nomor urut> + bentroknya dengan SKU manual + pindah kategori produk yang tidak mengubah SKU-nya + CRUD kategori produk category.manage beserta pagar izin & pelepasan produk saat dihapus + kelola produk tersimpan (products.update/setActive/deletionCheck/remove: izin product.manage, SKU kembar, pagar hapus, produk nonaktif ditolak kasir) + setelan PPN (tenants.updateTax: izin billing.manage, struk & tagihan langganan memakai tarif setelan, “aktif 0%”/130%/negatif ditolak tanpa mengubah setelan tersimpan, tenant lama tanpa taxActive dibaca aktif) + pajak & pungutan F&B (tenants.updateFnbTax: izin billing.manage, PBJT di atas 10% ditolak utuh tanpa menyimpan sebagian, struk mencatat taxKind/serviceCharge, pengecualian usaha mikro mengembalikan PPN, ringkasan omzet reports.fnbTaxMonth hanya menghitung penjualan yang tercatat) + gerbang langganan klien (roles.myAccess kasir tanpa product.manage, kasir ditolak `products.listAll`, keanggotaan nonaktif tetap terlihat di `listMine` dengan `active:false`, logo toko (tenants.generateLogoUploadUrl/setLogo/removeLogo: izin billing.manage, berkas bukan gambar & >1 MB ditolak tanpa menyisakan logo setengah jadi, logo sah tersimpan sebagai id berkas & dibaca kasir, ganti logo menunjuk berkas baru, hapus logo mengosongkan kolomnya)) + kirim struk `receiptWa.send` (struk pembeli umum tanpa `memberId` diterima & nomornya ditolak beralasan dengan petunjuk kolom nomor pembeli, nomor tersimpan di data member tetap menang, member tanpa nomor ditolak beserta namanya, orang di luar workspace tidak bisa mengirim) + setelan pengingat tutup shift (tenants.updateShift: izin billing.manage, jam 24 & ambang 0 ditolak tanpa menulis apa pun, setelan sah dibaca kembali pemilik & kasir, keadaan “mati” tersimpan) + pemberitahuan ke pemilik toko (shiftAlerts.report/list/resolve: kabar “kas belum dibuka” tercatat, penerima emailnya alamat pemilik workspace & alamat uji ditandai `uji` oleh aksi terjadwal `shiftAlertEmail.send`, kabar kedua di hari yang sama duplikat, jenis yang tidak cocok & hari yang bukan YYYY-MM-DD ditolak, di luar jam operasional tidak jadi pemberitahuan, saklar pemilik mati menghentikan kabar, `after-close` untuk shift yang belum ditutup, kiriman masuk antrean webhook, daftar terbaru dulu, `resolve` idempoten, orang luar ditolak, tenant professional ditolak modul `api.access`)
 bun convex run platform:sweepExpiredImpersonations '{"limit":50}'   # perapian sesi pendampingan yang kedaluwarsa (internalMutation)
-VITE_CONVEX_URL=https://mellow-narwhal-477.convex.cloud bun scripts/verify-webhook-retries.mjs   # 6/6: pekerja terjadwal mengirim ulang sesuai jadwal (tunggu ~2 menit; SKIP_PUSH=1 kalau sudah ter-push)
+VITE_CONVEX_URL=https://mellow-narwhal-477.convex.cloud bun scripts/verify-webhook-retries.mjs   # 8/8: pekerja terjadwal mengirim ulang sesuai jadwal (tunggu ~2 menit; SKIP_PUSH=1 kalau sudah ter-push)
+VITE_CONVEX_URL=https://mellow-narwhal-477.convex.cloud bun scripts/verify-api-writes.mjs   # 42/42: endpoint tulis API v1 lewat HTTP sungguhan (produk, stok, pelanggan, member, pembatalan, kursor & from/to, webhook masuk) — jalankan `bun run bersih:uji` sesudahnya
 node scripts/convex-verify-push.mjs mellow-narwhal-477  # baca-saja: fungsi sudah ada di deployment awan?
 freebuff-deploy check                        # perintah yang benar-benar dijalankan hosting
 freebuff-deploy start --json                 # deploy ulang; tanpa --json ditolak "Unknown subcommand"

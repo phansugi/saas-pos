@@ -27,7 +27,7 @@ export const PRODUCT_SKU_MAX = 40;
 
 /**
  * Pola SKU: satu karakter alfanumerik di depan, sisanya boleh huruf, angka, dan
- * pemisah yang lazim dipakai katalog (`KOPI-01`, `PBB-SAN-000042`, `AB/12`).
+ * pemisah yang lazim dipakai katalog (`KOPI-01`, `PBB-0000042`, `AB/12`).
  * Spasi ditolak — SKU yang ada spasinya tidak bisa dipindai/diketik ulang dengan
  * yakin, dan itu satu-satunya alasan SKU ada.
  */

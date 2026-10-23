@@ -119,8 +119,8 @@ check("gudang TIDAK boleh melihat member", !can("inventory", "member.view"));
 
 // Kategori produk adalah **struktur katalog**, bukan isi rak: staf gudang memang
 // mengelola produk (`product.manage`), tetapi yang menyusun kategorinya adalah
-// pemilik/manajer — sebab nama kategori menentukan kode tengah SKU
-// (`PBB-<KATEGORI>-<nomor>`) dan susunan tab di kasir.
+// pemilik/manajer — sebab kategori menentukan susunan tab di kasir dan label
+// katalog (SKU `PBB-<nomor urut>` tidak memuat nama kategori).
 check("pemilik boleh mengelola kategori produk", can("owner", "category.manage"));
 check("manajer boleh mengelola kategori produk", can("manager", "category.manage"));
 check("gudang TIDAK boleh mengelola kategori produk", !can("inventory", "category.manage"));

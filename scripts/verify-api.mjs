@@ -29,6 +29,8 @@ import {
   API_RESOURCES,
   API_SCOPES,
   API_SCOPE_OPTIONS,
+  API_SCOPE_OPTIONS_UNIQUE,
+  API_SIGNATURE_RESOURCES,
   API_WRITE_RESOURCES,
   MAX_ACTIVE_API_KEYS,
   describeApiKey,
@@ -56,6 +58,7 @@ import {
   ORDER_IDEMPOTENCY_MAX,
   ORDER_IDEMPOTENCY_MIN,
   ORDER_LINES_MAX,
+  ORDER_NAME_MAX,
   ORDER_QUANTITY_MAX,
   PAYMENT_METHODS,
   describeExternalOrder,
@@ -65,6 +68,33 @@ import {
   sampleExternalOrderBody,
 } from "../src/convex/lib/apiOrders.ts";
 import {
+  decodeCursor,
+  encodeCursor,
+  normalizeStoreCodeParam,
+  parseDateRange,
+  parseSaleStatus,
+} from "../src/convex/lib/apiQuery.ts";
+import {
+  parseCustomerCreate,
+  parseInboundEndpointCreate,
+  parseInboundEndpointDelete,
+  parseMemberCreate,
+  parseProductDelete,
+  parseProductPatch,
+  parseStockAdjust,
+  parseVoidSale,
+} from "../src/convex/lib/apiWrites.ts";
+import {
+  INBOUND_EVENT_KEYS,
+  INBOUND_WEBHOOK_EVENTS,
+  INBOUND_WEBHOOK_NOTES,
+  inboundSignatureProblem,
+  isInboundToken,
+  parseInboundEnvelope,
+  sanitizeInboundEvents,
+  validateInboundEndpointInput,
+} from "../src/convex/lib/inboundWebhooks.ts";
+import {
   DELIVERY_BACKOFF_MINUTES,
   MAX_DELIVERY_ATTEMPTS,
   MAX_RETRY_BATCH,
@@ -72,8 +102,11 @@ import {
   RETRY_WORKER_INTERVAL_MINUTES,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_EVENTS,
+  WEBHOOK_SECRET_MAX,
+  WEBHOOK_SECRET_MIN,
   deliveryBackoffMinutes,
   deliveryOutcome,
+  describeReceiverFailure,
   describeWebhookEndpoint,
   isWebhookEvent,
   nextDeliveryAttemptAt,
@@ -85,6 +118,7 @@ import {
   sanitizeWebhookEvents,
   signWebhookPayload,
   validateWebhookEndpoint,
+  validateWebhookSecret,
   verifyWebhookSignature,
   webhookDeliveryHeaders,
   webhookHostError,
@@ -96,6 +130,7 @@ import {
 import {
   opnamePostedEventData,
   payableDueEventData,
+  productCreatedEventData,
   receivableOverdueEventData,
   saleCompletedEventData,
   saleVoidedEventData,
@@ -148,6 +183,67 @@ check(
   hmacSha256Hex("a".repeat(80), "payload") ===
     createHmac("sha256", Buffer.from("a".repeat(80))).update("payload").digest("hex"),
   hmacSha256Hex("a".repeat(80), "payload"),
+);
+{
+  // Regresi padding blok: panjang pesan 55 mod 64 membuat `bytes.length + 9`
+  // tepat kelipatan 64. Versi lama menambah satu blok nol di situ, jadi digest
+  // menyimpang dari SHA-256 standar — tanda tangan webhook untuk badan kiriman
+  // 41 mod 64 ditolak penerima (HTTP 401 “Tanda tangan tidak cocok”) walaupun
+  // rahasianya benar. Disapu ke seluruh kelas panjang, bukan hanya satu nilai.
+  const key = "rahasia-uji-padding-32-karakter";
+  let wrong = null;
+  for (let length = 0; length <= 320 && wrong === null; length += 1) {
+    const message = "x".repeat(length);
+    if (sha256Hex(message) !== createHash("sha256").update(message, "utf8").digest("hex")) {
+      wrong = `sha-${length}`;
+      break;
+    }
+    if (
+      hmacSha256Hex(key, message) !==
+      createHmac("sha256", Buffer.from(key, "utf8")).update(message, "utf8").digest("hex")
+    ) {
+      wrong = `hmac-${length}`;
+    }
+  }
+  check(
+    "SHA-256 & HMAC sama dengan node:crypto untuk panjang pesan 0–320 (padding blok)",
+    wrong === null,
+    `menyimpang di ${wrong}`,
+  );
+}
+check(
+  "header tanda tangan webhook cocok dengan node:crypto (badan 41 mod 64)",
+  (() => {
+    // Badan berbentuk badan `sale.completed` sungguhan; panjangnya digeser lewat
+    // isi `note` sampai `timestamp.body` jatuh di kelas 55 mod 64 — kelas yang
+    // dulu salah. Timestamp 13 digit sama seperti `Date.now()` sekarang.
+    const timestamp = 1792516575805;
+    const build = (pad) =>
+      JSON.stringify({
+        id: "evt_1792516575805_sale.completed_A-00047",
+        event: "sale.completed",
+        createdAt: "2026-10-20T17:16:15.805Z",
+        data: { number: "A-00047", total: 68000, note: "x".repeat(pad) },
+      });
+    let body = null;
+    for (let pad = 0; pad <= 80 && body === null; pad += 1) {
+      const candidate = build(pad);
+      if (candidate.length % 64 === 41) body = candidate;
+    }
+    if (body === null) return false;
+    const headers = webhookDeliveryHeaders({
+      secret: "rahasia-uji-padding-32-karakter",
+      timestamp,
+      event: "sale.completed",
+      attempt: 1,
+      body,
+    });
+    const expected = `sha256=${createHmac("sha256", "rahasia-uji-padding-32-karakter")
+      .update(`${timestamp}.${body}`, "utf8")
+      .digest("hex")}`;
+    return headers["x-mesinpos-signature"] === expected;
+  })(),
+  "DITERIMA — tanda tangan menyimpang",
 );
 check(
   "perbandingan hash menolak panjang berbeda",
@@ -299,31 +395,51 @@ check(
   "setiap scope API punya endpoint yang memakainya",
   API_SCOPE_OPTIONS.every(
     (option) =>
-      (option.endpoint.startsWith("GET ") || option.endpoint.startsWith("POST ")) &&
+      /^(GET|POST|PATCH|DELETE) \/api\/v1\//.test(option.endpoint) &&
       option.label.length > 0,
-  ) && API_SCOPES.length === API_SCOPE_OPTIONS.length,
+  ) && API_SCOPES.length === API_SCOPE_OPTIONS_UNIQUE.length,
   JSON.stringify(API_SCOPE_OPTIONS.map((option) => option.endpoint)),
 );
 check(
-  "tepat satu endpoint tulis, dan scope tulisnya izin penjualan",
-  API_WRITE_RESOURCES.length === 1 &&
-    API_WRITE_RESOURCES[0].method === "POST" &&
-    API_WRITE_RESOURCES[0].scope === "pos.sell" &&
-    API_RESOURCES.filter((resource) => resource.write).length === 1,
-  JSON.stringify(API_WRITE_RESOURCES),
+  "daftar scope tidak menampilkan satu scope berkali-kali",
+  new Set(API_SCOPE_OPTIONS_UNIQUE.map((option) => option.permission)).size ===
+    API_SCOPE_OPTIONS_UNIQUE.length &&
+    API_SCOPE_OPTIONS_UNIQUE.some((option) => option.permission === "product.manage" && option.write),
+  JSON.stringify(API_SCOPE_OPTIONS_UNIQUE.map((option) => [option.permission, option.write])),
+);
+check(
+  "setiap endpoint tulis terdaftar dan memakai izin domain yang ada",
+  API_WRITE_RESOURCES.length ===
+    API_RESOURCES.filter((resource) => resource.method !== "GET").length &&
+    API_WRITE_RESOURCES.some((row) => row.resource === "sales.create" && row.scope === "pos.sell") &&
+    API_WRITE_RESOURCES.some((row) => row.resource === "sales.void" && row.scope === "pos.void") &&
+    API_WRITE_RESOURCES.some((row) => row.resource === "products.update" && row.scope === "product.manage") &&
+    API_WRITE_RESOURCES.some((row) => row.resource === "stock.adjust" && row.scope === "stock.adjust") &&
+    API_WRITE_RESOURCES.filter((row) => row.scope === null).every((row) => row.auth === "signature"),
+  JSON.stringify(API_WRITE_RESOURCES.map((row) => [row.method, row.path, row.scope])),
 );
 check(
   "flag write diturunkan dari method, bukan daftar terpisah",
-  API_RESOURCES.every((resource) => resource.write === (resource.method === "POST")),
+  API_RESOURCES.every((resource) => resource.write === (resource.method !== "GET")),
   JSON.stringify(API_RESOURCES.map((row) => [row.resource, row.method, row.write])),
+);
+check(
+  "webhook masuk adalah satu-satunya endpoint bersignature, bukan kunci API",
+  API_SIGNATURE_RESOURCES.length === 1 &&
+    API_SIGNATURE_RESOURCES[0].resource === "inboundWebhooks.receive" &&
+    API_SIGNATURE_RESOURCES[0].path === "/api/v1/webhooks/incoming/{token}" &&
+    API_SIGNATURE_RESOURCES[0].scope === null,
+  JSON.stringify(API_SIGNATURE_RESOURCES),
 );
 check(
   "endpoint tulis bisa dicari per method + path",
   findApiResource("POST", "/api/v1/sales")?.resource === "sales.create" &&
     findApiResource("POST", "/api/v1/sales")?.scope === "pos.sell" &&
     findApiResource("GET", "/api/v1/sales")?.resource === "sales" &&
+    findApiResource("DELETE", "/api/v1/products")?.resource === "products.delete" &&
+    findApiResource("PATCH", "/api/v1/products")?.resource === "products.update" &&
     findApiResource("DELETE", "/api/v1/sales") === null,
-  JSON.stringify(findApiResource("POST", "/api/v1/sales")),
+  JSON.stringify(findApiResource("PATCH", "/api/v1/products")),
 );
 check(
   "isWriteResource membedakan tulis, baca, dan resource asing",
@@ -794,6 +910,67 @@ check(
   );
 }
 
+/* --------------------------------------- pesan penerima & rahasia bersama */
+
+check(
+  "balasan gagal JSON menyebut pesan penerimanya",
+  describeReceiverFailure(
+    401,
+    '{"error":"Tanda tangan tidak cocok — pastikan rahasianya sama."}',
+  ) ===
+    "Penerima menjawab 401. Pesan penerima: Tanda tangan tidak cocok — pastikan rahasianya sama.",
+  describeReceiverFailure(401, '{"error":"x"}'),
+);
+check(
+  "balasan gagal tanpa badan tetap jujur menyebut status",
+  describeReceiverFailure(503, "   ") === "Penerima menjawab 503.",
+  describeReceiverFailure(503, "   "),
+);
+check(
+  "balasan gagal bukan JSON dipakai apa adanya",
+  describeReceiverFailure(500, "  Internal   Server Error ") ===
+    "Penerima menjawab 500. Pesan penerima: Internal Server Error",
+  describeReceiverFailure(500, "  Internal   Server Error "),
+);
+check(
+  "pesan penerima yang panjang dipotong, bukan disimpan mentah",
+  describeReceiverFailure(400, '{"message":"' + "a".repeat(500) + '"}').length < 300,
+  String(describeReceiverFailure(400, "x".repeat(50))),
+);
+
+{
+  const ok = validateWebhookSecret("RahasiaBersamaDariPenerima123");
+  check(
+    "rahasia dari penerima diterima apa adanya (tanpa spasi di ujung)",
+    ok.ok && ok.value === "RahasiaBersamaDariPenerima123",
+    JSON.stringify(ok),
+  );
+  check(
+    "rahasia terlalu pendek ditolak dengan alasannya",
+    validateWebhookSecret("pendek").ok === false &&
+      validateWebhookSecret("pendek").reason.includes(String(WEBHOOK_SECRET_MIN)),
+    JSON.stringify(validateWebhookSecret("pendek")),
+  );
+  check(
+    "rahasia terlalu panjang ditolak",
+    validateWebhookSecret("a".repeat(WEBHOOK_SECRET_MAX + 1)).ok === false,
+  );
+  check(
+    "spasi di tengah rahasia ditolak (tidak selamat lewat header)",
+    validateWebhookSecret("rahasia dengan spasi di tengah").ok === false,
+  );
+  check(
+    "tanda hubung tipografi hasil salin-tempel ditolak",
+    validateWebhookSecret("rahasia–bersama–panjang").ok === false,
+  );
+  check(
+    "rahasia kosong ditolak",
+    validateWebhookSecret("   ").ok === false &&
+      validateWebhookSecret("   ").reason.includes("wajib diisi"),
+    JSON.stringify(validateWebhookSecret("   ")),
+  );
+}
+
 // ------------------------------------------------ pemicu event saat kejadian
 // Webhook hanya berguna kalau peristiwanya benar-benar mengisi antrean. Isi
 // kiriman tiap event murni di `lib/webhookEvents.ts`; sambungan ke jalur
@@ -869,6 +1046,26 @@ check(
     "isi opname.posted membawa selisih bersih & jumlah barisnya",
     opname.netUnits === -3 && opname.movements === 2 && String(opname.location).includes("Gudang"),
     JSON.stringify(opname),
+  );
+  const produkBaru = productCreatedEventData({
+    sku: "PBB-SEM-000009",
+    name: "Semen Portland 40 kg",
+    price: 68_000,
+    unit: "SAK",
+    active: true,
+    category: "Semen & Mortar",
+    subcategory: "Semen Portland",
+    createdAt: 1_791_746_927_000,
+  });
+  check(
+    "isi product.created menyebut produk barunya tanpa daftar perubahan",
+    produkBaru.sku === "PBB-SEM-000009" &&
+      produkBaru.price === 68_000 &&
+      produkBaru.unit === "SAK" &&
+      produkBaru.category === "Semen & Mortar" &&
+      produkBaru.createdAt === 1_791_746_927_000 &&
+      !("changed" in produkBaru),
+    JSON.stringify(produkBaru),
   );
 }
 {
@@ -950,6 +1147,30 @@ check(
     "field asing lolos tanpa keluhan",
   );
   check(
+    "nama produk boleh ikut sebagai cadangan SKU (dipangkas & dibatasi)",
+    (() => {
+      const withName = find({
+        ...valid,
+        lines: [{ sku: "KOPI-SUSU", name: "  Kopi Susu Gula Aren  ", quantity: 1 }],
+      });
+      return (
+        withName.ok &&
+        withName.value.lines[0].name === "Kopi Susu Gula Aren" &&
+        find({
+          ...valid,
+          lines: [{ sku: "KOPI-SUSU", name: "   ", quantity: 1 }],
+        }).ok === false &&
+        find({
+          ...valid,
+          lines: [
+            { sku: "KOPI-SUSU", name: "x".repeat(ORDER_NAME_MAX + 1), quantity: 1 },
+          ],
+        }).ok === false
+      );
+    })(),
+    "name tidak diperiksa bentuknya",
+  );
+  check(
     "idempotencyKey wajib dan bentuknya dibatasi",
     !find({ ...valid, idempotencyKey: undefined }).ok &&
       !find({ ...valid, idempotencyKey: "pendek" }).ok &&
@@ -1010,15 +1231,85 @@ check(
     "baris kembar (atau satuan berbeda) diperlakukan salah",
   );
   check(
-    "modifier lewat API ditolak dengan penjelasan, bukan modifikasinya hilang",
+    "modifier lewat API diterima dalam bentuk kode grup & opsi",
     (() => {
       const withModifier = find({
         ...valid,
-        lines: [{ sku: "KOPI-SUSU", quantity: 1, modifiers: ["TELUR"] }],
+        lines: [
+          {
+            sku: "KOPI-SUSU",
+            quantity: 1,
+            modifiers: [
+              { groupCode: "level", optionCodes: ["3"] },
+              { groupCode: "TOPPING", optionCodes: ["telur", "TELUR"] },
+            ],
+          },
+        ],
       });
-      return !withModifier.ok && /modifiers/.test(withModifier.reason);
+      return (
+        withModifier.ok &&
+        withModifier.value.lines[0].modifiers[0].groupCode === "LEVEL" &&
+        JSON.stringify(withModifier.value.lines[0].modifiers[1].optionCodes) ===
+          JSON.stringify(["TELUR"])
+      );
     })(),
-    "modifier lolos tanpa jejak",
+    "modifier sah ditolak atau tidak dinormalkan",
+  );
+  check(
+    "modifier cacat ditolak dengan alasan yang menyebut grupnya",
+    (() => {
+      const empty = find({
+        ...valid,
+        lines: [{ sku: "KOPI-SUSU", quantity: 1, modifiers: [{ groupCode: "LEVEL", optionCodes: [] }] }],
+      });
+      const duplicate = find({
+        ...valid,
+        lines: [
+          {
+            sku: "KOPI-SUSU",
+            quantity: 1,
+            modifiers: [
+              { groupCode: "LEVEL", optionCodes: ["1"] },
+              { groupCode: "LEVEL", optionCodes: ["2"] },
+            ],
+          },
+        ],
+      });
+      const stray = find({
+        ...valid,
+        lines: [
+          {
+            sku: "KOPI-SUSU",
+            quantity: 1,
+            modifiers: [{ groupCode: "LEVEL", optionCodes: ["1"], extra: true }],
+          },
+        ],
+      });
+      return (
+        !empty.ok && /LEVEL/.test(empty.reason) &&
+        !duplicate.ok && /dua kali/.test(duplicate.reason) &&
+        !stray.ok && /extra/.test(stray.reason)
+      );
+    })(),
+    "modifier cacat lolos",
+  );
+  check(
+    "baris sama dengan modifier berbeda adalah dua baris yang sah",
+    find({
+      ...valid,
+      lines: [
+        { sku: "KOPI-SUSU", quantity: 1, modifiers: [{ groupCode: "LEVEL", optionCodes: ["1"] }] },
+        { sku: "KOPI-SUSU", quantity: 1, modifiers: [{ groupCode: "LEVEL", optionCodes: ["2"] }] },
+      ],
+    }).ok &&
+      !find({
+        ...valid,
+        lines: [
+          { sku: "KOPI-SUSU", quantity: 1, modifiers: [{ groupCode: "LEVEL", optionCodes: ["1"] }] },
+          { sku: "KOPI-SUSU", quantity: 2, modifiers: [{ groupCode: "LEVEL", optionCodes: ["1"] }] },
+        ],
+      }).ok,
+    "tanda tangan baris mengabaikan modifier",
   );
   check(
     "metode pembayaran terbatas pada yang dikenal kasir",
@@ -1105,19 +1396,256 @@ check(
   );
 }
 
+// ----------------------------------- parameter baca: tanggal, kursor, toko
+{
+  check(
+    "from/to menerima epoch maupun ISO, dan menolak nilai tak terbaca",
+    (() => {
+      const iso = parseDateRange("2026-10-01T00:00:00Z", "2026-10-20T00:00:00Z");
+      const epoch = parseDateRange("1790812800000", null);
+      const invalid = parseDateRange("kemarin", null);
+      return (
+        iso.ok && iso.from === Date.parse("2026-10-01T00:00:00Z") && iso.to === Date.parse("2026-10-20T00:00:00Z") &&
+        epoch.ok && epoch.from === 1790812800000 && epoch.to === null &&
+        !invalid.ok && /from/.test(invalid.reason)
+      );
+    })(),
+    JSON.stringify(parseDateRange("kemarin", null)),
+  );
+  check(
+    "from yang tidak lebih awal dari to ditolak, bukan diam-diam ditukar",
+    !parseDateRange("2026-10-20", "2026-10-01").ok && !parseDateRange("100", "100").ok,
+    "rentang terbalik lolos",
+  );
+  check(
+    "kursor bolak-balik utuh dan kursor asing ditolak",
+    (() => {
+      const cursor = encodeCursor(1770000000000, "A-00042");
+      const decoded = decodeCursor(cursor);
+      return (
+        decoded.ok && decoded.value.at === 1770000000000 && decoded.value.key === "A-00042" &&
+        decodeCursor(null).ok && decodeCursor("").ok &&
+        !decodeCursor("bukan-kursor").ok && !decodeCursor("12|").ok
+      );
+    })(),
+    JSON.stringify(decodeCursor("bukan-kursor")),
+  );
+  check(
+    "saringan status penjualan hanya menerima nilai yang dikenal",
+    parseSaleStatus(null).value === "completed" &&
+      parseSaleStatus("void").value === "void" &&
+      parseSaleStatus("ALL").value === "all" &&
+      !parseSaleStatus("dibatalkan").ok,
+    JSON.stringify(parseSaleStatus("dibatalkan")),
+  );
+  check(
+    "kode toko dinormalkan, kosong berarti toko pertama",
+    normalizeStoreCodeParam("  pusat ") === "PUSAT" &&
+      normalizeStoreCodeParam(null) === null &&
+      normalizeStoreCodeParam("   ") === null,
+    String(normalizeStoreCodeParam("  pusat ")),
+  );
+}
+
+// --------------------------------------- badan endpoint tulis non-penjualan
+{
+  check(
+    "PATCH produk menerima harga bulat & menolak harga pecahan/field asing",
+    parseProductPatch({ sku: "pbb-sem-1", price: 69000 }).ok &&
+      !parseProductPatch({ sku: "PBB-SEM-1", price: 69000.5 }).ok &&
+      !parseProductPatch({ sku: "PBB-SEM-1", Price: 1000 }).ok &&
+      !parseProductPatch({ sku: "PBB-SEM-1" }).ok &&
+      parseProductPatch({ sku: "PBB-SEM-1", unit: "sak", active: false }).ok,
+    JSON.stringify(parseProductPatch({ sku: "PBB-SEM-1" })),
+  );
+  check(
+    "DELETE produk hanya menerima SKU",
+    parseProductDelete({ sku: "kopi-susu" }).value.sku === "KOPI-SUSU" &&
+      !parseProductDelete({ sku: "KOPI-SUSU", hapus: true }).ok,
+    JSON.stringify(parseProductDelete({ sku: "KOPI-SUSU", hapus: true })),
+  );
+  check(
+    "penyesuaian stok: delta atau quantity, tidak dua-duanya",
+    parseStockAdjust({ sku: "A", delta: -3 }).value.delta === -3 &&
+      parseStockAdjust({ sku: "A", quantity: 12 }).value.quantity === 12 &&
+      !parseStockAdjust({ sku: "A", delta: 1, quantity: 2 }).ok &&
+      !parseStockAdjust({ sku: "A", delta: 0 }).ok &&
+      !parseStockAdjust({ sku: "A", quantity: -1 }).ok &&
+      !parseStockAdjust({ sku: "A" }).ok,
+    JSON.stringify(parseStockAdjust({ sku: "A" })),
+  );
+  check(
+    "pelanggan baru: nama wajib, kode boleh kosong, limit & tempo divalidasi",
+    parseCustomerCreate({ name: "CV Bangun Jaya" }).ok &&
+      parseCustomerCreate({ name: "CV Bangun Jaya", code: "B2B-0009", creditLimit: 5000000, paymentTermDays: 14 }).ok &&
+      !parseCustomerCreate({ name: "" }).ok &&
+      !parseCustomerCreate({ name: "Toko", creditLimit: -1 }).ok &&
+      !parseCustomerCreate({ name: "Toko", paymentTermDays: "14" }).ok &&
+      !parseCustomerCreate({ name: "Toko", limit: 1 }).ok,
+    JSON.stringify(parseCustomerCreate({ name: "Toko", limit: 1 })),
+  );
+  check(
+    "member baru: nama wajib, kode maksimal 10, diskon angka",
+    parseMemberCreate({ name: "Siti" }).ok &&
+      parseMemberCreate({ name: "Siti", code: "MBR-9", discountPct: 5 }).ok &&
+      !parseMemberCreate({ name: "Siti", code: "KODE-YANG-SANGAT-PANJANG" }).ok &&
+      !parseMemberCreate({ name: "Siti", discountPct: "5" }).ok,
+    JSON.stringify(parseMemberCreate({ name: "Siti", discountPct: "5" })),
+  );
+  check(
+    "pembatalan memakai nomor struk yang dinormalkan + alasan opsional",
+    parseVoidSale({ number: "a-00043" }).value.number === "A-00043" &&
+      parseVoidSale({ number: "A-00043", reason: "Salah input" }).value.reason === "Salah input" &&
+      !parseVoidSale({ number: "" }).ok &&
+      !parseVoidSale({ number: "A-00043", jumlah: 1 }).ok,
+    JSON.stringify(parseVoidSale({ number: "" })),
+  );
+}
+
+// ------------------------------------------------------------- webhook masuk
+{
+  check(
+    "katalog event masuk sama dengan yang dijalankan penerima",
+    INBOUND_EVENT_KEYS.length === 4 &&
+      ["order.created", "stock.adjusted", "product.updated", "sale.voided"].every((key) =>
+        INBOUND_EVENT_KEYS.includes(key),
+      ) &&
+      INBOUND_WEBHOOK_EVENTS.every((event) => event.label.length > 0 && event.dataShape.length > 0),
+    JSON.stringify(INBOUND_EVENT_KEYS),
+  );
+  check(
+    "konfigurasi endpoint masuk menolak event asing & nama kembar",
+    (() => {
+      const ok = validateInboundEndpointInput({ name: "Marketplace", events: ["order.created", "dikenal"] });
+      const dup = validateInboundEndpointInput(
+        { name: "Marketplace", events: ["order.created"] },
+        { existingNames: ["marketplace"] },
+      );
+      const none = validateInboundEndpointInput({ name: "Marketplace", events: [] });
+      return (
+        ok.ok && JSON.stringify(ok.value.events) === JSON.stringify(["order.created"]) &&
+        !dup.ok && !none.ok
+      );
+    })(),
+    JSON.stringify(validateInboundEndpointInput({ name: "X", events: [] })),
+  );
+  check(
+    "token endpoint berbentuk tetap & bukan rahasia",
+    isInboundToken("whi_23456789abcdefghjkmn") &&
+      !isInboundToken("whi_03456789abcdefghjkmn") &&
+      !isInboundToken("mp_23456789abcdefghjkmn"),
+    "token webhook masuk tidak diperiksa bentuknya",
+  );
+  check(
+    "tanda tangan webhook masuk diverifikasi dengan skema yang sama",
+    (() => {
+      const secret = "rahasia-bersama-panjang-1234";
+      const now = 1770000000000;
+      const body = "{\"id\":\"x\",\"event\":\"order.created\",\"data\":{}}";
+      const headers = {
+        timestamp: String(now),
+        signature: signWebhookPayload(secret, now, body),
+        event: "order.created",
+        eventId: null,
+      };
+      const valid = inboundSignatureProblem({ secret, body, headers, now });
+      const wrong = inboundSignatureProblem({
+        secret,
+        body,
+        headers: { ...headers, signature: "sha256=" + "0".repeat(64) },
+        now,
+      });
+      const stale = inboundSignatureProblem({ secret, body, headers, now: now + 6 * 60 * 1000 });
+      return valid === null && wrong !== null && stale !== null;
+    })(),
+    "tanda tangan webhook masuk tidak diperiksa",
+  );
+  check(
+    "envelope peristiwa: id wajib, event dikenal, badan & header harus sepakat",
+    (() => {
+      const headers = { timestamp: "1", signature: "x", event: "order.created", eventId: null };
+      const ok = parseInboundEnvelope(
+        JSON.stringify({ id: "ord-1", event: "order.created", data: { ok: true } }),
+        headers,
+      );
+      const missingId = parseInboundEnvelope(JSON.stringify({ event: "order.created", data: {} }), headers);
+      const unknown = parseInboundEnvelope(
+        JSON.stringify({ id: "x", event: "refund.created", data: {} }),
+        headers,
+      );
+      const mismatch = parseInboundEnvelope(
+        JSON.stringify({ id: "x", event: "sale.voided", data: {} }),
+        headers,
+      );
+      const notObject = parseInboundEnvelope("[]", headers);
+      return ok.ok && !missingId.ok && !unknown.ok && !mismatch.ok && !notObject.ok;
+    })(),
+    JSON.stringify(parseInboundEnvelope("{}", { timestamp: null, signature: null, event: null, eventId: null })),
+  );
+  check(
+    "penyaringan event masuk membuang yang tak dikenal",
+    JSON.stringify(sanitizeInboundEvents(["order.created", "refund.created", "order.created"])) ===
+      JSON.stringify(["order.created"]),
+    JSON.stringify(sanitizeInboundEvents(["order.created", "refund.created"])),
+  );
+  check(
+    "catatan webhook masuk menyebut tanda tangan & idempotensi",
+    INBOUND_WEBHOOK_NOTES.join(" ").includes("tanda tangan") &&
+      INBOUND_WEBHOOK_NOTES.join(" ").includes("idempotensi"),
+    INBOUND_WEBHOOK_NOTES.join(" | "),
+  );
+}
+
 // ------------------------------------------- sambungan ke endpoint & schema
 {
   const apiAccess = read("src/convex/apiAccess.ts");
+  const httpSource = read("src/convex/http.ts");
+  /** Handler yang harus ada untuk tiap endpoint tulis (`export const …`). */
+  const WRITE_HANDLERS = {
+    "sales.create": ["recordOrder", "applyExternalOrder"],
+    "sales.void": ["voidSale", "applyVoidSale"],
+    "products.update": ["updateProduct", "applyProductPatch"],
+    "products.delete": ["deleteProduct", "applyProductDelete"],
+    "stock.adjust": ["adjustStock", "applyStockAdjust"],
+    "customers.create": ["createCustomer", "applyCustomerCreate"],
+    "members.create": ["createMember", "applyMemberCreate"],
+    "inboundWebhooks.create": ["createInboundWebhook"],
+    "inboundWebhooks.delete": ["deleteInboundWebhook"],
+    "inboundWebhooks.receive": ["receiveInboundEvent", "inboundEndpointByToken"],
+  };
   for (const resource of API_RESOURCES) {
     if (resource.write) {
-      // Endpoint tulis tidak lewat `readResource`: ia punya jalur sendiri,
-      // `recordOrder`, dan scope-nya diperiksa ulang di dalam transaksi tulis.
+      const handlers = WRITE_HANDLERS[resource.resource] ?? [];
       check(
-        `recordOrder melayani resource tulis "${resource.resource}"`,
-        apiAccess.includes("export const recordOrder") &&
-          apiAccess.includes(`sanitizeApiScopes(key.scopes).includes("${resource.scope}")`),
-        "endpoint tulis tidak memeriksa scope tulisnya di dalam transaksi",
+        `handler tulis tersedia untuk "${resource.resource}"`,
+        handlers.length > 0 &&
+          handlers.every(
+            (name) =>
+              apiAccess.includes(`export const ${name} = internal`) ||
+              apiAccess.includes(`async function ${name}(`),
+          ),
+        JSON.stringify(handlers),
       );
+      if (resource.auth === "signature") {
+        check(
+          `endpoint bersignature "${resource.resource}" tidak memakai jalur kunci`,
+          httpSource.includes("pathPrefix: `${INBOUND_WEBHOOK_PATH}/`") &&
+            httpSource.includes("inboundEndpointByToken") &&
+            httpSource.includes("inboundSignatureProblem("),
+          "webhook masuk diperlakukan seperti endpoint berkunci",
+        );
+      } else {
+        check(
+          `http.ts mengarahkan "${resource.resource}" ke jalurnya`,
+          httpSource.includes(`case "${resource.resource}":`),
+          "endpoint tulis tidak punya cabang dispatch",
+        );
+        check(
+          `resource tulis "${resource.resource}" memeriksa scope di dalam transaksi`,
+          apiAccess.includes(`activeWriteKey(ctx, args.tenantId, args.keyId, "${resource.scope}")`),
+          "scope kunci tidak diperiksa ulang sebelum menulis",
+        );
+      }
       continue;
     }
     check(
@@ -1126,6 +1654,60 @@ check(
       "DITAWARKAN di halaman tapi tidak dibaca endpoint",
     );
   }
+  check(
+    "http.ts melewati endpoint bersignature di loop berkunci",
+    httpSource.includes('if (resource.auth === "signature") continue;'),
+    "webhook masuk ikut didaftarkan sebagai endpoint berkunci",
+  );
+  check(
+    "pemilihan toko memakai kode toko, bukan id internal",
+    apiAccess.includes("stores.find((row) => row.code.trim().toUpperCase() === wanted)") &&
+      httpSource.includes('url.searchParams.get("storeCode")') &&
+      !httpSource.includes("storeId="),
+    "toko dipilih dari id internal atau tidak bisa dipilih sama sekali",
+  );
+  check(
+    "kode toko yang tidak dikenal dijawab 404 dengan daftar kode",
+    /Toko dengan kode \$\{wanted\} tidak ada di workspace ini/.test(apiAccess),
+    "kode toko asing diam-diam memakai toko pertama",
+  );
+  check(
+    "pembacaan penjualan & pembelian memakai from/to dan kursor",
+    apiAccess.includes('const from = args.from ?? since ?? Date.now()') &&
+      apiAccess.includes("encodeCursor(last.createdAt, last.number)") &&
+      apiAccess.includes('withIndex("by_tenant_store_created"') &&
+      apiAccess.includes('resource === "customers"') &&
+      apiAccess.includes('resource === "members"'),
+    "rentang tanggal/kursor tidak dipakai di readResource",
+  );
+  check(
+    "http.ts memeriksa from/to sebelum membaca data",
+    /parseDateRange\(url\.searchParams\.get\("from"\), url\.searchParams\.get\("to"\)\)/.test(httpSource) &&
+      /if \(!range\.ok\) return json/.test(httpSource) &&
+      httpSource.includes("decodeCursor(rawCursor)"),
+    "parameter tanggal/kursor tidak divalidasi di jalur HTTP",
+  );
+  check(
+    "modifier pesanan diteruskan ke jalur penjualan kasir",
+    apiAccess.includes("if (line.modifiers && line.modifiers.length > 0) item.modifiers = line.modifiers;") &&
+      apiAccess.includes("api.pos.createSale"),
+    "modifier hilang antara API dan pos.createSale",
+  );
+  check(
+    "pembatalan & perubahan produk memakai jalur aplikasi yang sama",
+    apiAccess.includes("api.pos.voidSale") &&
+      apiAccess.includes("api.products.update") &&
+      apiAccess.includes("api.products.setPricing") &&
+      apiAccess.includes("api.products.adjustStock") &&
+      apiAccess.includes("api.products.remove"),
+    "endpoint tulis punya jalur sendiri di luar aplikasi",
+  );
+  check(
+    "peristiwa webhook masuk dicatat untuk idempotensi",
+    apiAccess.includes('insert("inboundWebhookEvents"') &&
+      apiAccess.includes('.eq("endpointId", endpoint._id).eq("eventId", args.eventId)'),
+    "peristiwa masuk tidak punya jejak idempotensi",
+  );
   const http = read("src/convex/http.ts");
   check(
     "http.ts mendaftarkan setiap resource dari API_RESOURCES",
@@ -1150,8 +1732,14 @@ check(
   );
   check(
     "bentuk badan pesan diperiksa aturan murni apiOrders",
-    http.includes('from "./lib/apiOrders"') && http.includes("parseExternalOrder(parsed)"),
+    http.includes('from "./lib/apiOrders"') && /parseExternalOrder\(/.test(http),
     "http.ts mengurai badan pesan dengan aturannya sendiri",
+  );
+  check(
+    "pesanan marketplace disiapkan aturan murni sebelum diperiksa",
+    http.includes("prepareMarketplaceOrderBody") &&
+      http.includes("parseExternalOrder(prepareMarketplaceOrderBody(parsed))"),
+    "field tambahan marketplace diurai langsung di http.ts",
   );
   check(
     "penulisan API masuk lewat jalur penjualan yang sama dengan kasir",
@@ -1159,8 +1747,9 @@ check(
     "API punya jalur penjualan sendiri",
   );
   check(
-    "kunci tidak bisa menulis kalau pembuatnya kehilangan izin pos.sell",
-    apiAccess.includes('return { ok: false, status: 403, error: "Kunci ini tidak punya scope pos.sell." }') &&
+    "kunci tidak bisa menulis kalau pembuatnya kehilangan izin domain itu",
+    apiAccess.includes("async function activeWriteKey(") &&
+      apiAccess.includes("`Kunci ini tidak punya scope ${scope}.`") &&
       /creatorPermissions[\s\S]{0,200}includes\(scope\)/.test(apiAccess),
     "izin pembuat kunci tidak diperiksa ulang di jalur tulis",
   );
@@ -1171,13 +1760,26 @@ check(
   );
 
   const schema = read("src/convex/schema.ts");
-  for (const table of ["apiKeys", "webhookEndpoints", "webhookDeliveries"]) {
+  for (const table of [
+    "apiKeys",
+    "webhookEndpoints",
+    "webhookDeliveries",
+    "inboundWebhookEndpoints",
+    "inboundWebhookEvents",
+  ]) {
     check(`schema.ts mendefinisikan tabel ${table}`, schema.includes(`${table}: defineTable(`), table);
   }
   for (const index of [
     'index("by_public_id", ["publicId"])',
     'index("by_tenant", ["tenantId"])',
     'index("by_endpoint", ["endpointId"])',
+    'index("by_token", ["token"])',
+    'index("by_endpoint_event", ["endpointId", "eventId"])',
+    /** Pemilih toko & kursor waktu yang dipakai readResource. */
+    'index("by_tenant_code", ["tenantId", "code"])',
+    'index("by_tenant_created", ["tenantId", "createdAt"])',
+    'index("by_tenant_number", ["tenantId", "number"])',
+    'index("by_tenant_store_created", ["tenantId", "storeId", "createdAt"])',
   ]) {
     check(
       `schema.ts punya indeks ${index}`,
@@ -1250,18 +1852,73 @@ check(
     /retryDueDeliveries[\s\S]*?attempt: item\.attempts \+ 1/.test(apiAccess),
     "percobaan ulang tidak mengirim nomor percobaannya",
   );
+  check(
+    "alasan dari penerima disimpan, bukan hanya kode statusnya",
+    apiAccess.includes("await response.text()") &&
+      apiAccess.includes("describeReceiverFailure(response.status, bodyText)"),
+    "kiriman gagal hanya menyimpan “Penerima menjawab <status>”",
+  );
+  check(
+    "satu kiriman bisa dikirim ulang dari riwayat tanpa menunggu jadwal",
+    apiAccess.includes("export const retryDelivery = action(") &&
+      apiAccess.includes("export const beginRetryDelivery = internalMutation(") &&
+      /beginRetryDelivery[\s\S]*?attempts: 0/.test(apiAccess) &&
+      /retryDelivery = action[\s\S]*?postSignedDelivery\(\{/.test(apiAccess),
+    "tombol kirim ulang tidak mengembalikan kiriman ke antrean",
+  );
+  check(
+    "kiriman yang sudah terkirim tidak bisa dikirim ulang",
+    apiAccess.includes("sudah diterima penerima; tidak perlu dikirim ulang"),
+    "kiriman ganda bisa dibuat lewat tombol kirim ulang",
+  );
+  {
+    const types = read("src/lib/store/types.ts");
+    const convexStore = read("src/lib/store/convex.tsx");
+    const demoStore = read("src/lib/store/demo.tsx");
+    const page = read("src/pages/ApiPage.tsx");
+    check(
+      "kedua store menyediakan kirim ulang satu kiriman",
+      types.includes("retryWebhookDelivery(deliveryId: string)") &&
+        convexStore.includes("api.apiAccess.retryDelivery") &&
+        demoStore.includes("const retryWebhookDelivery = useCallback("),
+      "anggota store baru tidak diimplementasikan kedua store",
+    );
+    check(
+      "halaman menawarkan tombol kirim ulang per baris riwayat",
+      page.includes('data-testid={`webhook-retry-${delivery.id}`}') &&
+        page.includes("retryWebhookDelivery("),
+      "riwayat kiriman tidak punya tombol kirim ulang",
+    );
+    check(
+      "rahasia penanda tangan boleh disamakan dengan milik penerima",
+      /secret: v\.optional\(v\.string\(\)\)/.test(apiAccess) &&
+        apiAccess.includes("validateWebhookSecret(args.secret)") &&
+        demoStore.includes("validateWebhookSecret(input.secret)") &&
+        page.includes("validateWebhookSecret") &&
+        page.includes("webhook-secret-input-"),
+      "rahasia dari penerima tidak bisa dipasang dari halaman",
+    );
+    check(
+      "rahasia yang diketik tidak ditampilkan kembali ke layar",
+      apiAccess.includes("tidak dikembalikan lagi") &&
+        convexStore.includes("secret: input.secret"),
+      "rahasia yang diketik malah dikembalikan sebagai “rahasia baru”",
+    );
+  }
 
   // Pemicu event: setiap event yang bisa dilanggan harus jelas nasibnya —
   // dikirim otomatis saat kejadiannya, atau dicatat di sini sebagai belum ada
   // supaya tidak ada entri katalog yang diam-diam tidak pernah terkirim.
   const pos = read("src/convex/pos.ts");
   const opname = read("src/convex/opname.ts");
+  const productsSource = read("src/convex/products.ts");
   const outbox = read("src/convex/lib/webhookOutbox.ts");
   for (const [event, file] of [
     ["sale.completed", pos],
     ["sale.voided", pos],
     ["stock.low", pos],
     ["opname.posted", opname],
+    ["product.created", productsSource],
   ]) {
     check(
       `peristiwa nyata memicu webhook ${event}`,

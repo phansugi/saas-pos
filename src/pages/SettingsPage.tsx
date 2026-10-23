@@ -18,6 +18,7 @@ import {
   Volume2,
   VolumeX,
 } from "lucide-react";
+import { MarketplacePairingCard } from "@/components/MarketplacePairingCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -47,7 +48,8 @@ import {
   type FnbEntityType,
   type FnbTaxProfile,
 } from "@/lib/fnbTax";
-import { entitlementFor, hasFeature } from "@/lib/billing";
+import { entitlementFor } from "@/lib/billing";
+import { settingsSectionVisibility } from "@/lib/settingsVisibility";
 import {
   SCAN_BEEP,
   SCAN_BEEP_VOLUME_MAX,
@@ -492,10 +494,27 @@ export function SettingsPage() {
   );
   /** Pratinjau memakai kertas selebar yang dipilih — 58 mm dan 80 mm tidak sama. */
   const receiptPreviewWidthMm = receiptPreviewSetting.paperWidthMm;
-  const planHasPrinting = hasFeature(
-    entitlementFor(session?.tenant?.planKey ?? "starter"),
-    "peripheral.escpos",
-  );
+  /*
+    Setelan yang fiturnya tidak ada di paket tidak ditampilkan (aturannya di
+    `@/lib/settingsVisibility`): kartu F&B mengikuti modul F&B yang hidup, dan
+    kartu struk mengikuti fitur cetak ESC/POS. Profil F&B yang **masih memungut**
+    tetap tampil walau modulnya mati, supaya pungutan yang sudah berjalan bisa
+    dihentikan — bukan disembunyikan bersama kartunya.
+  */
+  const fnbTaxInUse =
+    fnbTax.regionalActive ||
+    fnbTax.serviceChargeActive ||
+    fnbTax.umkmFinalActive ||
+    fnbTax.payrollTaxActive ||
+    fnbTax.rentTaxActive;
+  const settingsSections = settingsSectionVisibility({
+    // `modules.planKey` sudah berasal dari server (bukan sesi yang mungkin
+    // tertinggal), jadi paket yang digerbang di sini sama dengan yang dipakai
+    // backend saat modul & fitur diperiksa.
+    entitlements: entitlementFor(modules.planKey),
+    activeVerticals: modules.activeVerticals,
+    fnbTaxInUse,
+  });
   /*
     Saran setelan dari bentuk workspace. Yang menentukan jawabannya modul yang
     sedang hidup (F&B, grosir, atau ritel biasa), dan yang memutuskan tetap pemilik
@@ -672,6 +691,8 @@ export function SettingsPage() {
         </p>
       )}
 
+      <MarketplacePairingCard />
+
       <Card>
         <CardHeader>
           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -825,7 +846,8 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
-      <Card id="pajak-fnb">
+      {settingsSections.fnbTax && (
+      <Card id="pajak-fnb" data-testid="setelan-pajak-fnb">
         <CardHeader>
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
@@ -1303,8 +1325,10 @@ export function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+      )}
 
-      <Card id="struk-belanja">
+      {settingsSections.receipt && (
+      <Card id="struk-belanja" data-testid="setelan-struk-belanja">
         <CardHeader>
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
@@ -1327,15 +1351,6 @@ export function SettingsPage() {
         </CardHeader>
 
         <CardContent className="space-y-6">
-          {!planHasPrinting && (
-            <p className="rounded-lg border border-border/60 bg-secondary/30 px-4 py-3 text-xs text-muted-foreground">
-              Paket langganan workspace ini belum memuat fitur{" "}
-              <strong className="text-foreground">Cetak struk ESC/POS</strong>, jadi tombol cetak
-              di kasir masih terkunci. Setelan di bawah tetap tersimpan dan langsung dipakai
-              begitu fiturnya aktif.
-            </p>
-          )}
-
           {/*
             0. Logo toko. Ia bagian dari identitas yang tercetak di struk, jadi
             tempatnya di kartu struk. Yang tersimpan adalah tautan berkasnya
@@ -1814,6 +1829,7 @@ export function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+      )}
 
       <Card id="pengingat-shift" data-testid="setelan-pengingat-shift">
         <CardHeader>

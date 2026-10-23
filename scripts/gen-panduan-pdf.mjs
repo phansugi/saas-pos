@@ -604,7 +604,7 @@ function figureNewProductForm(doc, area) {
 
   const fields = [
     { label: "Nama produk", value: "Kopi Susu Gula Aren", num: 1 },
-    { label: "SKU (kosongkan untuk otomatis)", value: "PBB-KOP-000007", num: 2 },
+    { label: "SKU (kosongkan untuk otomatis)", value: "PBB-0000007", num: 2 },
     { label: "Kategori", value: "Kopi", num: 3 },
     { label: "Harga jual", value: "22000", num: 4 },
     { label: "Harga beli", value: "12000", num: 5 },
@@ -629,50 +629,55 @@ function figureNewProductForm(doc, area) {
   marker(doc, markerX, area.y + 181, 8);
 }
 
-/** Gambar 3: panel "Sesuaikan stok" pada satu baris produk. */
+/**
+ * Gambar 3: kartu "Sesuaikan stok" di atas daftar produk — pola kartu yang sama
+ * dengan form Produk baru, bukan panel yang menempel di bawah baris tabel.
+ */
 function figureAdjustStock(doc, area) {
   const { x, width, markerX } = appFrame(doc, area, "Produk & Stok");
 
   text(doc, "Produk & Stok", x, area.y + 14, { size: 12, bold: true, color: C.ink });
 
-  const tableY = area.y + 40;
-  panel(doc, x, tableY, width, 62);
-  text(doc, "KOPISUSU", x + 8, tableY + 12, { size: 7.5, mono: true, color: C.muted });
-  text(doc, "Kopi Susu Gula Aren", x + 72, tableY + 12, { size: 8.5, bold: true });
-  text(doc, "Rp 22.000", x + 170, tableY + 12, { size: 8, mono: true });
-  text(doc, "48", x + 236, tableY + 12, { size: 8, mono: true });
-  outlineButton(doc, "Sesuaikan stok", x + width - 96, tableY + 8, 90);
-  marker(doc, markerX, tableY + 18, 1);
-
-  const formY = tableY + 66;
+  // Kartu lebih dulu, lalu tabel produknya — urutan yang sama dengan layarnya.
+  const formY = area.y + 30;
   panel(doc, x, formY, width, 96, { bg: "#F8FAFC" });
+  text(doc, "Sesuaikan stok", x + 10, formY + 12, { size: 9.5, bold: true });
   text(
     doc,
-    "Stok Kopi Susu Gula Aren saat ini 48 PCS di lokasi jual. Tulis angka negatif untuk mengurangi.",
+    "Kopi Susu Gula Aren · stok 48 PCS di lokasi jual · angka negatif mengurangi.",
     x + 10,
-    formY + 10,
+    formY + 26,
     { size: 7.5, color: C.muted, width: width - 20 },
   );
 
-  text(doc, "Jumlah penyesuaian", x + 10, formY + 30, { size: 7, color: C.muted });
-  panel(doc, x + 10, formY + 40, 84, 18);
-  text(doc, "-3", x + 16, formY + 45, { size: 8, mono: true });
-  marker(doc, x + 106, formY + 49, 2);
+  text(doc, "Jumlah penyesuaian", x + 10, formY + 42, { size: 7, color: C.muted });
+  panel(doc, x + 10, formY + 52, 84, 18);
+  text(doc, "-3", x + 16, formY + 57, { size: 8, mono: true });
+  marker(doc, x + 106, formY + 61, 2);
 
-  text(doc, "Catatan (opsional)", x + 124, formY + 30, { size: 7, color: C.muted });
-  panel(doc, x + 124, formY + 40, width - 232, 18);
-  text(doc, "Rusak saat pengiriman", x + 130, formY + 45, { size: 7.5 });
-  marker(doc, x + 124 + (width - 232) / 2, formY + 22, 3);
+  text(doc, "Catatan (opsional)", x + 124, formY + 42, { size: 7, color: C.muted });
+  panel(doc, x + 124, formY + 52, width - 232, 18);
+  text(doc, "Rusak saat pengiriman", x + 130, formY + 57, { size: 7.5 });
+  marker(doc, x + 124 + (width - 232) / 2, formY + 34, 3);
 
-  text(doc, "Stok jadi 45", x + width - 92, formY + 30, { size: 7.5, color: C.muted });
-  button(doc, "Sesuaikan stok", x + width - 92, formY + 40, 82);
-  marker(doc, markerX, formY + 49, 4);
+  text(doc, "Stok jadi 45", x + width - 92, formY + 42, { size: 7.5, color: C.muted });
+  button(doc, "Sesuaikan stok", x + width - 92, formY + 52, 82);
+  marker(doc, markerX, formY + 61, 4);
 
-  text(doc, "Catatan itu tersimpan di ledger stok bersama siapa yang mengubahnya.", x + 10, formY + 72, {
+  text(doc, "Catatan itu tersimpan di ledger stok bersama siapa yang mengubahnya.", x + 10, formY + 80, {
     size: 7,
     color: C.muted,
     width: width - 20,
   });
+
+  const tableY = formY + 104;
+  panel(doc, x, tableY, width, 46);
+  text(doc, "KOPISUSU", x + 8, tableY + 12, { size: 7.5, mono: true, color: C.muted });
+  text(doc, "Kopi Susu Gula Aren", x + 72, tableY + 12, { size: 8.5, bold: true });
+  text(doc, "Rp 22.000", x + 170, tableY + 12, { size: 8, mono: true });
+  text(doc, "45", x + 236, tableY + 12, { size: 8, mono: true });
+  outlineButton(doc, "Sesuaikan stok", x + width - 96, tableY + 6, 90);
+  marker(doc, markerX, tableY + 16, 1);
 }
 
 /**
@@ -1552,8 +1557,8 @@ const SECTIONS = [
       steps(w, [
         "Buka menu Produk & Stok di sidebar kiri.",
         "Tekan tombol Tambah produk di kanan atas halaman. Form Produk baru terbuka di bawah judul halaman.",
-        "Isi Nama produk, misalnya Kopi Susu Gula Aren. SKU boleh dibiarkan kosong: kalau kolomnya kosong, sistem membuat kode otomatis berformat PBB-<KATEGORI>-<nomor urut> (contoh PBB-SAN-000042) yang dijamin unik. Tombol Buat otomatis di sebelah kolomnya mengisi kode itu lebih dulu kalau Anda ingin melihatnya sebelum menyimpan, dan kalau toko Anda punya aturan kode sendiri, ketik saja di kolom SKU - ketikan Anda yang dipakai.",
-        "Pilih Kategori. Workspace baru sudah punya kategori bawaan: Kopi, Makanan, Snack, dan Minuman. Kategori menentukan kode di tengah SKU, jadi selama kolom SKU masih berisi hasil tombol Buat otomatis, mengganti Kategori ikut mengganti kodenya (nomornya tetap). Nanti pun begitu: kolom Kategori di kartu Atur harga mengganti kategori produk, dan SKU buatan sistem ikut menyesuaikan - sedangkan SKU yang Anda ketik sendiri tidak pernah diubah.",
+        "Isi Nama produk, misalnya Kopi Susu Gula Aren. SKU boleh dibiarkan kosong: kalau kolomnya kosong, sistem membuat kode otomatis berformat PBB-<nomor urut> (contoh PBB-0000042) yang dijamin unik. Tombol Buat otomatis di sebelah kolomnya mengisi kode itu lebih dulu kalau Anda ingin melihatnya sebelum menyimpan, dan kalau toko Anda punya aturan kode sendiri, ketik saja di kolom SKU - ketikan Anda yang dipakai.",
+        "Pilih Kategori. Workspace baru sudah punya kategori bawaan: Kopi, Makanan, Snack, dan Minuman. Kategori menentukan tab di kasir, bukan SKU: mengganti Kategori tidak mengubah SKU produk, baik di form ini maupun di kartu Ubah produk - jadi kode yang sudah tercetak di label tetap sah.",
         "Isi Harga jual, Harga beli (opsional, dipakai sebagai saran harga di pesanan pembelian), dan Satuan dasar seperti PCS, Porsi, atau Botol.",
         "Isi Stok awal dengan jumlah fisik yang benar-benar ada di rak hari ini.",
         "Tekan Simpan produk. Pemberitahuan hijau muncul, dan barisnya langsung tampil di tabel produk.",
@@ -1592,7 +1597,7 @@ const SECTIONS = [
       );
       steps(w, [
         "Buka Produk & Stok, lalu cari produk yang ingin disesuaikan pada tabel.",
-        "Tekan tombol Sesuaikan stok di kolom Aksi pada baris produk itu. Panel penyesuaian terbuka tepat di bawah barisnya.",
+        "Tekan tombol Sesuaikan stok di kolom Aksi pada baris produk itu. Kartu Sesuaikan stok terbuka di atas daftar — pola yang sama dengan form Produk baru.",
         "Isi Jumlah penyesuaian: angka biasa untuk menambah, angka negatif (misalnya -3) untuk mengurangi.",
         "Isi Catatan supaya alasannya bisa dibaca ulang, misalnya \u201cRusak saat pengiriman\u201d atau \u201cBarang datang tanpa PO\u201d.",
         "Periksa tulisan Stok jadi pada panel. Tombolnya hanya menyala kalau hasil akhirnya nol atau lebih.",
@@ -1886,8 +1891,8 @@ const SECTIONS = [
         ["Tombol di kolom Aksi", "Kapan dipakai"],
         [
           [
-            "Atur harga",
-            "Mengubah harga jual, satuan, tier grosir, gambar, serta nama, SKU, dan harga beli produk.",
+            "Ubah produk",
+            "Mengubah nama, SKU, kategori, harga jual, harga beli, satuan, tier grosir, dan gambar dalam satu kartu.",
           ],
           [
             "Nonaktifkan",
@@ -1903,26 +1908,27 @@ const SECTIONS = [
 
       subTitle(w, "Memperbaiki nama, SKU, atau harga beli");
       bullets(w, [
-        "Tekan Atur harga pada baris produknya. Selain harga dan kategori, kartu itu memuat kolom Nama produk, SKU, dan Harga beli.",
-        "Ubah yang perlu, lalu tekan Simpan harga. Hanya kolom yang benar-benar berubah yang disimpan - notis di bawah tabel menyebutkannya satu per satu.",
+        "Tekan Ubah produk pada baris produknya. Kartu yang terbuka di atas daftar memakai susunan kolom yang sama dengan form Produk baru: Nama produk, SKU, Kategori, Subkategori, Harga jual, Harga beli, Satuan dasar, lalu stok saat ini sebagai bacaan.",
+        "Ubah yang perlu, lalu tekan Simpan perubahan. Hanya kolom yang benar-benar berubah yang disimpan - notis di bawah tabel menyebutkannya satu per satu.",
         "Harga jual tidak ikut berubah oleh kolom itu, dan harga beli hanya dipakai menghitung margin, bukan harga yang dibayar pelanggan.",
         "SKU harus unik di dalam satu workspace; SKU yang sudah dipakai produk lain ditolak, termasuk kalau hanya berbeda huruf besar-kecil.",
-        "Mengganti Kategori tetap jalur tersendiri: kode di tengah SKU buatan sistem ikut menyesuaikan, sedangkan SKU yang Anda ketik sendiri tidak pernah diubah.",
+        "Mengganti Kategori tidak mengubah SKU: format otomatisnya PBB-<nomor urut> (contoh PBB-0000042) tanpa kode kategori, dan SKU yang Anda ketik sendiri juga tidak pernah diubah.",
+        "Kalau SKU-nya sendiri perlu diganti, tombol Buat otomatis di samping kolom SKU menawarkan nomor berikutnya dari daftar SKU yang sudah ada. Isi kolomnya tidak langsung diganti: halaman lebih dulu menampilkan konfirmasi berisi SKU lama dan nomor barunya, lalu Anda memilih Ya, ganti SKU atau Batal. Setelah dikonfirmasi pun, perubahannya baru tersimpan setelah Simpan perubahan - kalau dibatalkan, SKU lama tetap dipakai.",
       ]);
 
       subTitle(w, "Menghentikan penjualan tanpa kehilangan data");
       bullets(w, [
         "Tekan Nonaktifkan pada baris produknya. Baris itu langsung bertanda Nonaktif, dan judul tabel tetap menghitung berapa produk yang aktif.",
         "Produk nonaktif hilang dari kasir dan dari katalog penjualan, termasuk kalau keranjang di perangkat lama masih menyimpannya - penjualannya ditolak server.",
-        "Stok, riwayat penjualan, dokumen supplier, dan kartu Atur harga-nya tetap ada. Menyalakannya kembali cukup satu tombol Aktifkan.",
+        "Stok, riwayat penjualan, dokumen supplier, dan kartu Ubah produk-nya tetap ada. Menyalakannya kembali cukup satu tombol Aktifkan.",
         "Memasukkan produk ke kategori yang dinonaktifkan berbeda halnya: itu urusan kategori, bukan status produknya.",
       ]);
 
       subTitle(w, "Menghapus produk - dan kenapa sering ditolak");
       bullets(w, [
-        "Tekan Hapus pada baris produknya. Dialog konfirmasi menampilkan hasil pemeriksaan server: produknya layak dihapus atau tidak, beserta alasannya.",
+        "Tekan Hapus pada baris produknya. Kartu Hapus produk yang terbuka di atas daftar memakai pola yang sama dengan form Produk baru, dan menampilkan hasil pemeriksaan server: produknya layak dihapus atau tidak, beserta alasannya.",
         "Produk dengan stok tersisa, pernah terjual, punya pergerakan stok, dipakai dokumen pembelian, atau ikut sesi opname tidak bisa dihapus - struk, buku besar stok, dan dokumen supplier lamanya harus tetap bisa dibuka.",
-        "Untuk produk seperti itu, dialognya menawarkan Nonaktifkan saja: produknya berhenti dijual tanpa satu pun catatan yang menggantung.",
+        "Untuk produk seperti itu, kartunya menawarkan Nonaktifkan saja: produknya berhenti dijual tanpa satu pun catatan yang menggantung.",
         "Kalau produknya memang belum pernah dipakai, tombol Hapus produk aktif dan produknya benar-benar dibuang beserta gambarnya.",
       ]);
       callout(w, "Ragu antara menghapus dan menonaktifkan? Pilih nonaktifkan", [
@@ -2000,7 +2006,7 @@ const SECTIONS = [
         [
           [
             "SKU",
-            "Kode unik produk di dalam satu workspace. Dikosongkan berarti dibuat otomatis dengan format PBB-<KATEGORI>-<nomor urut> (contoh PBB-SAN-000042).",
+            "Kode unik produk di dalam satu workspace. Dikosongkan berarti dibuat otomatis dengan format PBB-<nomor urut> (contoh PBB-0000042).",
           ],
           [
             "Lokasi jual",
@@ -2038,7 +2044,7 @@ const SECTIONS = [
         "bun scripts/verify-inventory.mjs     # gudang + perpindahan stok",
         "bun scripts/verify-purchasing.mjs    # rantai PR / PO / GRN",
         "bun scripts/verify-opname.mjs        # opname + bukti selisih",
-        "bun scripts/verify-product-sku.mjs   # SKU otomatis PBB-<KATEGORI>-<nomor>",
+        "bun scripts/verify-product-sku.mjs   # SKU otomatis PBB-<nomor urut>",
         "bun scripts/verify-product-edit.mjs  # ubah produk, aktif/nonaktif, pagar hapus",
         "bun scripts/verify-tax.mjs           # tarif PPN + aktif/nonaktifnya",
         "bun scripts/verify-struk.mjs         # struk: printer, kertas, logo, kasir",
@@ -2313,7 +2319,7 @@ const FIGURES = {
     {
       height: 244,
       caption:
-        "Gambar 3 - Ilustrasi panel Sesuaikan stok: tombol di baris produk (1), jumlah penyesuaian (2), catatan (3), dan tombol simpan (4).",
+        "Gambar 3 - Ilustrasi kartu Sesuaikan stok di atas daftar: tombol di baris produk (1), jumlah penyesuaian (2), catatan (3), dan tombol simpan di bawah kartu (4).",
       draw: figureAdjustStock,
     },
   ],

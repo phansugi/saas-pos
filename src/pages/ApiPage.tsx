@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   AlertTriangle,
@@ -26,13 +26,14 @@ import { PERMISSION_LABELS, ROLE_LABELS, type Permission } from "@/lib/authz";
 import {
   API_KEY_EXPIRY_OPTIONS,
   API_RESOURCES,
-  API_SCOPE_OPTIONS,
+  API_SCOPE_OPTIONS_UNIQUE,
   maskApiKey,
   validateApiKeyInput,
 } from "@/lib/apiKeys";
 import {
   sanitizeWebhookEvents,
   validateWebhookEndpoint,
+  validateWebhookSecret,
   WEBHOOK_EVENTS,
 } from "@/lib/webhooks";
 import {
@@ -72,10 +73,12 @@ export function ApiPage() {
     webhookSummary,
     createApiKey,
     revokeApiKey,
+    purgeRevokedApiKeys,
     createWebhookEndpoint,
     updateWebhookEndpoint,
     removeWebhookEndpoint,
     testWebhookEndpoint,
+    retryWebhookDelivery,
     modules,
   } = useStore();
   const { session } = useSession();
@@ -95,12 +98,45 @@ export function ApiPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Id kunci yang menunggu konfirmasi — mencabut berarti menghapus permanen. */
+  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
+
+  /*
+    Baris kunci yang dicabut **cara lama** (ditandai `active: false`, bukan
+    dihapus) bisa tertinggal di workspace yang sudah berjalan sebelum aturan baru.
+    Halaman ini membersihkannya sendiri sekali saat dibuka oleh pemegang
+    `api.manage`, jadi tidak ada kunci mati yang menetap hanya karena pemilik
+    tidak menekan tombol pembersih. Tombol manual tetap ada sebagai cadangan bila
+    pembersihan otomatis gagal.
+  */
+  const autoPurged = useRef(false);
+  useEffect(() => {
+    if (autoPurged.current) return;
+    if (!canManage || busy || apiKeySummary.revoked === 0) return;
+    autoPurged.current = true;
+    void purgeRevokedApiKeys()
+      .then((result) => {
+        if (result.removed > 0) setNotice(result.sentence);
+      })
+      .catch((cause) =>
+        setError(cause instanceof Error ? cause.message : String(cause)),
+      );
+  }, [apiKeySummary.revoked, busy, canManage, purgeRevokedApiKeys]);
   const [freshKey, setFreshKey] = useState<{ name: string; plaintext: string } | null>(
     null,
   );
   const [freshSecret, setFreshSecret] = useState<{ url: string; secret: string } | null>(
     null,
   );
+  /**
+   * Rahasia yang **diketik pemilik**: nilai yang sama dengan yang disimpan
+   * penerimanya. Dibuka lewat tombol di baris endpoint; hanya satu baris yang
+   * boleh terbuka supaya tidak ada dua kolom rahasia sekaligus di layar.
+   */
+  const [secretDraft, setSecretDraft] = useState<{
+    endpointId: string;
+    value: string;
+  } | null>(null);
   const [keyForm, setKeyForm] = useState({
     name: "",
     scopes: [] as Permission[],
@@ -114,7 +150,7 @@ export function ApiPage() {
 
   /** Scope yang boleh dipilih: hanya yang **juga** dipegang pengguna ini. */
   const selectableScopes = useMemo(
-    () => API_SCOPE_OPTIONS.filter((option) => permissions.includes(option.permission)),
+    () => API_SCOPE_OPTIONS_UNIQUE.filter((option) => permissions.includes(option.permission)),
     [permissions],
   );
 
@@ -133,6 +169,11 @@ export function ApiPage() {
         },
       ),
     [apiKeys, apiKeySummary.active, keyForm, permissions],
+  );
+
+  const secretPreview = useMemo(
+    () => (secretDraft ? validateWebhookSecret(secretDraft.value) : null),
+    [secretDraft],
   );
 
   const endpointPreview = useMemo(
@@ -157,6 +198,58 @@ export function ApiPage() {
       .catch((cause) =>
         setError(cause instanceof Error ? cause.message : String(cause)),
       )
+      .finally(() => setBusy(false));
+  }
+
+  /**
+   * Kirim ulang satu kiriman yang menunggu/menyerah — jalur penyembuhan setelah
+   * penerimanya diperbaiki (mis. rahasia penanda tangan baru dicocokkan).
+   * Kiriman yang sudah `delivered` tidak ditawarkan tombolnya sejak awal; server
+   * tetap menolaknya kalau tetap dipaksa, jadi tidak ada kiriman ganda.
+   */
+  function kirimUlang(deliveryId: string, event: string) {
+    if (busy || !canManage) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    retryWebhookDelivery(deliveryId)
+      .then((result) =>
+        setNotice(
+          result.status === "delivered"
+            ? `Kiriman ${event} terkirim ulang ke penerimanya.`
+            : `Kiriman ${event} dikirim ulang, tetapi penerimanya belum menerima (${result.error ?? "tanpa keterangan"}); percobaan berikutnya dijadwalkan.`,
+        ),
+      )
+      .catch((cause) =>
+        setError(cause instanceof Error ? cause.message : String(cause)),
+      )
+      .finally(() => setBusy(false));
+  }
+
+  /**
+   * Memakai rahasia yang **sama dengan penerima** — jalan keluar dari kiriman
+   * yang berhenti di 401 “tanda tangan tidak cocok”. Rahasianya tidak ditampilkan
+   * lagi sesudah tersimpan: pemilik sudah memegangnya dari sisi penerima.
+   */
+  function pakaiRahasiaPenerima(endpointId: string, url: string) {
+    if (busy || !canManage || !secretDraft) return;
+    const check = validateWebhookSecret(secretDraft.value);
+    if (!check.ok) {
+      setError(check.reason);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    updateWebhookEndpoint({ endpointId, secret: check.value })
+      .then(() => {
+        setSecretDraft(null);
+        setFreshSecret(null);
+        setNotice(
+          `Rahasia endpoint ${url} kini memakai nilai dari penerima. Kirim uji — kalau penerimanya menerima, kiriman yang tertinggal bisa dikirim ulang.`,
+        );
+      })
+      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
       .finally(() => setBusy(false));
   }
 
@@ -371,7 +464,9 @@ export function ApiPage() {
             Kirim kunci di header <code>Authorization: Bearer mp_…</code>. HTTP action
             Convex dilayani di domain <code>&lt;deployment&gt;.convex.site</code>. Baris
             bertanda <strong>tulis</strong> mengubah data tenant, jadi kuncinya perlu scope
-            itu secara sadar.
+            itu secara sadar. Endpoint <code>POST /api/v1/webhooks</code> mendaftarkan
+            <strong>webhook masuk</strong> (platform mitra → MesinPOS), arah kebalikan dari
+            endpoint webhook di bawah.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -464,9 +559,35 @@ export function ApiPage() {
           <CardDescription>
             Scope kunci tidak boleh melebihi izin pembuatnya. Kunci buatan anggota yang
             perannya diturunkan (atau dikeluarkan dari tim) langsung berhenti bekerja.
+            Mencabut kunci <strong>menghapusnya</strong> dari daftar ini; jejak
+            pencabutannya tetap tersimpan di log audit.
           </CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-3">
+          {apiKeySummary.revoked > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-accent/40 bg-accent/10 px-3 py-2">
+              <p className="text-xs text-muted-foreground">
+                Ada <strong>{apiKeySummary.revoked}</strong> kunci yang sudah dicabut
+                dengan cara lama (barisnya masih tersimpan). Hapus permanen supaya
+                daftar ini tidak menyimpan kunci mati.
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                className="shrink-0 gap-2"
+                disabled={busy || !canManage}
+                onClick={() =>
+                  run(async () => {
+                    const result = await purgeRevokedApiKeys();
+                    return result.sentence;
+                  }, "Kunci lama yang sudah dicabut dihapus.")
+                }
+              >
+                <Trash2 className="size-4" />
+                Hapus kunci dicabut
+              </Button>
+            </div>
+          )}
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-left text-xs uppercase tracking-wide text-muted-foreground">
@@ -521,24 +642,52 @@ export function ApiPage() {
                       </Badge>
                     </td>
                     <td className="px-2 py-2 text-right">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={busy || !canManage || key.status !== "active"}
-                        title={
-                          key.status === "active"
-                            ? "Cabut kunci ini"
-                            : "Kunci sudah tidak aktif"
-                        }
-                        onClick={() =>
-                          run(
-                            () => revokeApiKey(key.id),
-                            `Kunci ${key.name} dicabut.`,
-                          )
-                        }
-                      >
-                        Cabut
-                      </Button>
+                      {confirmRevoke === key.id ? (
+                        <div className="flex justify-end gap-1">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="gap-1 border-destructive/50 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                            disabled={busy || !canManage}
+                            onClick={() => {
+                              setConfirmRevoke(null);
+                              run(
+                                () => revokeApiKey(key.id),
+                                `Kunci ${key.name} dicabut dan dihapus permanen.`,
+                              );
+                            }}
+                          >
+                            <Trash2 className="size-3.5" />
+                            Ya, hapus
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={busy}
+                            onClick={() => setConfirmRevoke(null)}
+                          >
+                            Batal
+                          </Button>
+                        </div>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={busy || !canManage || key.status !== "active"}
+                          title={
+                            key.status === "active"
+                              ? "Cabut & hapus kunci ini"
+                              : "Kunci sudah tidak aktif"
+                          }
+                          onClick={() => {
+                            setConfirmRevoke(key.id);
+                            setError(null);
+                            setNotice(null);
+                          }}
+                        >
+                          Cabut
+                        </Button>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -786,6 +935,22 @@ export function ApiPage() {
                     size="sm"
                     variant="ghost"
                     disabled={busy || !canManage}
+                    title="Pakai rahasia penanda tangan dari penerima"
+                    data-testid={`webhook-secret-toggle-${endpoint.id}`}
+                    onClick={() =>
+                      setSecretDraft((current) =>
+                        current?.endpointId === endpoint.id
+                          ? null
+                          : { endpointId: endpoint.id, value: "" },
+                      )
+                    }
+                  >
+                    <KeyRound />
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy || !canManage}
                     title="Hapus endpoint beserta riwayat kirimannya"
                     onClick={() =>
                       run(
@@ -798,6 +963,62 @@ export function ApiPage() {
                   </Button>
                 </div>
               </div>
+              {secretDraft?.endpointId === endpoint.id && (
+                <div className="mt-3 space-y-2 rounded-lg border border-dashed border-border/70 bg-background/40 p-3">
+                  <div className="text-xs font-semibold">
+                    Rahasia penanda tangan dari penerima
+                  </div>
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    Kalau penerima menjawab “tanda tangan tidak cocok”, isi di sini
+                    nilai yang <strong>sama persis</strong> dengan yang disimpan
+                    penerimanya (mis. kolom rahasia MesinPOS di Pengaturan
+                    marketplace). Rahasia yang dibuat MesinPOS hanya tampil sekali saat
+                    dibuat/diputar, jadi cara ini menyamakan kedua sisi tanpa memutar
+                    yang baru.
+                  </p>
+                  <Input
+                    type="text"
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="font-mono text-xs"
+                    placeholder="mis. 32–128 karakter tanpa spasi"
+                    data-testid={`webhook-secret-input-${endpoint.id}`}
+                    value={secretDraft.value}
+                    onChange={(event) =>
+                      setSecretDraft({
+                        endpointId: endpoint.id,
+                        value: event.target.value,
+                      })
+                    }
+                  />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      className="gap-1.5"
+                      data-testid={`webhook-secret-save-${endpoint.id}`}
+                      disabled={
+                        busy || !canManage || !secretPreview || !secretPreview.ok
+                      }
+                      onClick={() => pakaiRahasiaPenerima(endpoint.id, endpoint.url)}
+                    >
+                      <KeyRound />
+                      Pakai rahasia ini
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setSecretDraft(null)}
+                    >
+                      Batal
+                    </Button>
+                    {secretDraft.value.length > 0 && secretPreview && !secretPreview.ok && (
+                      <span className="text-xs text-destructive">
+                        {secretPreview.reason}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
               <div className="mt-2 flex flex-wrap gap-1">
                 {endpoint.events.map((event) => (
                   <span
@@ -931,6 +1152,7 @@ export function ApiPage() {
                   <th className="px-2 py-2 text-right">Percobaan</th>
                   <th className="px-2 py-2">Percobaan berikutnya</th>
                   <th className="px-2 py-2">Keterangan</th>
+                  <th className="px-2 py-2">Aksi</th>
                 </tr>
               </thead>
               <tbody>
@@ -967,12 +1189,30 @@ export function ApiPage() {
                           ? `Penerima menjawab ${delivery.lastStatusCode}.`
                           : "—")}
                     </td>
+                    <td className="px-2 py-2">
+                      {delivery.status === "delivered" ? (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      ) : (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="gap-1.5"
+                          data-testid={`webhook-retry-${delivery.id}`}
+                          disabled={busy || !canManage}
+                          onClick={() => kirimUlang(delivery.id, delivery.event)}
+                        >
+                          <RefreshCw className="size-3.5" />
+                          Kirim ulang
+                        </Button>
+                      )}
+                    </td>
                   </tr>
                 ))}
                 {webhookDeliveries.length === 0 && (
                   <tr>
                     <td
-                      colSpan={6}
+                      colSpan={7}
                       className="px-2 py-4 text-center text-sm text-muted-foreground"
                     >
                       Belum ada kiriman tercatat.

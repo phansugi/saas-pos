@@ -187,10 +187,10 @@ try {
     "/src/components/ErrorBoundary.tsx",
   );
 
-  function providers(page) {
+  function providersAt(initialEntry, page) {
     return React.createElement(
       MemoryRouter,
-      { initialEntries: ["/app"] },
+      { initialEntries: [initialEntry] },
       React.createElement(
         SessionProvider,
         null,
@@ -201,6 +201,10 @@ try {
         ),
       ),
     );
+  }
+
+  function providers(page) {
+    return providersAt("/app", page);
   }
 
   // 1. Beranda publik.
@@ -1050,7 +1054,7 @@ try {
     // Pengaturan workspace (PPN): halaman yang setelannya mengubah angka di
     // setiap struk dan di tagihan langganan.
     ["SettingsPage", "/src/pages/SettingsPage.tsx", "Setelan PPN"],
-    ["ProductsPage", "/src/pages/ProductsPage.tsx", "Atur harga"],
+    ["ProductsPage", "/src/pages/ProductsPage.tsx", "Ubah produk"],
     ["PosPage", "/src/pages/PosPage.tsx", "Keranjang kosong"],
     ["DashboardPage", "/src/pages/DashboardPage.tsx", null],
     ["SubscriptionPage", "/src/pages/SubscriptionPage.tsx", null],
@@ -2098,12 +2102,25 @@ try {
     withFnbSession();
     // Blok ini justru menguji pengingatnya, jadi pengingat sesi uji umum dinyalakan.
     withShiftReminderOn();
+    /*
+      “Kemarin” dihitung dari tanggal kalender, bukan “26 jam ke belakang”: pada
+      pukul 00.00–01.59, 26 jam lalu sudah jatuh dua hari sebelumnya, dan label
+      halaman yang benar (“21 Okt 23:19”) membuat uji ini gagal tanpa ada yang
+      salah di aplikasinya. Jam 08.00 kemarin selalu lebih dari ambang 14 jam dan
+      tetap terbaca “kemarin” sepanjang hari.
+    */
+    const kemarinPukulDelapan = (() => {
+      const lalu = new Date();
+      lalu.setDate(lalu.getDate() - 1);
+      lalu.setHours(8, 0, 0, 0);
+      return lalu.toISOString();
+    })();
     window.localStorage.setItem(
       SHIFT_KEY,
       JSON.stringify({
         current: {
           id: "shift-uji",
-          openedAt: new Date(Date.now() - 26 * 3600 * 1000).toISOString(),
+          openedAt: kemarinPukulDelapan,
           openingCash: 300000,
           cashSales: 1250000,
           totalSales: 1500000,
@@ -7145,8 +7162,7 @@ try {
       text.includes("Melihat laporan") &&
         text.includes("Melihat hutang usaha") &&
         text.includes("aktif") &&
-        text.includes("dicabut") &&
-        text.includes("tanpa kedaluwarsa"),
+        !text.includes("dicabut"),
       text.slice(0, 600),
     );
     check(
@@ -7198,6 +7214,66 @@ try {
       text.includes("2 kunci aktif") && text.includes("1 endpoint"),
       text.slice(0, 300),
     );
+
+    // Aksi di halaman yang menutup lingkaran “stok tidak sampai ke marketplace”:
+    // kiriman yang menyerah bisa dikirim ulang, dan rahasia penanda tangan bisa
+    // disamakan dengan nilai yang dipegang penerimanya.
+    const laman = await renderInteractive(providers(React.createElement(ApiPage, null)));
+    await React.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    check(
+      "riwayat menawarkan kirim ulang hanya untuk kiriman yang belum sampai",
+      laman.query('[data-testid="webhook-retry-whd-3"]') !== null &&
+        laman.query('[data-testid="webhook-retry-whd-2"]') !== null &&
+        laman.query('[data-testid="webhook-retry-whd-1"]') === null,
+      laman.text().slice(0, 500),
+    );
+    await laman.clickOn('[data-testid="webhook-retry-whd-3"]');
+    await React.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    check(
+      "kiriman yang menyerah bisa dikirim ulang dan barisnya menjadi terkirim",
+      laman.query('[data-testid="webhook-retry-whd-3"]') === null &&
+        laman.text().includes("terkirim"),
+      laman.text().slice(0, 500),
+    );
+
+    await laman.clickOn('[data-testid="webhook-secret-toggle-wh-gudang"]');
+    check(
+      "form rahasia dari penerima terbuka di baris endpoint",
+      laman.query('[data-testid="webhook-secret-input-wh-gudang"]') !== null &&
+        laman.text().includes("Rahasia penanda tangan dari penerima"),
+      laman.text().slice(0, 500),
+    );
+    await laman.fill('[data-testid="webhook-secret-input-wh-gudang"]', "pendek");
+    check(
+      "rahasia terlalu pendek ditolak sebelum disimpan",
+      laman.text().includes("Rahasia minimal 16 karakter") &&
+        Boolean(laman.query('[data-testid="webhook-secret-save-wh-gudang"]')?.disabled),
+      laman.text().slice(0, 500),
+    );
+    await laman.fill(
+      '[data-testid="webhook-secret-input-wh-gudang"]',
+      "RahasiaBersamaDariPenerima123",
+    );
+    await laman.clickOn('[data-testid="webhook-secret-save-wh-gudang"]');
+    await React.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    check(
+      "rahasia dari penerima tersimpan & hanya 4 karakter terakhir yang tampil",
+      laman.text().includes("a123") &&
+        laman.text().includes("memakai nilai dari penerima"),
+      laman.text().slice(0, 600),
+    );
+    check(
+      "kirim ulang & rahasia penerima tidak menghasilkan error konsol",
+      laman.newErrors().length === 0,
+      laman.newErrors().join(" | ").slice(0, 200),
+    );
+    await laman.unmount();
     check(
       "halaman API & Webhook tanpa error konsol",
       newErrors.length === 0,
@@ -7297,7 +7373,9 @@ try {
             }
           }
 
-          // Mencabut kunci selalu boleh, dan kunci mati tidak bisa dicabut dua kali.
+          // Mencabut kunci selalu boleh: barisnya dihapus, jadi percobaan kedua
+          // tidak menemukannya lagi. Baris lama yang dulu dicabut dengan cara
+          // menandai `active: false` dibersihkan lewat pembersih terpisah.
           if (facts.current.keyId) {
             try {
               await store.revokeApiKey(facts.current.keyId);
@@ -7307,6 +7385,8 @@ try {
               } catch (error) {
                 facts.current.dobbel = error.message;
               }
+              const purge = await store.purgeRevokedApiKeys();
+              facts.current.purge = purge.removed;
             } catch (error) {
               facts.current.cabut_error = error.message;
             }
@@ -7345,6 +7425,10 @@ try {
           ` status_kunci=${String(key?.status ?? "?")}` +
           ` pembuat=${String(key?.creatorRole ?? "?")}` +
           ` dobbel=${String(facts.current.dobbel ?? "-").replace(/\s+/g, "_")}` +
+          ` purge=${String(facts.current.purge ?? "-")}` +
+          ` revoked_sisa=${
+            store.apiKeys.filter((row) => row.status === "revoked").length
+          }` +
           ` riwayat=${store.webhookDeliveries.length}`,
       );
     }
@@ -7355,7 +7439,16 @@ try {
     );
     check(
       "kunci baru dibuat, rahasianya sekali tampil & scope ganda dibuang",
-      apiFacts.kunci === "mp_" && apiFacts.scope === "1" && apiFacts.total_kunci === "4",
+      apiFacts.kunci === "mp_" && apiFacts.scope === "1",
+      JSON.stringify(apiFacts),
+    );
+    check(
+      "pencabutan menghapus baris kunci tanpa menyisakan kunci dicabut",
+      apiFacts.total_kunci === "2" &&
+        apiFacts.status_kunci === "?" &&
+        apiFacts.revoked_sisa === "0" &&
+        apiFacts.purge === "0" &&
+        (apiFacts.dobbel ?? "").includes("tidak_ditemukan"),
       JSON.stringify(apiFacts),
     );
     check(
@@ -7387,9 +7480,7 @@ try {
     check(
       "hapus endpoint membuang riwayatnya, cabut kunci selalu boleh (sekali)",
       apiFacts.riwayat === "1" &&
-        apiFacts.status_kunci === "revoked" &&
-        apiFacts.pembuat === "owner" &&
-        (apiFacts.dobbel ?? "").includes("sudah_dicabut") &&
+        (apiFacts.dobbel ?? "").includes("tidak_ditemukan") &&
         act.newErrors.length === 0,
       JSON.stringify(apiFacts),
     );
@@ -9646,6 +9737,21 @@ try {
       ui.text().includes("Jumlah penyesuaian") && ui.text().includes("Stok jadi 50"),
       ui.text().slice(-300),
     );
+    {
+      // Pola kartu yang sama dengan Produk baru/Ubah produk: satu kartu di atas
+      // daftar (bukan baris tambahan di dalam tabel), berjudul, punya tombol tutup,
+      // dan keputusan simpan berada di bawah isinya.
+      const kartuStok = ui.query('[aria-label="Tutup kartu sesuaikan stok"]');
+      const tabelProduk = ui.query("table");
+      check(
+        "kartu Sesuaikan stok memakai pola kartu yang sama dan berada di atas daftar",
+        Boolean(kartuStok) &&
+          Boolean(ui.query('[aria-label="Simpan penyesuaian stok Kopi Uji Stok"]')) &&
+          Boolean(tabelProduk) &&
+          (kartuStok.compareDocumentPosition(tabelProduk) & 4) !== 0,
+        ui.text().slice(-300),
+      );
+    }
 
     await ui.fill('[aria-label="Jumlah penyesuaian stok Kopi Uji Stok"]', "-3");
     await ui.fill('[aria-label="Catatan penyesuaian stok Kopi Uji Stok"]', "Rusak saat pengiriman");
@@ -9655,12 +9761,13 @@ try {
       ui.text().slice(-200),
     );
 
-    /** Tombol simpan di dalam panel: labelnya sama dengan toggle barisnya. */
+    /**
+     * Tombol simpan di dalam kartu Sesuaikan stok. Teksnya sama dengan tombol baris
+     * (“Sesuaikan stok”), jadi yang membedakan adalah label ARIA-nya — kartunya kini
+     * di atas daftar, bukan baris tambahan di dalam tabel.
+     */
     function tombolSimpanPanel() {
-      return ui
-        .queryAll("button")
-        .filter((button) => (button.textContent ?? "").trim() === "Sesuaikan stok")
-        .at(-1);
+      return ui.query('[aria-label="Simpan penyesuaian stok Kopi Uji Stok"]');
     }
 
     const simpan = tombolSimpanPanel();
@@ -9695,8 +9802,39 @@ try {
     //     berkas ke-9, lalu hapus satu dan pakai lagi slot yang bebas. Semua lewat
     //     elemen yang sama dengan yang dipakai pemilik toko — bukan dengan
     //     memanggil store langsung. Kartu **tambah** sudah diuji di atas.
+    // Kartu **Modifier produk** juga satu kartu di atas daftar; membukanya menutup
+    // kartu Sesuaikan stok yang masih terbuka (satu kartu pada satu waktu).
+    await clickSelector('[aria-label="Modifier Kopi Uji Stok"]');
+    {
+      const kartuModifier = ui.query('[aria-label="Tutup kartu modifier produk"]');
+      const tabelProduk = ui.query("table");
+      check(
+        "kartu Modifier produk memakai pola kartu yang sama dan menutup kartu stok",
+        Boolean(kartuModifier) &&
+          !ui.query('[aria-label="Jumlah penyesuaian stok Kopi Uji Stok"]') &&
+          ui.text().includes("Modifier produk") &&
+          ui.text().includes("Pilihan tambahan untuk") &&
+          Boolean(tabelProduk) &&
+          (kartuModifier.compareDocumentPosition(tabelProduk) & 4) !== 0,
+        ui.text().slice(-320),
+      );
+    }
+    await ui.click("Batal");
+    check(
+      "membatalkan kartu Modifier menutupnya tanpa mengubah produk",
+      !ui.query('[aria-label="Tutup kartu modifier produk"]') &&
+        stockFacts.products.filter((product) => product.sku === "KOPIUJI").length === 1,
+      ui.text().slice(-200),
+    );
+
     await clickSelector('[aria-label="Sesuaikan stok Kopi Uji Stok"]');
-    await clickSelector('[aria-label="Atur harga Kopi Uji Stok"]');
+    await clickSelector('[aria-label="Ubah produk Kopi Uji Stok"]');
+    check(
+      "membuka kartu Ubah produk menutup kartu Sesuaikan stok",
+      !ui.query('[aria-label="Simpan penyesuaian stok Kopi Uji Stok"]') &&
+        Boolean(ui.query('[aria-label="Kategori produk Kopi Uji Stok"]')),
+      ui.text().slice(-240),
+    );
     const kopiGambar = () => stockFacts.products.find((product) => product.sku === "KOPIUJI");
     check(
       "kartu edit produk memuat bagian gambar dengan dua gambar yang tadi dipilih",
@@ -9756,11 +9894,11 @@ try {
       String(kopiGambar()?.images.length),
     );
 
-    // 4e. SKU otomatis `PBB-<KATEGORI>-<nomor urut>`: kolom SKU boleh dibiarkan
-    //     kosong — yang membuat nomornya store/server — dan tombol di sebelahnya
-    //     mengisi kolom dari daftar SKU yang sudah ada supaya pemilik toko bisa
-    //     melihatnya sebelum menyimpan. Keduanya diklik lewat elemen yang sama
-    //     dengan yang dipakai pemilik toko.
+    // 4e. SKU otomatis `PBB-<nomor urut>`: kolom SKU boleh dibiarkan kosong — yang
+    //     membuat nomornya store/server — dan tombol di sebelahnya mengisi kolom
+    //     dari daftar SKU yang sudah ada supaya pemilik toko bisa melihatnya
+    //     sebelum menyimpan. Keduanya diklik lewat elemen yang sama dengan yang
+    //     dipakai pemilik toko.
     await ui.click("Tambah produk");
     const kolomSku = () => ui.query('[aria-label="SKU produk baru"]');
     const tombolSku = () => ui.query('[aria-label="Buat SKU otomatis"]');
@@ -9769,7 +9907,7 @@ try {
       Boolean(kolomSku()) &&
         Boolean(tombolSku()) &&
         ui.text().includes("dibuat otomatis & unik") &&
-        ui.text().includes("PBB-<KATEGORI>-<nomor urut>"),
+        ui.text().includes("PBB-<nomor urut>"),
       ui.text().slice(-300),
     );
     check(
@@ -9781,9 +9919,9 @@ try {
     await clickSelector('[aria-label="Buat SKU otomatis"]');
     const skuSaran = kolomSku()?.value ?? "";
     check(
-      "tombol mengisi kolom dengan SKU berseri PBB-<KATEGORI>-<nomor urut>",
+      "tombol mengisi kolom dengan SKU berseri PBB-<nomor urut>",
       // Nilainya dibaca dari kolomnya: isi `<input>` tidak ikut `textContent`.
-      /^PBB-[A-Z0-9]{3}-\d{6}$/.test(skuSaran),
+      /^PBB-\d{7}$/.test(skuSaran),
       `value="${skuSaran}"`,
     );
     check(
@@ -9815,7 +9953,7 @@ try {
     );
     check(
       "menyimpan dengan kolom SKU kosong membuat SKU otomatis yang unik",
-      /^PBB-UMU-\d{6}$/.test(otomatis?.sku ?? "") &&
+      /^PBB-\d{7}$/.test(otomatis?.sku ?? "") &&
         !skuSebelum.includes(otomatis?.sku ?? "") &&
         new Set(stockFacts.products.map((product) => product.sku)).size ===
           stockFacts.products.length,
@@ -9832,13 +9970,9 @@ try {
       `${skuSaran} vs ${otomatis?.sku}`,
     );
 
-    // 4f. Kategori menentukan **kode di tengah** SKU, jadi mengubahnya harus ikut
-    //     mengubah SKU: selama isi kolom berasal dari tombol Buat otomatis, SKU-nya
-    //     mengikuti kategori baru (nomornya dipertahankan). SKU yang diketik pemilik
-    //     toko berhenti mengikuti dan tidak pernah ditimpa.
-    const { productSkuCategoryCode } = await server.ssrLoadModule(
-      "/src/convex/lib/productSku.ts",
-    );
+    // 4f. Kategori **tidak** menentukan SKU. Formatnya `PBB-<nomor urut>`, jadi
+    //     mengganti kategori setelah tombol Buat otomatis dipakai tidak menimpa
+    //     nomor yang sudah tampil — dan SKU yang diketik pemilik toko tetap utuh.
 
     /** Memilih opsi `<select>` seperti pengguna (React mendengarkan event `change`). */
     async function pilihOpsi(selector, value) {
@@ -9868,21 +10002,18 @@ try {
     );
 
     await clickSelector('[aria-label="Buat SKU otomatis"]');
-    const skuTanpaKategori = kolomSku()?.value ?? "";
+    const skuBerseri = kolomSku()?.value ?? "";
     await pilihOpsi('[aria-label="Kategori produk baru"]', kategoriA);
-    const skuIkutKategori = kolomSku()?.value ?? "";
     check(
-      "mengganti kategori membuat SKU ikut kategori barunya, nomor urutnya tetap",
-      skuTanpaKategori.startsWith("PBB-UMU-") &&
-        skuIkutKategori ===
-          `PBB-${productSkuCategoryCode(kategoriA)}-${skuTanpaKategori.slice(-6)}`,
-      `${skuTanpaKategori} → ${skuIkutKategori} (kategori ${kategoriA})`,
+      "mengganti kategori tidak menimpa SKU yang sudah diisi tombol Buat otomatis",
+      /^PBB-\d{7}$/.test(skuBerseri) && kolomSku()?.value === skuBerseri,
+      `${skuBerseri} → ${kolomSku()?.value} (kategori ${kategoriA})`,
     );
 
     await ui.fill('[aria-label="SKU produk baru"]', "KOPI-MANUAL-01");
     await pilihOpsi('[aria-label="Kategori produk baru"]', kategoriB);
     check(
-      "SKU yang diketik sendiri berhenti mengikuti kategori & tidak ditimpa",
+      "SKU yang diketik sendiri tidak ditimpa saat kategori diganti",
       kolomSku()?.value === "KOPI-MANUAL-01",
       `value="${kolomSku()?.value}" (kategori ${kategoriB})`,
     );
@@ -9904,11 +10035,11 @@ try {
       "produk dengan SKU manual tersimpan",
     );
 
-    // 4g. Kategori juga bisa diubah dari kartu **Atur harga**; di situlah aturan
+    // 4g. Kategori juga bisa diubah dari kartu **Ubah produk**; di situlah aturan
     //     SKU-nya benar-benar berlaku (nilai finalnya datang dari store).
     const produkManual = () =>
       stockFacts.products.find((product) => product.name === "Produk SKU Manual Kategori");
-    await clickSelector('[aria-label="Atur harga Produk SKU Manual Kategori"]');
+    await clickSelector('[aria-label="Ubah produk Produk SKU Manual Kategori"]');
     check(
       "kartu edit menyediakan pilihan Kategori beserta SKU saat ini",
       Boolean(ui.query('[aria-label="Kategori produk Produk SKU Manual Kategori"]')) &&
@@ -9923,9 +10054,9 @@ try {
       `value="${ui.query('[aria-label="Kategori produk Produk SKU Manual Kategori"]')?.value}"`,
     );
 
-    /** Klik Simpan harga lalu tunggu store menyusul; teks UI dikembalikan untuk jejak gagal. */
-    async function simpanHarga(predicate) {
-      await ui.click("Simpan harga");
+    /** Klik Simpan perubahan lalu tunggu store menyusul; teks UI dikembalikan untuk jejak gagal. */
+    async function simpanPerubahan(predicate) {
+      await ui.click("Simpan perubahan");
       for (let attempt = 0; attempt < 40; attempt += 1) {
         if (predicate()) break;
         await React.act(async () => {
@@ -9935,32 +10066,30 @@ try {
       return ui.text();
     }
 
-    const teksManual = await simpanHarga(() => produkManual()?.category === kategoriB);
+    const teksManual = await simpanPerubahan(() => produkManual()?.category === kategoriB);
     check(
       "kategori produk tersimpan dari kartu edit",
       produkManual()?.category === kategoriB,
       `kategori=${produkManual()?.category} | ${teksManual.slice(-260)}`,
     );
     check(
-      "SKU yang diketik sendiri TIDAK ikut berubah saat kategori diganti dari kartu edit",
+      "SKU tidak ikut berubah saat kategori diganti dari kartu edit",
       produkManual()?.sku === "KOPI-MANUAL-01" &&
-        teksManual.includes("diketik sendiri, jadi tidak ikut berubah"),
+        teksManual.includes("SKU KOPI-MANUAL-01 tidak ikut berubah"),
       `${JSON.stringify(produkManual())} | ${teksManual.slice(-220)}`,
     );
 
     const otomatisLama = () =>
       stockFacts.products.find((product) => product.name === "Produk SKU Otomatis");
-    const nomorOtomatis = otomatisLama()?.sku.slice(-6);
-    await clickSelector('[aria-label="Atur harga Produk SKU Otomatis"]');
+    const skuOtomatisAwal = otomatisLama()?.sku;
+    await clickSelector('[aria-label="Ubah produk Produk SKU Otomatis"]');
     await pilihOpsi('[aria-label="Kategori produk Produk SKU Otomatis"]', kategoriB);
-    const teksOtomatis = await simpanHarga(
-      () => otomatisLama()?.sku === `PBB-${productSkuCategoryCode(kategoriB)}-${nomorOtomatis}`,
-    );
+    const teksOtomatis = await simpanPerubahan(() => otomatisLama()?.category === kategoriB);
     check(
-      "SKU buatan sistem ikut kategori baru dari kartu edit (nomor dipertahankan)",
+      "SKU buatan sistem juga tidak ikut berubah saat kategorinya diganti",
       otomatisLama()?.category === kategoriB &&
-        otomatisLama()?.sku === `PBB-${productSkuCategoryCode(kategoriB)}-${nomorOtomatis}` &&
-        teksOtomatis.includes("SKU ikut menyesuaikan dari"),
+        otomatisLama()?.sku === skuOtomatisAwal &&
+        teksOtomatis.includes(`SKU ${skuOtomatisAwal} tidak ikut berubah`),
       `${JSON.stringify(otomatisLama())} | ${teksOtomatis.slice(-260)}`,
     );
     check(
@@ -9977,15 +10106,12 @@ try {
     //     adanya (kode SKU, jumlah produk yang dilepas), dan pagar aturannya tetap
     //     berlaku (nama terlarang, nama kembar).
     {
-      const { categorySkuCode } = await server.ssrLoadModule("/src/lib/categories.ts");
       const kategoriStore = () => stockFacts.store.categories;
       const cariKategori = (nama) => kategoriStore().find((c) => c.name === nama);
       /**
        * Sel-sel satu baris tabel kategori. Barisnya dikenali dari **isi selnya**:
        * sel pertama memuat nama kategori (sejak subkategori bisa dibuat di bawah
-       * kategori, sel ini juga memuat tombol pengelola subkategorinya), sel kedua
-       * kode SKU-nya. Jadi cek “baris menampilkan kode SKU” tidak bergantung pada
-       * apa pun yang kebetulan berada di sel pertama.
+       * kategori, sel ini juga memuat tombol pengelola subkategorinya).
        */
       const barisKategori = (nama) =>
         ui
@@ -9993,10 +10119,7 @@ try {
           .map((row) =>
             [...row.querySelectorAll("td")].map((td) => (td.textContent ?? "").trim()),
           )
-          .find(
-            (cells) =>
-              (cells[0] ?? "").startsWith(nama) && cells[1] === categorySkuCode(nama),
-          );
+          .find((cells) => (cells[0] ?? "").startsWith(nama));
       const opsiKategoriSekarang = () =>
         [...ui.query('[aria-label="Kategori produk baru"]').querySelectorAll("option")]
           .map((option) => option.value);
@@ -10005,7 +10128,8 @@ try {
       check(
         "kartu Kategori produk menyediakan pengelolaan bagi pemilik/manajer",
         ui.text().includes("Kategori produk") &&
-          ui.text().includes("dan susunan tab di kasir") &&
+          ui.text().includes("Kategori menentukan susunan tab di kasir") &&
+          ui.text().includes("SKU produk tidak ikut berubah saat kategori diganti") &&
           Boolean(ui.query('[aria-label="Nama kategori baru"]')),
         ui.text().slice(0, 300),
       );
@@ -10044,11 +10168,11 @@ try {
       {
         const barisKopi = barisKategori("Kopi");
         check(
-          "baris kategori menampilkan kode SKU-nya, bukan hanya namanya",
+          "baris kategori menampilkan nama & jumlah produk",
           barisKopi !== undefined &&
-            barisKopi[1] === categorySkuCode("Kopi") &&
-            barisKopi[0].startsWith("Kopi"),
-          `${JSON.stringify(barisKopi)} (kode ${categorySkuCode("Kopi")})`,
+            barisKopi[0].startsWith("Kopi") &&
+            /^\d+$/.test(barisKopi[1] ?? ""),
+          JSON.stringify(barisKopi),
         );
       }
 
@@ -10057,12 +10181,11 @@ try {
       await clickSelector('[aria-label="Simpan kategori baru"]');
       await tungguSampai(() => Boolean(cariKategori("Sanitasi")), "kategori Sanitasi tersimpan");
       check(
-        "kategori baru tersimpan beserta kode SKU-nya, dan bisa dipilih untuk produk baru",
+        "kategori baru tersimpan, bisa dipilih untuk produk baru, dan tidak mengklaim mengubah SKU",
         cariKategori("Sanitasi")?.active === true &&
           cariKategori("Sanitasi")?.productCount === 0 &&
-          ui.text().includes(
-            `Kategori Sanitasi ditambahkan — kode SKU-nya ${categorySkuCode("Sanitasi")}`,
-          ) &&
+          ui.text().includes("Kategori Sanitasi ditambahkan") &&
+          ui.text().includes("SKU tidak ikut berubah") &&
           opsiKategoriSekarang().includes("Sanitasi"),
         JSON.stringify({ kategori: cariKategori("Sanitasi"), opsi: opsiKategoriSekarang() }),
       );
@@ -10111,9 +10234,9 @@ try {
         JSON.stringify({ sebelum: skuSebelumGantiNama, sesudah: skuSesudahGantiNama }),
       );
       check(
-        "halaman mengatakan kode SKU lama TIDAK ditulis ulang",
-        ui.text().includes(`${categorySkuCode("Kopi")} → ${categorySkuCode("Pangan")}`) &&
-          ui.text().includes("SKU yang sudah ada tidak ditulis ulang"),
+        "halaman mengatakan SKU lama TIDAK ditulis ulang",
+        ui.text().includes("Kategori Kopi menjadi Pangan") &&
+          ui.text().includes("SKU produk tidak ditulis ulang"),
         ui.text().slice(-320),
       );
       await clickSelector('[aria-label="Ubah nama kategori Sanitasi"]');
@@ -10124,10 +10247,9 @@ try {
         "kategori Sanitasi berganti nama panjang",
       );
       check(
-        "ganti nama yang kodenya tetap dijelaskan sebagai tidak berubah",
-        ui.text().includes(
-          `Kode SKU-nya tidak berubah (${categorySkuCode("Sanitasi & Kebersihan")})`,
-        ),
+        "ganti nama kategori juga dijelaskan tidak menyentuh SKU",
+        ui.text().includes("Kategori Sanitasi menjadi Sanitasi & Kebersihan") &&
+          ui.text().includes("nama kategori bukan bagian dari SKU"),
         ui.text().slice(-260),
       );
 
@@ -10153,12 +10275,12 @@ try {
         ui.text().slice(-320),
       );
       // Produk contoh “Kopi Susu Gula Aren” ikut berpindah nama kategorinya, jadi
-      // kartu Atur harga-nya yang dipakai membuktikan kategori nonaktif tetap
+      // kartu Ubah produk-nya yang dipakai membuktikan kategori nonaktif tetap
       // terpilih (tidak diam-diam berpindah ke “Tanpa kategori”).
       const produkDiPangan = stockFacts.products.find(
         (product) => product.category === "Pangan" && product.name === "Kopi Susu Gula Aren",
       );
-      await clickSelector('[aria-label="Atur harga Kopi Susu Gula Aren"]');
+      await clickSelector('[aria-label="Ubah produk Kopi Susu Gula Aren"]');
       check(
         "produk di kategori nonaktif masih menampilkan kategorinya (ditandai nonaktif)",
         Boolean(produkDiPangan) &&
@@ -10171,6 +10293,23 @@ try {
             .includes("Pangan (nonaktif)"),
         ui.text().slice(-260),
       );
+      // Kartu Ubah produk memakai pola form Produk baru: hanya satu form terbuka.
+      // Karena itu form Produk baru tertutup saat kartu ini dibuka — dan sebaliknya.
+      check(
+        "membuka kartu Ubah produk menutup form Produk baru (satu form pada satu waktu)",
+        !ui.query('[aria-label="Kategori produk baru"]') &&
+          ui.text().includes("Ubah produk") &&
+          ui.text().includes("Simpan perubahan") &&
+          ui.text().includes("Stok saat ini"),
+        ui.text().slice(-260),
+      );
+      await ui.click("Tambah produk");
+      check(
+        "membuka form Produk baru kembali menutup kartu Ubah produk",
+        Boolean(ui.query('[aria-label="Kategori produk baru"]')) &&
+          !ui.query('[aria-label="Kategori produk Kopi Susu Gula Aren"]'),
+        ui.text().slice(-260),
+      );
       await clickSelector('[aria-label="Aktifkan kategori Pangan"]');
       await tungguSampai(() => cariKategori("Pangan")?.active === true, "kategori Pangan aktif lagi");
       check(
@@ -10180,17 +10319,16 @@ try {
         ui.text().slice(-260),
       );
 
-      // --- kode SKU yang bentrok diberitahukan -----------------------------
+      // --- kategori kedua untuk uji subkategori ---------------------------
       await ui.fill('[aria-label="Nama kategori baru"]', "Makmur");
       await clickSelector('[aria-label="Simpan kategori baru"]');
       await tungguSampai(() => Boolean(cariKategori("Makmur")), "kategori Makmur tersimpan");
       check(
-        "kategori dengan kode SKU yang sama diberitahukan (bukan dilarang)",
-        categorySkuCode("Makmur") === categorySkuCode("Makanan") &&
-          ui.text().includes(
-            `Kode SKU ${categorySkuCode("Makmur")} dipakai Makanan & Makmur`,
-          ),
-        ui.text().slice(0, 400),
+        "kategori kedua tersimpan tanpa mengganggu SKU produk",
+        cariKategori("Makmur")?.active === true &&
+          new Set(stockFacts.products.map((product) => product.sku)).size ===
+            stockFacts.products.length,
+        JSON.stringify({ kategori: cariKategori("Makmur") }),
       );
 
       // --- subkategori: dibuat di bawah kategori, dipilih di form produk ---
@@ -10513,6 +10651,145 @@ try {
     withoutSession();
   }
 
+  // 4i-bis. Katalog kasir punya saringan dua tingkat: kategori lalu subkategori.
+  //         Yang diperiksa: baris subkategori hanya muncul setelah kategori
+  //         dipilih, pilihannya benar-benar menyaring grid produk, "Semua"
+  //         mengembalikan seluruh produk kategori itu, dan kembali ke "Semua"
+  //         kategori menutup baris subkategori.
+  {
+    withEnterpriseSession();
+    const { PosPage } = await server.ssrLoadModule("/src/pages/PosPage.tsx");
+    const duaTingkat = {};
+
+    function DuaTingkatProbe() {
+      duaTingkat.store = useStore();
+      return null;
+    }
+
+    const pos = await renderInteractive(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(PosPage, null),
+          React.createElement(DuaTingkatProbe, null),
+        ),
+      ),
+    );
+
+    /*
+      Setiap langkah di `act` terpisah: kategori & subkategori harus sudah masuk
+      state store sebelum produk dibuat, karena `createProduct` mencocokkan nama
+      kategori/subkategori dengan katalog yang sedang terbaca — bukan dengan
+      argumen sebelumnya.
+    */
+    let kategoriUji;
+    await React.act(async () => {
+      kategoriUji = await duaTingkat.store.createCategory({ name: "Sanitasi Uji" });
+    });
+    await React.act(async () => {
+      await duaTingkat.store.createSubcategory({ categoryId: kategoriUji.id, name: "Keran" });
+      await duaTingkat.store.createSubcategory({ categoryId: kategoriUji.id, name: "Pipa" });
+    });
+    await React.act(async () => {
+      await duaTingkat.store.createProduct({
+        name: "Keran Air Uji",
+        price: 15_000,
+        category: "Sanitasi Uji",
+        subcategory: "Keran",
+        openingStock: 5,
+      });
+    });
+    await React.act(async () => {
+      await duaTingkat.store.createProduct({
+        name: "Pipa PVC Uji",
+        price: 20_000,
+        category: "Sanitasi Uji",
+        subcategory: "Pipa",
+        openingStock: 5,
+      });
+    });
+
+    const semuaTombol = () => [...pos.queryAll("button")];
+    const tombolBerlabel = (label) =>
+      semuaTombol().find((button) => (button.textContent ?? "").trim() === label);
+    const adaProduk = (nama) =>
+      semuaTombol().some((button) => (button.textContent ?? "").includes(nama));
+    const barisSub = () => pos.query('[data-testid="pos-subkategori"]');
+
+    check(
+      "baris subkategori belum tampil sebelum kategori dipilih",
+      !barisSub() && tombolBerlabel("Sanitasi Uji") !== undefined,
+      semuaTombol()
+        .map((button) => (button.textContent ?? "").trim())
+        .join(" | ")
+        .slice(0, 240),
+    );
+
+    await React.act(async () => {
+      tombolBerlabel("Sanitasi Uji")?.click();
+    });
+    const labelSub = () =>
+      pos
+        .queryAll('[data-testid="pos-subkategori"] button')
+        .map((button) => (button.textContent ?? "").trim());
+    check(
+      "memilih kategori menampilkan pilihan subkategorinya",
+      Boolean(barisSub()) && labelSub().includes("Keran") && labelSub().includes("Pipa"),
+      JSON.stringify(labelSub()),
+    );
+
+    await React.act(async () => {
+      pos
+        .queryAll('[data-testid="pos-subkategori"] button')
+        .find((button) => (button.textContent ?? "").trim() === "Keran")
+        ?.click();
+    });
+    check(
+      "memilih subkategori menyaring grid produk",
+      adaProduk("Keran Air Uji") && !adaProduk("Pipa PVC Uji"),
+      semuaTombol()
+        .map((button) => (button.textContent ?? "").trim())
+        .join(" | ")
+        .slice(0, 260),
+    );
+
+    await React.act(async () => {
+      pos
+        .queryAll('[data-testid="pos-subkategori"] button')
+        .find((button) => (button.textContent ?? "").trim() === "Semua")
+        ?.click();
+    });
+    check(
+      "“Semua” subkategori mengembalikan seluruh produk kategori itu",
+      adaProduk("Keran Air Uji") && adaProduk("Pipa PVC Uji"),
+      semuaTombol()
+        .map((button) => (button.textContent ?? "").trim())
+        .join(" | ")
+        .slice(0, 260),
+    );
+
+    await React.act(async () => {
+      pos
+        .queryAll('[data-testid="pos-filter-katalog"] button')
+        .find((button) => (button.textContent ?? "").trim() === "Semua")
+        ?.click();
+    });
+    check(
+      "kembali ke “Semua” kategori menutup baris subkategori",
+      !barisSub(),
+      JSON.stringify(labelSub()),
+    );
+    check(
+      "filter dua tingkat tanpa error konsol",
+      pos.newErrors().length === 0,
+      pos.newErrors().join(" | ").slice(0, 200),
+    );
+
+    await pos.unmount();
+    withoutSession();
+  }
+
   // 4j. Tanpa izin `category.manage`, halaman tetap bisa dipakai tetapi
   //     kategorinya hanya bisa dilihat: staf gudang mengurus produk, bukan
   //     strukturnya.
@@ -10669,7 +10946,16 @@ try {
     );
 
     // --- ubah identitas: nama, SKU, harga beli ------------------------------
-    await klikKelola(`[aria-label="Atur harga ${target.name}"]`);
+    await klikKelola(`[aria-label="Ubah produk ${target.name}"]`);
+    check(
+      "kartu Ubah produk memakai pola yang sama dengan kartu Produk baru",
+      ui.text().includes("Ubah produk") &&
+        ui.text().includes("Formnya sama dengan saat membuat produk baru") &&
+        ui
+          .queryAll("button")
+          .some((button) => (button.textContent ?? "").trim().includes("Simpan perubahan")),
+      ui.text().slice(-320),
+    );
     check(
       "kartu produk tersimpan menyediakan kolom nama, SKU, dan harga beli",
       Boolean(ui.query(`[aria-label="Nama produk ${target.name}"]`)) &&
@@ -10678,10 +10964,67 @@ try {
       ui.text().slice(-320),
     );
 
+    // Tombol **Buat otomatis** juga ada di kartu Ubah produk. Kolomnya sudah berisi
+    // SKU lama, jadi menekannya tidak boleh langsung menimpa: halaman menampilkan
+    // konfirmasi berisi SKU lama & nomor baru, dan isi kolom baru berganti setelah
+    // “Ya, ganti SKU”. Penyimpanannya tetap lewat “Simpan perubahan”.
+    check(
+      "kartu Ubah produk menyediakan tombol Buat SKU otomatis yang meminta konfirmasi",
+      Boolean(ui.query('[aria-label="Buat SKU otomatis"]')) &&
+        ui.text().includes("meminta konfirmasi"),
+      ui.text().slice(-320),
+    );
+    const skuEditSebelum = produkKelola(target.sku)?.sku ?? "";
+    const kolomSkuEdit = () => ui.query(`[aria-label="SKU produk ${target.name}"]`);
+    const konfirmasiGantiSku = () => ui.query('[aria-label="Konfirmasi ganti SKU"]');
+    /** Nomor yang ditawarkan, dibaca dari kalimat konfirmasinya. */
+    const saranDariKonfirmasi = () =>
+      ui.text().match(/akan diganti menjadi\s*(PBB-\d{7})/)?.[1] ?? "";
+
+    await klikKelola('[aria-label="Buat SKU otomatis"]');
+    const skuEditSaran = saranDariKonfirmasi();
+    check(
+      "Buat otomatis tidak langsung menimpa SKU lama — konfirmasi menyebut kedua kodenya",
+      kolomSkuEdit()?.value === skuEditSebelum &&
+        Boolean(konfirmasiGantiSku()) &&
+        /^PBB-\d{7}$/.test(skuEditSaran) &&
+        skuEditSaran !== skuEditSebelum &&
+        ui.text().includes(skuEditSebelum) &&
+        ui.text().includes(skuEditSaran),
+      `kolom=${kolomSkuEdit()?.value} lama=${skuEditSebelum} saran=${skuEditSaran}`,
+    );
+
+    await klikKelola(`[aria-label="Batal ganti SKU produk ${target.name}"]`);
+    check(
+      "Batal pada konfirmasi mempertahankan SKU lama dan menutup konfirmasinya",
+      kolomSkuEdit()?.value === skuEditSebelum && !konfirmasiGantiSku(),
+      `kolom=${kolomSkuEdit()?.value} konfirmasi=${Boolean(konfirmasiGantiSku())}`,
+    );
+
+    await klikKelola('[aria-label="Buat SKU otomatis"]');
+    await ui.fill(`[aria-label="SKU produk ${target.name}"]`, "SEMENTARA-01");
+    check(
+      "mengetik SKU sendiri membatalkan usulan dan menutup konfirmasi",
+      kolomSkuEdit()?.value === "SEMENTARA-01" && !konfirmasiGantiSku(),
+      `kolom=${kolomSkuEdit()?.value} konfirmasi=${Boolean(konfirmasiGantiSku())}`,
+    );
+
+    await ui.fill(`[aria-label="SKU produk ${target.name}"]`, skuEditSebelum);
+    await klikKelola('[aria-label="Buat SKU otomatis"]');
+    await klikKelola(`[aria-label="Konfirmasi ganti SKU produk ${target.name}"]`);
+    check(
+      "setelah dikonfirmasi kolom berisi SKU PBB-<nomor urut> baru, belum tersimpan",
+      /^PBB-\d{7}$/.test(kolomSkuEdit()?.value ?? "") &&
+        kolomSkuEdit()?.value === skuEditSaran &&
+        !konfirmasiGantiSku() &&
+        produkKelola(target.sku)?.sku === skuEditSebelum,
+      `kolom=${kolomSkuEdit()?.value} saran=${skuEditSaran} tersimpan=${produkKelola(target.sku)?.sku}`,
+    );
+
     await ui.fill(`[aria-label="Nama produk ${target.name}"]`, "Kopi Uji Kelola");
     await ui.fill(`[aria-label="SKU produk ${target.name}"]`, "KELOLA-01");
     await ui.fill(`[aria-label="Harga beli ${target.name}"]`, "9000");
-    await ui.click("Simpan harga");
+    await ui.click("Simpan perubahan");
     await tungguKelola(() => Boolean(produkKelola("KELOLA-01")), "identitas produk tersimpan");
     check(
       "nama, SKU, dan harga beli benar-benar tersimpan (harga jual tidak ikut berubah)",
@@ -10700,9 +11043,9 @@ try {
 
     // SKU tetap unik: memakai SKU produk lain ditolak sebelum apa pun tersimpan.
     const lain = kelolaFacts.catalog.find((product) => product.sku !== "KELOLA-01");
-    await klikKelola(`[aria-label="Atur harga Kopi Uji Kelola"]`);
+    await klikKelola(`[aria-label="Ubah produk Kopi Uji Kelola"]`);
     await ui.fill(`[aria-label="SKU produk Kopi Uji Kelola"]`, lain.sku.toLowerCase());
-    await ui.click("Simpan harga");
+    await ui.click("Simpan perubahan");
     await tungguKelola(
       () => ui.text().includes("sudah dipakai produk lain"),
       "SKU kembar ditolak",
@@ -10715,13 +11058,19 @@ try {
       `${produkKelola("KELOLA-01")?.sku} | ${ui.text().slice(-240)}`,
     );
     await ui.fill(`[aria-label="SKU produk Kopi Uji Kelola"]`, "KELOLA-01");
-    await klikKelola(`[aria-label="Atur harga Kopi Uji Kelola"]`);
+    await klikKelola(`[aria-label="Ubah produk Kopi Uji Kelola"]`);
 
     // --- pagar hapus: produk yang sudah dipakai ----------------------------
     await klikKelola(`[aria-label="Hapus produk Kopi Uji Kelola"]`);
     await tungguKelola(
       () => ui.text().includes("tidak bisa dihapus karena"),
       "pagar hapus produk terpakai tampil",
+    );
+    check(
+      "kartu Hapus produk memakai pola kartu yang sama, bukan dialog melayang",
+      ui.text().includes("Hapus produk") &&
+        Boolean(ui.query('[aria-label="Tutup kartu hapus produk"]')),
+      ui.text().slice(-320),
     );
     check(
       "produk yang masih ada stoknya tidak bisa dihapus, dan alasannya disebut",
@@ -10738,14 +11087,14 @@ try {
       `disabled=${ui.query('[aria-label="Konfirmasi hapus produk Kopi Uji Kelola"]')?.disabled}`,
     );
 
-    // Tombol “Nonaktifkan saja” di dialog menjalankan jalur pembersihan yang aman.
+    // Tombol “Nonaktifkan saja” di kartu hapus menjalankan jalur pembersihan yang aman.
     await klikKelola('[aria-label="Nonaktifkan saja Kopi Uji Kelola"]');
     await tungguKelola(
       () => produkKelola("KELOLA-01")?.active === false,
-      "produk dinonaktifkan dari dialog hapus",
+      "produk dinonaktifkan dari kartu hapus",
     );
     check(
-      "dialog menutup setelah nonaktifkan dan produknya hilang dari kasir",
+      "kartu hapus menutup setelah nonaktifkan dan produknya hilang dari kasir",
       !ui.query('[aria-label="Konfirmasi hapus produk Kopi Uji Kelola"]') &&
         !kelolaFacts.dijual.includes(target.id) &&
         ui.text().includes("hilang dari kasir"),
@@ -11079,6 +11428,86 @@ try {
       tagihanHidup.newErrors().join(" | ").slice(0, 200),
     );
     await tagihanHidup.unmount();
+    withoutSession();
+  }
+
+  // 4f-2. Setelan yang fiturnya tidak ada di paket tidak ditampilkan: kartu
+  //       pajak F&B hanya untuk workspace yang modul F&B-nya hidup, dan kartu
+  //       struk mengikuti fitur cetak ESC/POS paket. Profil F&B yang **masih
+  //       memungut** tetap tampil walau modulnya mati, supaya pungutan yang
+  //       sudah berjalan di setiap struk bisa dihentikan dari halaman ini.
+  {
+    const { settingsSectionVisibility } = await server.ssrLoadModule(
+      "/src/lib/settingsVisibility.ts",
+    );
+    const { entitlementFor } = await server.ssrLoadModule("/src/lib/billing/index.ts");
+    const visibility = (planKey, activeVerticals, fnbTaxInUse) =>
+      settingsSectionVisibility({
+        entitlements: entitlementFor(planKey),
+        activeVerticals,
+        fnbTaxInUse,
+      });
+
+    check(
+      "kartu pajak F&B disembunyikan untuk workspace tanpa modul F&B",
+      visibility("professional", ["umkm"], false).fnbTax === false &&
+        visibility("starter", [], false).fnbTax === false,
+      JSON.stringify(visibility("professional", ["umkm"], false)),
+    );
+    check(
+      "kartu pajak F&B tampil untuk modul F&B yang hidup, atau profil yang masih memungut",
+      visibility("professional", ["fnb"], false).fnbTax === true &&
+        visibility("starter", ["umkm"], true).fnbTax === true,
+      JSON.stringify(visibility("professional", ["fnb"], false)),
+    );
+    check(
+      "kartu struk mengikuti fitur cetak ESC/POS paket",
+      visibility("starter", ["umkm"], false).receipt === true &&
+        settingsSectionVisibility({
+          entitlements: {
+            ...entitlementFor("starter"),
+            features: new Set(["report.daily"]),
+          },
+          activeVerticals: ["umkm"],
+          fnbTaxInUse: false,
+        }).receipt === false,
+      "fitur cetak tidak terbaca dari paket",
+    );
+
+    // DOM: sesi UMKM (tanpa modul F&B) hanya melihat setelan yang ada di paketnya.
+    withUmkmSession();
+    const { SettingsPage: SettingsPageTanpaFnb } = await server.ssrLoadModule(
+      "/src/pages/SettingsPage.tsx",
+    );
+    const umkm = await renderInteractive(
+      providers(React.createElement(SettingsPageTanpaFnb, null)),
+    );
+    check(
+      "halaman Pengaturan toko UMKM tidak menampilkan setelan pajak F&B",
+      umkm.query('[data-testid="setelan-pajak-fnb"]') === null &&
+        umkm.text().includes("Setelan PPN") &&
+        umkm.query('[data-testid="setelan-struk-belanja"]') !== null,
+      umkm.text().slice(0, 260),
+    );
+    check(
+      "halaman Pengaturan tanpa modul F&B tidak menghasilkan error konsol",
+      umkm.newErrors().length === 0,
+      umkm.newErrors().join(" | ").slice(0, 200),
+    );
+    await umkm.unmount();
+    withoutSession();
+
+    // DOM: workspace F&B tetap melihat kartunya.
+    withFnbSession();
+    const fnb = await renderInteractive(
+      providers(React.createElement(SettingsPageTanpaFnb, null)),
+    );
+    check(
+      "halaman Pengaturan workspace F&B tetap memuat setelan pajak F&B",
+      fnb.query('[data-testid="setelan-pajak-fnb"]') !== null,
+      fnb.text().slice(0, 260),
+    );
+    await fnb.unmount();
     withoutSession();
   }
 
@@ -13197,6 +13626,816 @@ try {
     // pemutar tiruan atau bunyi yang tidak sengaja dimatikan.
     scanBeep.setScanBeepPlayer(null);
     scanBeep.setScanBeepEnabled(true);
+    withoutSession();
+  }
+
+  // 4e. Pairing vendor marketplace (pusatbahanbangunan.com): kartu di halaman
+  //     Pengaturan memuat direktori demo, memasangkan vendor lewat email owner,
+  //     menampilkan tautan snapshot bertoken (tersembunyi secara bawaan), lalu
+  //     bisa dilepas. Kartunya **hanya untuk pemilik**: peran lain tidak melihat
+  //     kartu maupun status pairing-nya sama sekali.
+  {
+    const { SettingsPage } = await server.ssrLoadModule("/src/pages/SettingsPage.tsx");
+    const { marketplacePairingVisible } = await server.ssrLoadModule(
+      "/src/lib/settingsVisibility.ts",
+    );
+    withFnbSession();
+
+    check(
+      "kartu pairing butuh pemilik + pengelola workspace + bisnis yang sudah mengatur API",
+      marketplacePairingVisible({
+        canPair: true,
+        canManageWorkspace: true,
+        activeApiKeys: 1,
+      }) === true &&
+        marketplacePairingVisible({
+          canPair: true,
+          canManageWorkspace: false,
+          activeApiKeys: 1,
+        }) === false &&
+        marketplacePairingVisible({
+          canPair: false,
+          canManageWorkspace: true,
+          activeApiKeys: 1,
+        }) === false &&
+        marketplacePairingVisible({
+          canPair: true,
+          canManageWorkspace: true,
+          activeApiKeys: 0,
+        }) === false,
+      "gerbang kartu pairing tidak lengkap",
+    );
+
+    const kartu = await renderInteractive(
+      providers(React.createElement(SettingsPage, null)),
+    );
+    await React.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    check(
+      "halaman Pengaturan punya kartu pairing marketplace",
+      kartu.query('[data-testid="marketplace-pairing"]') !== null &&
+        kartu.text().includes("Pairing vendor marketplace") &&
+        kartu.text().includes("pusatbahanbangunan.com"),
+      kartu.text().slice(0, 260),
+    );
+    check(
+      "direktori vendor tidak dimuat sebelum kontak dicari",
+      kartu.query('[data-testid="marketplace-vendors"]') === null &&
+        kartu.text().includes("Belum ada toko yang ditampilkan"),
+      kartu.text().slice(0, 300),
+    );
+    check(
+      "formulir kontak owner tersedia",
+      kartu.query('[data-testid="marketplace-contact"]') !== null &&
+        kartu.text().includes("Konfirmasi kontak owner"),
+      kartu.text().slice(0, 300),
+    );
+    check(
+      "kartu menjelaskan pencocokan kontak bergantung pada endpoint marketplace",
+      (kartu.query('[data-testid="marketplace-lookup-dependency"]')
+        ?.textContent ?? "").includes("endpoint pencocokan") &&
+        kartu.text().includes("pusatbahanbangunan.com"),
+      kartu.query('[data-testid="marketplace-lookup-dependency"]')
+        ?.textContent ?? "(penjelasan tidak tampil)",
+    );
+
+    // Pencarian kontak: yang tampil hanya vendor yang terkait dengan email itu,
+    // bukan tiga toko demo sekaligus.
+    await kartu.fill(
+      '[data-testid="marketplace-vendor-query"]',
+      "owner@pusatbahanbangunan.com",
+    );
+    await kartu.click("Cari vendor");
+    await React.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const hasilKontak =
+      kartu.query('[data-testid="marketplace-vendors"]')?.textContent ?? "";
+    check(
+      "pencarian kontak hanya menampilkan vendor yang terkait",
+      hasilKontak.includes("Pusat Bahan Bangunan Official") &&
+        !hasilKontak.includes("Megah Jaya Bangunan") &&
+        !hasilKontak.includes("CV. Mitra Bangunan"),
+      hasilKontak.slice(0, 220) || "(pemilih vendor kosong)",
+    );
+
+    // Kontak yang belum cocok tidak boleh berhenti di layar kosong: direktori
+    // dibuka otomatis supaya pemilik bisa langsung memilih tokonya, dan kontak
+    // yang baru diketik sudah terisi di langkah 3.
+    await kartu.fill(
+      '[data-testid="marketplace-vendor-query"]',
+      "belum-terdaftar@contoh.id",
+    );
+    await kartu.click("Cari vendor");
+    await React.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const hasilFallback =
+      kartu.query('[data-testid="marketplace-vendors"]')?.textContent ?? "";
+    const catatanFallback =
+      kartu.query('[data-testid="marketplace-directory-fallback"]')
+        ?.textContent ?? "";
+    check(
+      "kontak yang belum cocok membuka direktori otomatis",
+      hasilFallback.includes("Pusat Bahan Bangunan Official") &&
+        hasilFallback.includes("Megah Jaya Bangunan") &&
+        catatanFallback.includes("Direktori dibuka otomatis") &&
+        (kartu.query('[data-testid="marketplace-lookup-note"]')
+          ?.textContent ?? "").includes("belum cocok"),
+      `${hasilFallback.slice(0, 160)} · ${catatanFallback || "(catatan fallback tidak tampil)"}`,
+    );
+    check(
+      "kontak yang belum cocok tetap terisi di langkah konfirmasi",
+      (kartu.query('[data-testid="marketplace-contact"]')?.value ?? "") ===
+        "belum-terdaftar@contoh.id",
+      kartu.query('[data-testid="marketplace-contact"]')?.value ?? "(kosong)",
+    );
+
+    // Kembali ke pencarian kontak yang cocok sebelum melanjutkan pairing.
+    await kartu.fill(
+      '[data-testid="marketplace-vendor-query"]',
+      "owner@pusatbahanbangunan.com",
+    );
+    await kartu.click("Cari vendor");
+    await React.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    await kartu.click("Pusat Bahan Bangunan Official");
+    await kartu.fill(
+      '[data-testid="marketplace-contact"]',
+      "owner@pusatbahanbangunan.com",
+    );
+    await kartu.click("Pasangkan vendor");
+    await React.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const tautan = kartu.query('[data-testid="marketplace-snapshot-url"]');
+    check(
+      "pairing tersimpan dan kartu berubah ke keadaan terpasang",
+      kartu.text().includes("Terpasang") &&
+        kartu.text().includes("Pusat Bahan Bangunan Official") &&
+        kartu.text().includes("PBB-"),
+      kartu.text().slice(0, 360),
+    );
+    check(
+      "tautan snapshot tampil tanpa membocorkan token",
+      Boolean(tautan) &&
+        tautan.value.includes("/api/marketplace/snapshot?token=") &&
+        tautan.value.includes("•") &&
+        !/mp_[a-f0-9]{48}/.test(tautan.value),
+      tautan?.value ?? "(tidak ada tautan)",
+    );
+
+    await kartu.click("Tampilkan token");
+    check(
+      "token bisa ditampilkan untuk disalin pemilik",
+      (kartu.query('[data-testid="marketplace-snapshot-url"]')?.value ?? "").includes(
+        "mp_",
+      ),
+      kartu.query('[data-testid="marketplace-snapshot-url"]')?.value ?? "(kosong)",
+    );
+
+    // Stok otomatis: bloknya harus benar-benar tampil di kartu yang terpasang,
+    // dan di mode demo — yang tidak punya endpoint jaringan — ia mengaku apa
+    // adanya beserta kunci lingkungan yang belum diisi, bukan mengklaim stok
+    // berangkat sendiri.
+    check(
+      "kartu menjelaskan stok otomatis sesudah transaksi",
+      kartu.query('[data-testid="marketplace-stock-sync"]') !== null &&
+        kartu.text().includes("Stok otomatis sesudah transaksi") &&
+        kartu.text().includes("PUSATBAHANBANGUNAN_STOCK_URL"),
+      kartu.text().slice(0, 400),
+    );
+    check(
+      "tanpa endpoint, kartu tidak mengklaim stok tersinkron",
+      (kartu.query('[data-testid="marketplace-stock-sync-note"]')
+        ?.textContent ?? "").includes("belum pernah") &&
+        kartu.text().includes("belum bisa berangkat sendiri"),
+      `${kartu.query('[data-testid="marketplace-stock-sync-note"]')?.textContent ?? "(catatan stok tidak tampil)"} · ${kartu.text().includes("belum bisa berangkat sendiri")}`,
+    );
+    check(
+      "kartu menjelaskan kategori & subkategori dikirim sendiri",
+      /dikirim sendiri sesudah\s+disimpan/.test(
+        kartu.query('[data-testid="marketplace-category-sync-note"]')
+          ?.textContent ?? "",
+      ) && kartu.text().includes("Pohon kategori + subkategori"),
+      kartu.query('[data-testid="marketplace-category-sync-note"]')
+        ?.textContent ?? "(penjelasan kategori tidak tampil)",
+    );
+
+    // Arah marketplace → MesinPOS: tombol impor katalog harus benar-benar ada di
+    // kartu yang terpasang, dan menekannya menjalankan aksi store (di mode demo
+    // jawabannya jujur bahwa tidak ada unduhan), bukan tombol mati tanpa reaksi.
+    check(
+      "kartu menawarkan impor katalog dari marketplace",
+      kartu.query('[data-testid="marketplace-import-catalog"]') !== null &&
+        kartu.text().includes("Katalog dari marketplace") &&
+        kartu.text().includes("Impor katalog"),
+      kartu.text().slice(0, 360),
+    );
+    await kartu.click("Impor katalog");
+    await React.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    check(
+      "impor katalog di mode demo menjawab jujur & tercatat",
+      (kartu.query('[data-testid="marketplace-catalog-import-note"]')
+        ?.textContent ?? "").includes("Mode demo") &&
+        kartu.text().includes("Terakhir diimpor"),
+      kartu.query('[data-testid="marketplace-catalog-import-note"]')
+        ?.textContent ?? "(catatan impor tidak tampil)",
+    );
+
+    await kartu.click("Lepas pairing");
+    await kartu.click("Ya, lepas pairing");
+    await React.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    check(
+      "pairing bisa dilepas dan kartu kembali menawarkan pemasangan",
+      kartu.text().includes("Belum terpasang") &&
+        kartu.query('[data-testid="marketplace-vendor-query"]') !== null,
+      kartu.text().slice(0, 240),
+    );
+    check(
+      "kartu pairing tidak menghasilkan error konsol",
+      kartu.newErrors().length === 0,
+      kartu.newErrors().join(" | ").slice(0, 200),
+    );
+    await kartu.unmount();
+
+    // Pemilik yang belum mengatur API: kartunya juga tidak ditawarkan — bisnis
+    // itu belum punya integrasi untuk dipasangkan. Kunci API contoh dicabut di
+    // provider yang sama supaya kartu membaca `apiKeySummary` yang baru.
+    {
+      const { useStore: useStoreIntegrasi } = await server.ssrLoadModule(
+        "/src/lib/store/context.ts",
+      );
+      function TanpaIntegrasiApi() {
+        const store = useStoreIntegrasi();
+        const [siap, setSiap] = React.useState(false);
+        const sudah = React.useRef(false);
+        React.useEffect(() => {
+          if (sudah.current) return;
+          sudah.current = true;
+          void (async () => {
+            for (const key of store.apiKeys.filter((row) => row.status === "active")) {
+              await store.revokeApiKey(key.id);
+            }
+            setSiap(true);
+          })();
+        }, [store]);
+        return siap ? React.createElement(SettingsPage, null) : null;
+      }
+
+      const tanpaApi = await renderInteractive(
+        providers(React.createElement(TanpaIntegrasiApi, null)),
+      );
+      await React.act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+      check(
+        "pemilik yang belum mengatur API tidak ditawari kartu pairing",
+        tanpaApi.query('[data-testid="marketplace-pairing"]') === null,
+        tanpaApi.text().slice(0, 260),
+      );
+      check(
+        "halaman Pengaturan tanpa integrasi API tidak menghasilkan error konsol",
+        tanpaApi.newErrors().length === 0,
+        tanpaApi.newErrors().join(" | ").slice(0, 200),
+      );
+      await tanpaApi.unmount();
+    }
+
+    // Bukan pemilik: kartu pairing tidak ditawarkan sama sekali — bukan
+    // ditampilkan lalu dikunci. Manager & keuangan pun tidak melihatnya.
+    for (const role of ["manager", "finance", "cashier"]) {
+      window.localStorage.setItem(
+        "mesinpos.session.v1",
+        JSON.stringify({
+          ...FNB_SESSION,
+          tenant: { ...FNB_SESSION.tenant, role },
+        }),
+      );
+      const akun = await renderInteractive(
+        providers(React.createElement(SettingsPage, null)),
+      );
+      check(
+        `kartu pairing tidak muncul untuk peran ${role}`,
+        akun.query('[data-testid="marketplace-pairing"]') === null &&
+          !akun.text().includes("Pairing vendor marketplace"),
+        akun.text().slice(0, 260),
+      );
+      check(
+        `halaman Pengaturan tanpa kartu pairing (${role}) tidak menghasilkan error konsol`,
+        akun.newErrors().length === 0,
+        akun.newErrors().join(" | ").slice(0, 200),
+      );
+      await akun.unmount();
+    }
+    withoutSession();
+  }
+
+  // 4h. Pemindai barcode/QR: aturan pencocokan SKU, alur Kasir, dan alur
+  //     Produk & Stok (termasuk tautan ?sku= dari Kasir). Kamera tidak dipakai
+  //     di harness; yang diuji adalah jalur manual yang selalu tersedia — jalur
+  //     yang sama yang dipakai pemindai USB dan peramban tanpa BarcodeDetector.
+  {
+    const {
+      normalizeScannedCode,
+      findProductByScannedCode,
+      scannedCodeMatchesExactly,
+      suggestProductsForScannedCode,
+    } = await server.ssrLoadModule("/src/lib/barcode.ts");
+    check(
+      "hasil scan dicocokkan persis ke SKU, tanpa membedakan huruf & spasi pinggir",
+      normalizeScannedCode("  p03 \n") === "p03" &&
+        findProductByScannedCode([{ sku: "PBB-0001" }], " pbb-0001 ")?.sku ===
+          "PBB-0001" &&
+        findProductByScannedCode([{ sku: "899123" }], "899") === null &&
+        findProductByScannedCode([{ sku: "PBB-0001" }], "   ") === null,
+      "pencocokan SKU tidak persis",
+    );
+    /*
+      Label marketplace menyimpan kode sebagai `<simbol>:<nilai>` (mis.
+      `code39:PBB-0000005`) dan Code 39 mencetak penanda `*` di awal/akhir.
+      Pemindai bisa mengirim salah satunya apa adanya; keduanya harus tetap
+      menunjuk barang yang sama, sedangkan URL QR tidak boleh terpotong.
+    */
+    check(
+      "prefix simbologi marketplace & penanda Code 39 dibuang sebelum dicocokkan",
+      normalizeScannedCode("code39:PBB-0000005") === "PBB-0000005" &&
+        normalizeScannedCode("*PBB-0000005*") === "PBB-0000005" &&
+        normalizeScannedCode("qrcode:https://contoh.com/a") === "https://contoh.com/a" &&
+        normalizeScannedCode("https://contoh.com/a") === "https://contoh.com/a",
+      JSON.stringify([
+        normalizeScannedCode("code39:PBB-0000005"),
+        normalizeScannedCode("*PBB-0000005*"),
+        normalizeScannedCode("https://contoh.com/a"),
+      ]),
+    );
+    check(
+      "pemindai yang tidak mengirim tanda hubung tetap menemukan produknya",
+      findProductByScannedCode([{ sku: "PBB-0000005" }], "pbb0000005")?.sku ===
+        "PBB-0000005" &&
+        findProductByScannedCode(
+          [{ sku: "PBB-1" }, { sku: "PBB.1" }],
+          "PBB1",
+        ) === null,
+      "pencocokan tanpa pemisah tidak unik / tidak jalan",
+    );
+    /*
+      Kasus yang dilaporkan pemilik: label marketplace `PBB-0000005` terbaca
+      `PB800005` oleh pemindai murahnya (huruf `B` terbaca `8`, deretan nol
+      terlewat). Hasil scan harus langsung menemukan produk yang **tunggal** itu —
+      bukan menawarkan pendaftaran produk baru — tetapi halaman tetap mengatakan
+      bahwa kodenya tidak sama persis.
+    */
+    const katalogSalahBaca = [
+      { sku: "PBB-0000005" },
+      { sku: "KOPI-01" },
+      { sku: "SEMEN-2" },
+    ];
+    check(
+      "salah baca `PB800005` menemukan `PBB-0000005` tanpa mendaftarkan produk baru",
+      findProductByScannedCode(katalogSalahBaca, "PB800005")?.sku === "PBB-0000005",
+      JSON.stringify(findProductByScannedCode(katalogSalahBaca, "PB800005")),
+    );
+    /*
+      Katalog nyata “Pusat Bahan Bangunan” berisi 11 SKU berurutan
+      (`PBB-0000001` … `PBB-0000011`). Deretan nol yang dirapatkan tidak boleh
+      membuat semuanya dianggap kode yang sama: hanya nomor 5 yang cocok dengan
+      salah baca `PB800005`.
+    */
+    const katalogSebelas = Array.from({ length: 11 }, (_, index) => ({
+      sku: `PBB-${String(index + 1).padStart(7, "0")}`,
+    }));
+    check(
+      "katalog 11 SKU berurutan tetap menunjuk satu produk untuk `PB800005`",
+      findProductByScannedCode(katalogSebelas, "PB800005")?.sku === "PBB-0000005",
+      JSON.stringify(findProductByScannedCode(katalogSebelas, "PB800005")),
+    );
+    check(
+      "pencocokan toleran tidak menebak kalau dua produk sama-sama mirip",
+      findProductByScannedCode(
+        [{ sku: "PBB-0000005" }, { sku: "PBB-0005" }],
+        "PB800005",
+      ) === null,
+      "kode ambigu tetap dipilihkan",
+    );
+    check(
+      "hanya kode yang sama persis yang dianggap cocok persis (untuk peringatan)",
+      scannedCodeMatchesExactly({ sku: "PBB-0000005" }, "pbb-0000005") === true &&
+        scannedCodeMatchesExactly({ sku: "PBB-0000005" }, "PB800005") === false,
+      "penanda kecocokan persis tidak sesuai",
+    );
+    /*
+      Kode yang **tidak** bisa dipastikan tetap ditawari kandidat supaya kasir
+      tidak mendaftarkan produk kembar. Usulan dibatasi 3 dan kode pendek tidak
+      diberi usulan.
+    */
+    const usulanSalahBaca = suggestProductsForScannedCode(katalogSalahBaca, "PB8000009");
+    check(
+      "kode yang tidak bisa dipastikan tetap mengusulkan produk yang tepat",
+      usulanSalahBaca.length === 1 && usulanSalahBaca[0].sku === "PBB-0000005",
+      usulanSalahBaca.map((row) => row.sku).join(",") || "(tanpa usulan)",
+    );
+    check(
+      "usulan dibatasi tiga & kode pendek tidak diberi usulan",
+      suggestProductsForScannedCode(katalogSalahBaca, "PB800").length === 0 &&
+        suggestProductsForScannedCode(
+          [
+            { sku: "AAAAAAAAAA" },
+            { sku: "AAAAAAAAAB" },
+            { sku: "AAAAAAAAAC" },
+            { sku: "AAAAAAAAAD" },
+          ],
+          "AAAAAAAAAZ",
+        ).length === 3,
+      "batas usulan tidak sesuai",
+    );
+
+    const {
+      barcodeFromSku,
+      code39Modules,
+      validateProductBarcode,
+    } = await server.ssrLoadModule("/src/lib/productBarcode.ts");
+    check(
+      "kode produk bisa dicari lewat barcode selain SKU",
+      findProductByScannedCode(
+        [{ sku: "PBB-0001" }, { sku: "PBB-0002", barcode: "8990002" }],
+        " 8990002 ",
+      )?.sku === "PBB-0002" &&
+        findProductByScannedCode(
+          [{ sku: "PBB-0003", barcode: "8990003" }],
+          "pbb-0003",
+        )?.sku === "PBB-0003",
+      "pencocokan barcode produk tidak jalan",
+    );
+    check(
+      "tombol otomatis membuat Code 39 dari SKU",
+      barcodeFromSku(" pbb-0007 ") === "PBB-0007" &&
+        barcodeFromSku("SKU_UNDERSCORE") === null &&
+        code39Modules("PBB-0007").length > 0 &&
+        code39Modules("PBB-0007")[0] === 1,
+      "barcode otomatis bukan Code 39 yang sah",
+    );
+    check(
+      "validasi barcode membedakan Code 39 dan QR",
+      validateProductBarcode({ barcode: " abc-1 ", barcodeType: "barcode" }).ok &&
+        validateProductBarcode({ barcode: " abc-1 ", barcodeType: "barcode" }).value ===
+          "ABC-1" &&
+        validateProductBarcode({
+          barcode: "https://contoh.com/a?b=1",
+          barcodeType: "barcode",
+        }).ok === false &&
+        validateProductBarcode({
+          barcode: "https://contoh.com/a?b=1",
+          barcodeType: "qr",
+        }).ok &&
+        validateProductBarcode({ barcode: "", barcodeType: "qr" }).value === "",
+      "validasi barcode/QR tidak sesuai aturan",
+    );
+
+    const { PosPage: PosScan } = await server.ssrLoadModule("/src/pages/PosPage.tsx");
+    const { useStore } = await server.ssrLoadModule("/src/lib/store/context.ts");
+    withFnbSession();
+    /** Pegangan ke store demo, supaya harness bisa menyiapkan produk ber-SKU panjang. */
+    const scanFacts = {};
+    function ScanProbe() {
+      scanFacts.store = useStore();
+      return null;
+    }
+    const kasirScan = await renderInteractive(
+      providers(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(PosScan, null),
+          React.createElement(ScanProbe, null),
+        ),
+      ),
+    );
+    check(
+      "kasir punya tombol pemindai barcode/QR",
+      kasirScan.query('[data-testid="pos-scan"]') !== null,
+      kasirScan.text().slice(0, 200),
+    );
+    await kasirScan.clickOn('[data-testid="pos-scan"]');
+    check(
+      "tombol pemindai membuka dialog dengan kolom kode manual",
+      kasirScan.query('[data-testid="barcode-scan-dialog"]') !== null &&
+        kasirScan.query('[data-testid="barcode-manual-input"]') !== null,
+      kasirScan.text().slice(0, 240),
+    );
+    /*
+      Barcode di layar yang dicetak sangat kecil (mis. halaman detail marketplace)
+      tidak mungkin dibaca kamera, jadi dialog harus menawarkan jalur tangkapan
+      layar. Di happy-dom tidak ada `BarcodeDetector`, jadi pemilihan berkas harus
+      berakhir dengan jawaban apa adanya — bukan diam tanpa pesan.
+    */
+    const galeriInput = kasirScan.query('[data-testid="barcode-scan-galeri-input"]');
+    check(
+      "pemindai menawarkan galeri/tangkapan layar untuk kode kecil di layar",
+      kasirScan.query('[data-testid="barcode-scan-galeri"]') !== null &&
+        galeriInput !== null,
+      kasirScan.text().slice(0, 300),
+    );
+    const berkasGaleri = new window.File(["bukan-gambar"], "tangkapan-layar.png", {
+      type: "image/png",
+    });
+    Object.defineProperty(galeriInput, "files", {
+      value: [berkasGaleri],
+      configurable: true,
+    });
+    await React.act(async () => {
+      galeriInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const pesanGaleri =
+      kasirScan.query('[data-testid="barcode-scan-galeri-note"]')?.textContent ?? "";
+    check(
+      "memilih gambar menjalankan pembaca kode dan menjawab apa adanya",
+      pesanGaleri.length > 0 && !pesanGaleri.includes("Membaca kode dari gambar"),
+      pesanGaleri || "(tidak ada pesan)",
+    );
+    await kasirScan.fill('[data-testid="barcode-manual-input"]', "p03");
+    await kasirScan.clickOn('[data-testid="barcode-manual-submit"]');
+    const hasilKasir =
+      kasirScan.query('[data-testid="pos-scan-result"]')?.textContent ?? "";
+    check(
+      "scan SKU yang ada langsung memasukkan produknya ke keranjang",
+      hasilKasir.includes("Cappuccino") &&
+        hasilKasir.includes("P03") &&
+        hasilKasir.includes("Masuk keranjang") &&
+        // Tanpa pilihan: tidak ada tombol tambah maupun tautan produk lagi.
+        kasirScan.query('[data-testid="pos-scan-add"]') === null &&
+        (kasirScan.query('[data-testid="keranjang-jumlah-item"]')?.textContent ?? "").includes(
+          "1 item",
+        ),
+      `${hasilKasir.slice(0, 200)} | ${kasirScan.query('[data-testid="keranjang-jumlah-item"]')?.textContent ?? "(keranjang kosong)"}`,
+    );
+
+    await kasirScan.clickOn('[data-testid="pos-scan"]');
+    await kasirScan.fill('[data-testid="barcode-manual-input"]', "BELUM-ADA-9000");
+    await kasirScan.clickOn('[data-testid="barcode-manual-submit"]');
+    const kodeBaru =
+      kasirScan.query('[data-testid="pos-scan-result"]')?.textContent ?? "";
+    check(
+      "kode yang belum terdaftar ditawari pendaftaran sebagai SKU produk",
+      kodeBaru.includes("belum terdaftar") &&
+        (kasirScan
+          .query('[data-testid="pos-scan-register"]')
+          ?.getAttribute("href") ?? "").includes("sku=BELUM-ADA-9000"),
+      kodeBaru.slice(0, 240) || "(panel hasil tidak tampil)",
+    );
+    /*
+      Kasus yang dilaporkan pemilik: label marketplace ber-SKU panjang terbaca
+      meleset oleh pemindai (`PB800005` untuk `PBB-0000005`). Yang diperiksa di
+      sini adalah perilaku yang dilihat kasir: produknya langsung terbuka dengan
+      tombol tambah, plus peringatan bahwa kodenya tidak sama persis — bukan
+      “belum terdaftar” yang menyuruh mendaftarkan produk kembar.
+    */
+    await React.act(async () => {
+      await scanFacts.store.createProduct({
+        name: "Semen Marketplace Uji",
+        price: 68_000,
+        sku: "PBB-0000005",
+        openingStock: 4,
+      });
+    });
+    await kasirScan.clickOn('[data-testid="pos-scan"]');
+    await kasirScan.fill('[data-testid="barcode-manual-input"]', "PB800005");
+    await kasirScan.clickOn('[data-testid="barcode-manual-submit"]');
+    const salahBaca =
+      kasirScan.query('[data-testid="pos-scan-result"]')?.textContent ?? "";
+    check(
+      "scan marketplace yang terbaca meleset langsung memasukkan produk yang tepat, bukan “belum terdaftar”",
+      salahBaca.includes("Semen Marketplace Uji") &&
+        salahBaca.includes("PBB-0000005") &&
+        !salahBaca.includes("belum terdaftar") &&
+        salahBaca.includes("Masuk keranjang") &&
+        kasirScan.query('[data-testid="pos-scan-add"]') === null &&
+        (kasirScan.query('[data-testid="keranjang-jumlah-item"]')?.textContent ?? "").includes(
+          "2 item",
+        ),
+      `${salahBaca.slice(0, 200)} | ${kasirScan.query('[data-testid="keranjang-jumlah-item"]')?.textContent ?? "(keranjang kosong)"}`,
+    );
+    check(
+      "kasir diberi tahu bahwa kode hasil scan tidak sama persis",
+      kasirScan.query('[data-testid="pos-scan-approx"]') !== null,
+      salahBaca.slice(0, 240) || "(panel hasil tidak tampil)",
+    );
+
+    // Kode yang tidak bisa dipastikan tetap menawarkan kandidat, bukan langsung
+    // menyuruh mendaftarkan produk baru.
+    await kasirScan.clickOn('[data-testid="pos-scan"]');
+    await kasirScan.fill('[data-testid="barcode-manual-input"]', "PB8000009");
+    await kasirScan.clickOn('[data-testid="barcode-manual-submit"]');
+    const kandidat =
+      kasirScan.query('[data-testid="pos-scan-result"]')?.textContent ?? "";
+    check(
+      "kode yang tidak bisa dipastikan menawarkan produk yang mirip, bukan “belum terdaftar”",
+      kasirScan.query('[data-testid="pos-scan-suggestions"]') !== null &&
+        kandidat.includes("Semen Marketplace Uji") &&
+        !kandidat.includes("belum terdaftar"),
+      kandidat.slice(0, 240) || "(panel hasil tidak tampil)",
+    );
+    await kasirScan.clickOn('[data-testid="pos-scan-suggestion"]');
+    const setelahUsulan =
+      kasirScan.query('[data-testid="pos-scan-result"]')?.textContent ?? "";
+    check(
+      "memilih usulan langsung memasukkan produknya ke keranjang",
+      setelahUsulan.includes("Semen Marketplace Uji") &&
+        setelahUsulan.includes("Masuk keranjang") &&
+        kasirScan.query('[data-testid="pos-scan-add"]') === null &&
+        (kasirScan.query('[data-testid="keranjang-jumlah-item"]')?.textContent ?? "").includes(
+          "3 item",
+        ),
+      `${setelahUsulan.slice(0, 200)} | ${kasirScan.query('[data-testid="keranjang-jumlah-item"]')?.textContent ?? "(keranjang kosong)"}`,
+    );
+    check(
+      "alur scan Kasir tanpa error konsol",
+      kasirScan.newErrors().length === 0,
+      kasirScan.newErrors().join(" | ").slice(0, 200),
+    );
+    await kasirScan.unmount();
+    withoutSession();
+
+    const { ProductsPage: ProdukScan } = await server.ssrLoadModule(
+      "/src/pages/ProductsPage.tsx",
+    );
+    withFnbSession();
+    const produkScan = await renderInteractive(
+      providers(React.createElement(ProdukScan, null)),
+    );
+    await produkScan.clickOn('[data-testid="produk-scan"]');
+    await produkScan.fill('[data-testid="barcode-manual-input"]', "P03");
+    await produkScan.clickOn('[data-testid="barcode-manual-submit"]');
+    check(
+      "scan SKU yang ada di Produk & Stok membuka produknya untuk diubah",
+      produkScan.query('[data-testid="produk-sku-ubah"]')?.value === "P03" &&
+        produkScan.text().includes("Ubah produk"),
+      produkScan.text().slice(0, 300),
+    );
+
+    await produkScan.clickOn('[data-testid="produk-scan"]');
+    await produkScan.fill('[data-testid="barcode-manual-input"]', "BARU-9000");
+    await produkScan.clickOn('[data-testid="barcode-manual-submit"]');
+    check(
+      "kode baru mengisi SKU di form Produk baru",
+      produkScan.query('[data-testid="produk-sku-baru"]')?.value === "BARU-9000" &&
+        produkScan.text().includes("Produk baru"),
+      produkScan.text().slice(0, 300),
+    );
+    check(
+      "alur scan Produk & Stok tanpa error konsol",
+      produkScan.newErrors().length === 0,
+      produkScan.newErrors().join(" | ").slice(0, 200),
+    );
+    await produkScan.unmount();
+
+    // Tautan dari Kasir membawa kodenya di query `?sku=`; halaman langsung
+    // membuka form yang tepat tanpa menyalin kode dengan tangan.
+    const dariKasir = await renderInteractive(
+      providersAt("/app/products?sku=BARU-7777", React.createElement(ProdukScan, null)),
+    );
+    await React.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    check(
+      "tautan ?sku= dari Kasir mengisi form Produk baru",
+      dariKasir.query('[data-testid="produk-sku-baru"]')?.value === "BARU-7777",
+      dariKasir.text().slice(0, 300),
+    );
+    await dariKasir.unmount();
+
+    const dariKasirAda = await renderInteractive(
+      providersAt("/app/products?sku=P03", React.createElement(ProdukScan, null)),
+    );
+    await React.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    check(
+      "tautan ?sku= untuk produk yang sudah ada membuka kartu Ubah produk",
+      dariKasirAda.query('[data-testid="produk-sku-ubah"]')?.value === "P03",
+      dariKasirAda.text().slice(0, 300),
+    );
+    await dariKasirAda.unmount();
+
+    // Kolom Barcode / QR Code di form produk: buat otomatis, ganti jenis,
+    // ketik kode eksternal, simpan, lalu pindai kode itu untuk membuka produknya.
+    const barcodeForm = await renderInteractive(
+      providers(React.createElement(ProdukScan, null)),
+    );
+    await barcodeForm.click("Tambah produk");
+    check(
+      "form produk baru punya kolom Barcode / QR Code dengan galeri & kamera",
+      barcodeForm.query('[data-testid="produk-baru-barcode"]') !== null &&
+        barcodeForm.query('[data-testid="produk-baru-barcode-jenis"]') !== null &&
+        barcodeForm.query('[data-testid="produk-baru-barcode-galeri"]') !== null &&
+        barcodeForm.query('[data-testid="produk-baru-barcode-kamera"]') !== null &&
+        barcodeForm
+          .query('[data-testid="produk-baru-barcode-kamera-input"]')
+          ?.getAttribute("capture") === "environment",
+      barcodeForm.text().slice(0, 300),
+    );
+    await barcodeForm.clickOn('[data-testid="produk-baru-barcode-otomatis"]');
+    check(
+      "tombol otomatis menjelaskan SKU masih kosong",
+      (barcodeForm.query('[data-testid="produk-baru-barcode-status"]')?.textContent ?? "").includes(
+        "Isi kolom SKU",
+      ),
+      barcodeForm.text().slice(0, 300),
+    );
+    await barcodeForm.fill('[aria-label="Nama produk baru"]', "Produk Barcode Uji");
+    await barcodeForm.fill('[aria-label="SKU produk baru"]', "UJI-BC-1");
+    await barcodeForm.fill('[aria-label="Harga jual produk baru"]', "15000");
+    await barcodeForm.clickOn('[data-testid="produk-baru-barcode-otomatis"]');
+    check(
+      "barcode otomatis dari SKU tampil sebagai Code 39",
+      barcodeForm
+        .query('[data-testid="produk-baru-barcode-preview"] [data-barcode-value]')
+        ?.getAttribute("data-barcode-value") === "UJI-BC-1",
+      barcodeForm.text().slice(0, 400),
+    );
+    await barcodeForm.select('[data-testid="produk-baru-barcode-jenis"]', "qr");
+    await barcodeForm.clickOn('[data-testid="produk-baru-barcode-otomatis"]');
+    check(
+      "mengganti jenis ke QR Code menggambar & mengisi QR dari SKU",
+      barcodeForm
+        .query('[data-testid="produk-baru-barcode-preview"] [data-qr-value]')
+        ?.getAttribute("data-qr-value") === "UJI-BC-1",
+      barcodeForm.text().slice(0, 400),
+    );
+    await barcodeForm.select('[data-testid="produk-baru-barcode-jenis"]', "barcode");
+    await barcodeForm.fill('[data-testid="produk-baru-barcode-kode"]', "bc-9001");
+    await barcodeForm.clickOn('[data-testid="produk-baru-barcode-pakai"]');
+    check(
+      "kode eksternal yang diketik dipakai & tampil di pratinjau",
+      barcodeForm
+        .query('[data-testid="produk-baru-barcode-preview"] [data-barcode-value]')
+        ?.getAttribute("data-barcode-value") === "BC-9001" &&
+        (barcodeForm.query('[data-testid="produk-baru-barcode-status"]')?.textContent ?? "").includes(
+          "BC-9001",
+        ),
+      barcodeForm.text().slice(0, 400),
+    );
+    await barcodeForm.click("Simpan produk");
+    await React.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    check(
+      "produk baru tersimpan bersama barcode-nya",
+      barcodeForm.text().includes("UJI-BC-1") &&
+        barcodeForm.query('[data-testid="produk-baru-barcode"]') === null,
+      barcodeForm.text().slice(0, 400),
+    );
+    await barcodeForm.clickOn('[data-testid="produk-scan"]');
+    await barcodeForm.fill('[data-testid="barcode-manual-input"]', "bc-9001");
+    await barcodeForm.clickOn('[data-testid="barcode-manual-submit"]');
+    check(
+      "scan barcode eksternal membuka produk yang tepat",
+      barcodeForm.query('[data-testid="produk-sku-ubah"]')?.value === "UJI-BC-1" &&
+        barcodeForm
+          .query('[data-testid="produk-ubah-barcode-preview"] [data-barcode-value]')
+          ?.getAttribute("data-barcode-value") === "BC-9001",
+      barcodeForm.text().slice(0, 400),
+    );
+    await barcodeForm.fill('[data-testid="produk-ubah-barcode-kode"]', "bc-9002");
+    await barcodeForm.clickOn('[data-testid="produk-ubah-barcode-pakai"]');
+    await barcodeForm.click("Simpan perubahan");
+    await React.act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    check(
+      "mengubah barcode produk tersimpan menutup form & menyebut kodenya",
+      barcodeForm.query('[data-testid="produk-ubah-barcode"]') === null &&
+        barcodeForm.text().includes("BC-9002"),
+      barcodeForm.text().slice(0, 400),
+    );
+    await barcodeForm.clickOn('[data-testid="produk-scan"]');
+    await barcodeForm.fill('[data-testid="barcode-manual-input"]', "bc-9002");
+    await barcodeForm.clickOn('[data-testid="barcode-manual-submit"]');
+    check(
+      "barcode hasil ubahan tersimpan & bisa dipindai lagi",
+      barcodeForm.query('[data-testid="produk-sku-ubah"]')?.value === "UJI-BC-1" &&
+        barcodeForm
+          .query('[data-testid="produk-ubah-barcode-preview"] [data-barcode-value]')
+          ?.getAttribute("data-barcode-value") === "BC-9002",
+      barcodeForm.text().slice(0, 400),
+    );
+    check(
+      "alur barcode produk tanpa error konsol",
+      barcodeForm.newErrors().length === 0,
+      barcodeForm.newErrors().join(" | ").slice(0, 200),
+    );
+    await barcodeForm.unmount();
+
     withoutSession();
   }
 

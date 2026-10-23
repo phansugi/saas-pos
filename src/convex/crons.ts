@@ -1,13 +1,16 @@
 /**
  * Pekerjaan terjadwal MesinPOS.
  *
- * Satu tempat untuk melihat **apa yang jalan otomatis** di backend. Tujuh jadwal:
- * percobaan ulang webhook keluar (`api.access`), pengingat janji tanggap tiket
- * dukungan (`support.dedicated`), pengingat **hutang jatuh tempo** dan **piutang
- * lewat tempo** yang keadaannya berubah karena waktu, bukan karena transaksi,
- * **perapian sesi pendampingan platform** yang sudah kedaluwarsa, serta
- * **pembersihan akun uji** (akun bisnis lalu baris pengguna yatim) supaya
- * deployment dev tidak menumpuk data dari harness yang dijalankan berulang.
+ * Satu tempat untuk melihat **apa yang jalan otomatis** di backend. Sebelas
+ * jadwal: percobaan ulang webhook keluar (`api.access`), pengingat janji tanggap
+ * tiket dukungan (`support.dedicated`), pengingat **hutang jatuh tempo** dan
+ * **piutang lewat tempo** yang keadaannya berubah karena waktu, bukan karena
+ * transaksi, **perapian sesi pendampingan platform** yang sudah kedaluwarsa,
+ * **penyapu antrean stok marketplace** yang tertinggal, **rekonsiliasi selisih
+ * stok harian** terhadap marketplace, **sinkron barcode/QR otomatis** (hanya
+ * kolom barcode), serta **pembersihan akun
+ * uji** (akun bisnis lalu baris pengguna yatim) supaya deployment dev tidak
+ * menumpuk data dari harness yang dijalankan berulang.
  *
  * Kiriman yang gagal sudah disimpan oleh `apiAccess.finishDelivery` sebagai
  * `pending` dengan `nextAttemptAt` (aturan murni `lib/webhooks.ts`:
@@ -33,6 +36,15 @@ import {
 } from "./lib/impersonation";
 import { USER_PURGE_BATCH } from "./lib/platformTenants";
 import { MAX_RETRY_BATCH, RETRY_WORKER_INTERVAL_MINUTES } from "./lib/webhooks";
+import {
+  MARKETPLACE_BARCODE_SYNC_BATCH,
+  MARKETPLACE_BARCODE_SYNC_HOUR_UTC,
+  MARKETPLACE_RECONCILE_BATCH,
+  MARKETPLACE_RECONCILE_HOUR_UTC,
+  MARKETPLACE_SALES_SWEEP_BATCH,
+  MARKETPLACE_STOCK_SWEEP_BATCH,
+  MARKETPLACE_STOCK_SWEEP_INTERVAL_MINUTES,
+} from "./lib/marketplace";
 
 const crons = cronJobs();
 
@@ -79,6 +91,56 @@ crons.daily(
 // ini hanya menutup baris yang sudah mati supaya jejaknya berakhir rapi — tenant
 // menerima baris audit terakhir (“kedaluwarsa setelah N menit”) dan tidak ada sesi
 // yang menggantung tanpa ujung.
+// Stok yang baru bergerak dikirim ke marketplace oleh action yang dijadwalkan
+// transaksinya sendiri (± 2 detik). Kalau action itu sempat mati di tengah jalan
+// (mis. deployment baru masuk), antreannya tidak boleh menggantung: sapuan ini
+// mengirim ulang baris yang lebih tua dari satu menit, satu kali per workspace.
+crons.interval(
+  "mengirim antrean stok marketplace yang tertinggal",
+  { minutes: MARKETPLACE_STOCK_SWEEP_INTERVAL_MINUTES },
+  internal.marketplace.sweepStockQueues,
+  { limit: MARKETPLACE_STOCK_SWEEP_BATCH },
+);
+
+// Penjualan otomatis memakai pola yang sama: action dijadwalkan nota yang baru
+// tersimpan, dan sapuan ini menutup antrean yang tertinggal karena action-nya
+// mati. Tanpa ini, nota terakhir sebelum deployment baru bisa tidak pernah
+// sampai ke marketplace.
+crons.interval(
+  "mengirim antrean penjualan marketplace yang tertinggal",
+  { minutes: MARKETPLACE_STOCK_SWEEP_INTERVAL_MINUTES },
+  internal.marketplace.sweepSaleQueues,
+  { limit: MARKETPLACE_SALES_SWEEP_BATCH },
+);
+
+// **Rekonsiliasi stok harian**: dua arah dorongan di atas bisa saja tidak
+// lengkap — marketplace yang menjual sendiri, SKU yang berganti nama, atau
+// kiriman yang ditolak penerima. Pemeriksaan ini membaca katalog marketplace
+// sekali sehari, membandingkannya dengan saldo **lokasi jual** POS, dan menyimpan
+// daftar SKU yang selisih beserta angkanya. Ia **tidak menimpa** stok siapa pun:
+// keputusan arah (impor vs dorong) tetap milik pemilik, karena menimpa otomatis
+// bisa menghapus penjualan yang baru terjadi di sisi lain.
+crons.daily(
+  "memeriksa selisih stok marketplace",
+  { hourUTC: MARKETPLACE_RECONCILE_HOUR_UTC, minuteUTC: 30 },
+  internal.marketplace.reconcileAllStocks,
+  { limit: MARKETPLACE_RECONCILE_BATCH },
+);
+
+// **Sinkron barcode/QR otomatis**: marketplace adalah sumber label, jadi kode
+// yang tersimpan di sana boleh disalin sendiri ke POS. Pekerja ini **hanya**
+// menulis `products.barcode`/`barcodeType` — nama, harga, stok, kategori, dan
+// gambar tidak disentuh, dan produk baru tidak dibuat (itu tugas tombol Impor
+// katalog yang memang diperintahkan pemilik). Jamnya 03:00 UTC, sesudah
+// rekonsiliasi stok, supaya dua pekerja tidak membaca katalog marketplace
+// berbarengan untuk workspace yang sama.
+crons.daily(
+  "menyinkronkan barcode marketplace",
+  { hourUTC: MARKETPLACE_BARCODE_SYNC_HOUR_UTC, minuteUTC: 0 },
+  internal.marketplace.syncAllBarcodes,
+  { limit: MARKETPLACE_BARCODE_SYNC_BATCH },
+);
+
 crons.interval(
   "menutup sesi pendampingan platform yang kedaluwarsa",
   { minutes: IMPERSONATION_SWEEP_INTERVAL_MINUTES },

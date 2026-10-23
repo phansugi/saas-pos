@@ -62,6 +62,42 @@ function check(name, condition, detail) {
     JSON.stringify(bangunan.categories.map((row) => row.name)),
   );
 
+  /*
+    “Buah & Sayur” pernah jatuh ke preset `retail` (Sembako, Minuman, Makanan
+    Ringan, Kebutuhan Rumah) karena kuncinya tidak punya preset sendiri — master
+    yang ada, tetapi tidak menjawab barang dagangan toko buah. Dua cek di bawah
+    menjaga agar subkategori itu punya master sendiri dan tidak kembali ke
+    preset generik.
+  */
+  const buahSayur = productCatalogPresetFor({
+    category: "retail",
+    subcategory: "buah-sayur",
+    subcategoryLabel: "Buah & Sayur",
+  });
+  check(
+    "toko buah & sayur memakai preset khusus buah/sayur, bukan preset minimarket",
+    buahSayur.source === "subcategory" &&
+      ["Buah Segar", "Sayur Segar", "Bumbu & Pelengkap"].every((name) =>
+        buahSayur.categories.some((row) => row.name === name),
+      ) &&
+      !buahSayur.categories.some((row) => row.name === "Sembako"),
+    JSON.stringify(buahSayur.categories.map((row) => row.name)),
+  );
+  check(
+    "setiap kategori master buah & sayur membawa subkategorinya",
+    buahSayur.categories.every((row) => row.subcategories.length >= 2),
+    JSON.stringify(buahSayur.categories),
+  );
+  check(
+    "subkategori Buah & Sayur terdaftar di katalog bisnis bawaan",
+    BUSINESS_CATEGORIES.some(
+      (row) =>
+        row.key === "retail" &&
+        row.subcategories.some((sub) => sub.key === "buah-sayur" && sub.label === "Buah & Sayur"),
+    ),
+    BUSINESS_CATEGORIES.map((row) => row.key).join(", "),
+  );
+
   const laundry = productCatalogPresetFor({ category: "service", subcategory: "laundry" });
   check(
     "jasa laundry memakai preset layanan (bukan barang dagangan)",

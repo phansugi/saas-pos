@@ -27,13 +27,14 @@ import {
   API_DOC_NOT_YET,
   API_DOC_UPDATED,
   API_DOC_VERSION,
+  INBOUND_WEBHOOK_DOC,
   SAMPLE_ORDER_BODY,
   SYNC_DOC,
   WEBHOOK_DOC,
   apiSiteUrl,
   type ApiDocEndpoint,
 } from "@/lib/apiDocs";
-import { API_SCOPE_OPTIONS } from "@/lib/apiKeys";
+import { API_SCOPE_OPTIONS_UNIQUE } from "@/lib/apiKeys";
 import { cn } from "@/lib/utils";
 
 /**
@@ -53,6 +54,7 @@ export function ApiDocsPage() {
     { id: "autentikasi", label: "Autentikasi & scope" },
     { id: "endpoint", label: "Referensi endpoint" },
     { id: "webhook", label: "Webhook keluar" },
+    { id: "webhook-masuk", label: "Webhook masuk" },
     { id: "sinkron", label: "Sinkronisasi berkelanjutan" },
     { id: "galat", label: "Kode status" },
     { id: "batas", label: "Batas & kuota" },
@@ -100,9 +102,10 @@ export function ApiDocsPage() {
           </h1>
           <p className="mt-4 max-w-2xl text-muted-foreground">
             REST + JSON di atas HTTPS. Satu kunci API mewakili satu workspace, dengan izin
-            yang dibatasi pembuatnya. Halaman ini menjelaskan cara membuat kunci, memanggil
-            setiap endpoint, menangani kode status, dan menerima webhook — termasuk langkah
-            integrasi ke <strong>pusatbahanbangunan.com</strong>.
+            yang dibatasi pembuatnya. Halaman ini menjelaskan cara membuat kunci, membaca
+            & menulis data, memilih toko, memakai kursor dan rentang tanggal, menangani kode
+            status, serta webhook dua arah — termasuk langkah integrasi ke{" "}
+            <strong>pusatbahanbangunan.com</strong>.
           </p>
           <div className="mt-6 flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-card px-3 py-2">
@@ -209,7 +212,7 @@ export function ApiDocsPage() {
               <Feature
                 icon={Lock}
                 title="Berhenti otomatis"
-                body="Kunci berhenti bekerja saat dicabut, kedaluwarsa, atau pembuatnya tidak lagi aktif di workspace. Jawabannya 401/403 dengan pesan yang bisa ditindaklanjuti."
+                body="Kunci berhenti bekerja saat dicabut (barisnya ikut dihapus, jadi rahasianya tidak bisa dipulihkan), kedaluwarsa, atau pembuatnya tidak lagi aktif di workspace. Jawabannya 401/403 dengan pesan yang bisa ditindaklanjuti."
               />
               <Feature
                 icon={Gauge}
@@ -228,7 +231,7 @@ export function ApiDocsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {API_SCOPE_OPTIONS.map((option) => (
+                  {API_SCOPE_OPTIONS_UNIQUE.map((option) => (
                     <tr key={option.permission} className="border-t border-border/60">
                       <td className="px-3 py-2 font-mono text-xs">{option.permission}</td>
                       <td className="px-3 py-2">{option.label}</td>
@@ -354,10 +357,83 @@ Accept: application/json`}
           </Section>
 
           <Section
+            id="webhook-masuk"
+            eyebrow="Platform → MesinPOS"
+            title="Webhook masuk"
+            description="Kalau platform perlu mendorong peristiwa tanpa menunggu tarikan, daftarkan endpoint masuk lalu kirim peristiwa bertanda tangan. Operasinya dijalankan lewat jalur yang sama dengan endpoint tulis."
+          >
+            <div className="rounded-lg border border-border/60 bg-card p-4">
+              <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Alamat penerima
+              </div>
+              <code className="mt-1 block break-all font-mono text-xs">
+                {baseUrl}
+                {INBOUND_WEBHOOK_DOC.path.replace("<token>", "whi_…")}
+              </code>
+            </div>
+            <div className="overflow-x-auto rounded-lg border border-border/60">
+              <table className="w-full text-sm">
+                <thead className="bg-secondary/40 text-left text-xs uppercase tracking-wide text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-2">Event</th>
+                    <th className="px-3 py-2">Yang dijalankan</th>
+                    <th className="px-3 py-2">Bentuk `data`</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {INBOUND_WEBHOOK_DOC.events.map((event) => (
+                    <tr key={event.key} className="border-t border-border/60 align-top">
+                      <td className="px-3 py-2 font-mono text-xs">{event.key}</td>
+                      <td className="px-3 py-2">
+                        <span className="font-medium">{event.label}</span>
+                        <span className="block text-xs text-muted-foreground">{event.description}</span>
+                      </td>
+                      <td className="px-3 py-2 font-mono text-[11px] text-muted-foreground">
+                        {event.dataShape}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="overflow-x-auto rounded-lg border border-border/60">
+              <table className="w-full text-sm">
+                <thead className="bg-secondary/40 text-left text-xs uppercase tracking-wide text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-2">Header</th>
+                    <th className="px-3 py-2">Contoh</th>
+                    <th className="px-3 py-2">Keterangan</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {INBOUND_WEBHOOK_DOC.headers.map((header) => (
+                    <tr key={header.name} className="border-t border-border/60">
+                      <td className="px-3 py-2 font-mono text-xs">{header.name}</td>
+                      <td className="px-3 py-2 font-mono text-[11px] text-muted-foreground">
+                        {header.value}
+                      </td>
+                      <td className="px-3 py-2 text-xs">{header.note}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <CodeBlock label="Badan peristiwa" code={INBOUND_WEBHOOK_DOC.payloadExample} />
+            <ul className="space-y-2 text-sm text-muted-foreground">
+              {INBOUND_WEBHOOK_DOC.notes.map((note) => (
+                <li key={note} className="flex gap-2">
+                  <span className="mt-2 size-1.5 shrink-0 rounded-full bg-primary" />
+                  <span>{note}</span>
+                </li>
+              ))}
+            </ul>
+          </Section>
+
+          <Section
             id="sinkron"
             eyebrow="Pusat bahan bangunan · sinkron"
             title="Sinkronisasi berkelanjutan"
-            description="MesinPOS adalah sumber utama; platform menerima salinan dan hanya mengirim pesanan. Pembagian itu menghapus konflik harga/stok dan loop event tanpa perlu aturan last-write-wins."
+            description="MesinPOS memegang data operasional; platform menerima salinan dan boleh menulis lewat endpoint/peristiwa yang disepakati. Pembagian itu menghapus konflik harga/stok tanpa aturan last-write-wins."
           >
             <div className="overflow-x-auto rounded-lg border border-border/60">
               <table className="w-full text-sm">

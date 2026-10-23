@@ -150,6 +150,30 @@ const PRESETS_BY_SUBCATEGORY: Record<string, readonly ProductCategoryPreset[]> =
       subcategories: ["Sabun & Hand Sanitizer", "Masker", "Skincare"],
     },
   ],
+  /*
+    Toko buah & sayur **bukan** minimarket: master “Sembako/Minuman/Kebutuhan
+    Rumah” tidak menjawab barang yang benar-benar dijualnya (buah, sayur, bumbu
+    pelengkap). Preset ini sengaja dipisah supaya subkategori itu tidak lagi jatuh
+    ke preset generik `retail` hanya karena kuncinya tidak dikenal.
+  */
+  "buah-sayur": [
+    {
+      name: "Buah Segar",
+      subcategories: ["Buah Lokal", "Buah Impor", "Buah Potong & Kemasan"],
+    },
+    {
+      name: "Sayur Segar",
+      subcategories: ["Sayur Daun", "Sayur Buah", "Sayur Akar & Umbi"],
+    },
+    {
+      name: "Bumbu & Pelengkap",
+      subcategories: ["Bumbu Dapur", "Cabai & Bawang", "Rempah & Daun"],
+    },
+    {
+      name: "Olahan & Kemasan",
+      subcategories: ["Produk Olahan", "Kantong & Kemasan"],
+    },
+  ],
 
   // ── Makanan & Minuman ─────────────────────────────────────────────────────
   kafe: [

@@ -28,9 +28,6 @@ import {
   signWebhookPayload,
   verifyWebhookSignature,
 } from "../src/convex/lib/webhooks.ts";
-// Kode kategori SKU dipakai untuk menyusun harapan pada uji pindah kategori:
-// `PBB-<KATEGORI>-<nomor urut>`.
-import { productSkuCategoryCode } from "../src/convex/lib/productSku.ts";
 // Isi email undangan & tautan halaman Masuk diperiksa langsung dari aturan murni
 // yang dipakai aksi pengirim (`inviteEmail.ts`) — bukan dari salinan di harness.
 import {
@@ -8312,6 +8309,19 @@ async function main() {
     setelahDicabutTulis.status === 401,
     `${setelahDicabutTulis.status} ${JSON.stringify(setelahDicabutTulis.body)}`,
   );
+  const setelahCabutTulis = await client.query(api.apiAccess.overview, {
+    tenantId,
+    actorId: userId,
+  });
+  check(
+    "kunci tulis yang dicabut hilang dari daftar (barisnya dihapus)",
+    !setelahCabutTulis.keys.some((row) => row.id === kunciTulis.keyId) &&
+      setelahCabutTulis.summary.revokedKeys === 0,
+    JSON.stringify({
+      ada: setelahCabutTulis.keys.map((row) => row.name),
+      revoked: setelahCabutTulis.summary.revokedKeys,
+    }),
+  );
 
   const setelahDipakai = await client.query(api.apiAccess.overview, {
     tenantId,
@@ -8403,9 +8413,33 @@ async function main() {
   check(
     "kunci yang dicabut langsung berhenti bekerja",
     setelahDicabut.status === 401 &&
-      String(setelahDicabut.body?.error ?? "").includes("dicabut"),
+      String(setelahDicabut.body?.error ?? "").includes("tidak dikenal"),
     `${setelahDicabut.status} ${JSON.stringify(setelahDicabut.body)}`,
   );
+  {
+    const setelahCabut = await client.query(api.apiAccess.overview, {
+      tenantId,
+      actorId: userId,
+    });
+    check(
+      "kunci yang dicabut dihapus dari daftar",
+      !setelahCabut.keys.some((row) => row.id === kunciServer.keyId) &&
+        setelahCabut.summary.revokedKeys === 0,
+      JSON.stringify({
+        ada: setelahCabut.keys.map((row) => row.name),
+        revoked: setelahCabut.summary.revokedKeys,
+      }),
+    );
+    const purge = await client.mutation(api.apiAccess.purgeRevokedKeys, {
+      tenantId,
+      actorId: userId,
+    });
+    check(
+      "pembersih kunci dicabut tidak menyentuh kunci aktif",
+      purge.removed === 0,
+      JSON.stringify(purge),
+    );
+  }
   {
     let blocked = false;
     let message = "";
@@ -8420,8 +8454,8 @@ async function main() {
       message = error?.message ?? String(error);
     }
     check(
-      "kunci tidak bisa dicabut dua kali",
-      blocked && message.includes("sudah dicabut"),
+      "kunci yang sudah dicabut tidak bisa dicabut dua kali",
+      blocked && message.includes("tidak ditemukan"),
       message || "DITERIMA — pencabutan bisa diulang",
     );
   }
@@ -10909,9 +10943,9 @@ async function main() {
   }
 
   // -------------------------------------------------------------- SKU otomatis
-  // Kolom SKU boleh dikosongkan: server membuat `PBB-<KATEGORI>-<nomor urut>`
-  // yang unik (kode kategori dari nama kategori, nomor urut dari counter tenant),
-  // dan nomor yang benar-benar dipakai dikembalikan ke pemanggil.
+  // Kolom SKU boleh dikosongkan: server membuat `PBB-<nomor urut>` yang unik
+  // (nomor urut dari counter tenant), dan nomor yang benar-benar dipakai
+  // dikembalikan ke pemanggil. Kategori tidak ikut di dalam SKU.
   //
   // Pemeriksaan ini sengaja di **paling akhir** `main()`: setiap produk baru
   // menambah angka di cek `usage produk = 2` maupun di daftar produk yang dipakai
@@ -10922,7 +10956,7 @@ async function main() {
   });
   const kategoriMakanan = kategoriTenant.find((row) => row.name === "Makanan");
   check(
-    "tenant punya kategori bawaan untuk kode SKU",
+    "tenant punya kategori bawaan untuk uji pindah kategori",
     Boolean(kategoriMakanan),
     JSON.stringify(kategoriTenant.map((row) => row.name)),
   );
@@ -10935,20 +10969,20 @@ async function main() {
     actorId: userId,
   });
   check(
-    "SKU dibuat otomatis dengan format PBB-<KATEGORI>-<nomor urut>",
-    /^PBB-[A-Z0-9]{3}-\d{6}$/.test(autoUmu.sku),
+    "SKU dibuat otomatis dengan format PBB-<nomor urut>",
+    /^PBB-\d{7}$/.test(autoUmu.sku),
     autoUmu.sku,
   );
   check(
-    "tanpa kategori memakai kode UMU",
-    autoUmu.sku.startsWith("PBB-UMU-"),
+    "SKU otomatis tidak memuat kode kategori",
+    autoUmu.sku.split("-").length === 2,
     autoUmu.sku,
   );
 
   // SKU manual yang memakai format sama harus dilewati, bukan ditabrak: counter
   // berikutnya sudah “dipesan” oleh SKU yang diketik pemilik toko.
-  const nomorTerpakai = Number(autoUmu.sku.slice(-6)) + 1;
-  const skuManualBentrok = `PBB-UMU-${String(nomorTerpakai).padStart(6, "0")}`;
+  const nomorTerpakai = Number(autoUmu.sku.slice(-7)) + 1;
+  const skuManualBentrok = `PBB-${String(nomorTerpakai).padStart(7, "0")}`;
   await client.mutation(api.products.create, {
     tenantId,
     storeId,
@@ -10967,8 +11001,8 @@ async function main() {
   check(
     "nomor urut yang sudah dipakai manual dilewati, bukan dipakai dua kali",
     autoSetelahBentrok.sku !== skuManualBentrok &&
-      /^PBB-UMU-\d{6}$/.test(autoSetelahBentrok.sku) &&
-      Number(autoSetelahBentrok.sku.slice(-6)) > nomorTerpakai,
+      /^PBB-\d{7}$/.test(autoSetelahBentrok.sku) &&
+      Number(autoSetelahBentrok.sku.slice(-7)) > nomorTerpakai,
     `${skuManualBentrok} → ${autoSetelahBentrok.sku}`,
   );
 
@@ -10981,13 +11015,13 @@ async function main() {
     actorId: userId,
   });
   check(
-    "kode kategori diambil dari nama kategori (Makanan → MAK)",
-    autoMakanan.sku.startsWith("PBB-MAK-"),
+    "produk berkategori memakai format SKU yang sama (tanpa kode kategori)",
+    /^PBB-\d{7}$/.test(autoMakanan.sku) && autoMakanan.sku.split("-").length === 2,
     autoMakanan.sku,
   );
   check(
     "nomor urut naik satu-satu untuk tenant ini",
-    Number(autoMakanan.sku.slice(-6)) === Number(autoSetelahBentrok.sku.slice(-6)) + 1,
+    Number(autoMakanan.sku.slice(-7)) === Number(autoSetelahBentrok.sku.slice(-7)) + 1,
     `${autoSetelahBentrok.sku} → ${autoMakanan.sku}`,
   );
 
@@ -11048,10 +11082,9 @@ async function main() {
     skuKembarDitolak ?? "diterima",
   );
 
-  // -------------------------------------- kategori berubah → kode SKU ikut
-  // Kategori menentukan kode di tengah SKU, jadi memindahkan produk ke kategori
-  // lain harus ikut memindahkan kodenya — nomor urutnya dipertahankan selama bebas,
-  // dan SKU yang diketik pemilik toko tidak disentuh.
+  // -------------------------------------- pindah kategori tidak mengubah SKU
+  // SKU berformat `PBB-<nomor urut>` tanpa kode kategori: memindahkan produk ke
+  // kategori lain tidak boleh menulis ulang kode yang mungkin sudah tercetak.
   const kategoriLain = kategoriTenant.find((row) => row.name !== "Makanan");
   check(
     "tenant punya kategori kedua untuk uji pindah kategori",
@@ -11066,15 +11099,11 @@ async function main() {
     categoryId: kategoriMakanan._id,
   });
   check(
-    "kategori produk berubah → kode SKU ikut kategori barunya",
-    /^PBB-MAK-\d{6}$/.test(pindahKeMakanan.sku) &&
-      pindahKeMakanan.previousSku === autoUmu.sku,
+    "kategori produk berubah → SKU tetap sama",
+    pindahKeMakanan.sku === autoUmu.sku &&
+      pindahKeMakanan.previousSku === autoUmu.sku &&
+      pindahKeMakanan.category === "Makanan",
     JSON.stringify(pindahKeMakanan),
-  );
-  check(
-    "nomor urut dipertahankan saat kategori berganti",
-    pindahKeMakanan.sku.slice(-6) === autoUmu.sku.slice(-6),
-    `${autoUmu.sku} → ${pindahKeMakanan.sku}`,
   );
 
   const kategoriDilepas = await client.mutation(api.products.setCategory, {
@@ -11083,8 +11112,8 @@ async function main() {
     productId: autoUmu.productId,
   });
   check(
-    "kategori dikosongkan → kode SKU kembali UMU",
-    kategoriDilepas.sku.startsWith("PBB-UMU-") && kategoriDilepas.category === null,
+    "kategori dikosongkan → SKU tetap sama",
+    kategoriDilepas.sku === autoUmu.sku && kategoriDilepas.category === null,
     JSON.stringify(kategoriDilepas),
   );
 
@@ -11095,7 +11124,7 @@ async function main() {
     categoryId: kategoriMakanan._id,
   });
   check(
-    "SKU yang diketik pemilik toko TIDAK ikut berubah",
+    "SKU yang diketik pemilik toko juga tidak berubah",
     manualDipindah.sku === skuManual.sku && manualDipindah.previousSku === skuManual.sku,
     JSON.stringify(manualDipindah),
   );
@@ -11103,33 +11132,6 @@ async function main() {
     "kategori produk ber-SKU manual tetap tersimpan",
     manualDipindah.category === "Makanan",
     String(manualDipindah.category),
-  );
-
-  // Nomor yang sudah terpakai di kategori tujuan tidak boleh ditabrak: SKU-nya
-  // pindah ke nomor berikutnya yang bebas, bukan gagal.
-  const nomorMakanan = Number(autoMakanan.sku.slice(-6));
-  const kodeKategoriLain = productSkuCategoryCode(kategoriLain.name);
-  const skuMenahanNomor = `PBB-${kodeKategoriLain}-${String(nomorMakanan).padStart(6, "0")}`;
-  await client.mutation(api.products.create, {
-    tenantId,
-    storeId,
-    sku: skuMenahanNomor,
-    name: "SKU Menahan Nomor",
-    price: 1000,
-    actorId: userId,
-  });
-  const pindahBentrok = await client.mutation(api.products.setCategory, {
-    tenantId,
-    actorId: userId,
-    productId: autoMakanan.productId,
-    categoryId: kategoriLain._id,
-  });
-  check(
-    "nomor yang sudah dipakai di kategori tujuan dilewati, bukan ditabrak",
-    pindahBentrok.sku !== skuMenahanNomor &&
-      pindahBentrok.sku.startsWith(`PBB-${kodeKategoriLain}-`) &&
-      Number(pindahBentrok.sku.slice(-6)) > nomorMakanan,
-    `${skuMenahanNomor} → ${pindahBentrok.sku}`,
   );
 
   // Kasir boleh menjual, tapi tidak boleh mengubah katalog.
@@ -11157,11 +11159,11 @@ async function main() {
     actorId: userId,
   });
   check(
-    "SKU hasil pindah kategori tersimpan di produk, bukan hanya dikembalikan",
+    "SKU yang tetap itu benar-benar tersimpan di produk, bukan hanya di balikan",
     daftarSetelahKategori.find((p) => p._id === autoMakanan.productId)?.sku ===
-      pindahBentrok.sku &&
+      autoMakanan.sku &&
       daftarSetelahKategori.find((p) => p._id === autoUmu.productId)?.sku ===
-        kategoriDilepas.sku,
+        autoUmu.sku,
     JSON.stringify(
       daftarSetelahKategori
         .filter((p) => [autoMakanan.productId, autoUmu.productId].includes(p._id))
@@ -11191,8 +11193,8 @@ async function main() {
       name: namaKategori,
     });
     check(
-      "owner bisa menambah kategori beserta kode SKU-nya",
-      dibuat.name === namaKategori && dibuat.skuCode === "SAN",
+      "owner bisa menambah kategori baru",
+      dibuat.name === namaKategori,
       JSON.stringify(dibuat),
     );
 
@@ -11273,8 +11275,8 @@ async function main() {
       );
     }
 
-    // Ganti nama: kodenya bisa berubah untuk produk **berikutnya**, tetapi SKU
-    // yang sudah ada tidak boleh ditulis ulang.
+    // Ganti nama: SKU tidak boleh ditulis ulang — nama kategori bukan bagian dari
+    // SKU (`PBB-<nomor urut>`).
     const namaMakanan = "Makanan";
     const makanan = setelahTambah.find((row) => row.name === namaMakanan);
     // Satu produk ber-SKU otomatis di kategori “Makanan”: inilah bukti bahwa SKU
@@ -11288,8 +11290,8 @@ async function main() {
       actorId: userId,
     });
     check(
-      "produk uji ganti nama kategori memakai kode kategori yang benar",
-      produkMakananUji.sku.startsWith("PBB-MAK-"),
+      "produk berkategori memakai format SKU PBB-<nomor urut>",
+      /^PBB-\d{7}$/.test(produkMakananUji.sku),
       produkMakananUji.sku,
     );
     const skuSebelumGantiNama = produkMakananUji.sku;
@@ -11300,8 +11302,9 @@ async function main() {
       name: `${namaKategori} Bersih`,
     });
     check(
-      "ganti nama kategori yang kodenya tetap ditandai tidak mengubah kode SKU",
-      gantiSama.name === `${namaKategori} Bersih` && gantiSama.skuCodeChanged === false,
+      "ganti nama kategori tersimpan & menyebut nama lamanya",
+      gantiSama.name === `${namaKategori} Bersih` &&
+        gantiSama.previousName === namaKategori,
       JSON.stringify(gantiSama),
     );
     const gantiBeda = await client.mutation(api.categories.rename, {
@@ -11311,8 +11314,8 @@ async function main() {
       name: "Peralatan",
     });
     check(
-      "ganti nama kategori yang mengubah kode ditandai apa adanya",
-      gantiBeda.skuCodeChanged === true && gantiBeda.previousName === namaMakanan,
+      "ganti nama kategori cukup mengembalikan nama lama & baru",
+      gantiBeda.name === "Peralatan" && gantiBeda.previousName === namaMakanan,
       JSON.stringify(gantiBeda),
     );
     const daftarSetelahGantiNama = await client.query(api.products.listByStore, {
@@ -11337,7 +11340,7 @@ async function main() {
     });
     check(
       "nama kategori bisa dikembalikan seperti semula",
-      kembalikanNama.name === namaMakanan && kembalikanNama.skuCodeChanged === true,
+      kembalikanNama.name === namaMakanan && kembalikanNama.previousName === "Peralatan",
       JSON.stringify(kembalikanNama),
     );
 
@@ -11353,7 +11356,7 @@ async function main() {
     });
     check(
       "produk bisa memakai kategori yang baru dibuat",
-      produkKategoriUji.sku.startsWith("PBB-SAN-"),
+      /^PBB-\d{7}$/.test(produkKategoriUji.sku),
       produkKategoriUji.sku,
     );
     const nonaktif = await client.mutation(api.categories.setActive, {

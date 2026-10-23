@@ -221,6 +221,48 @@ async function main() {
       akhir.summary.activeEndpoints === 1,
     JSON.stringify(akhir.summary),
   );
+
+  // Rahasia penanda tangan boleh disamakan dengan nilai yang dipegang penerima —
+  // inilah jalur yang menutup kasus “penerima menjawab 401 tanda tangan tidak
+  // cocok”, dan aturannya diuji ke server sungguhan (bukan hanya ke fungsi murni).
+  let tolakPendek = "";
+  try {
+    await client.mutation(api.apiAccess.updateEndpoint, {
+      tenantId,
+      actorId: userId,
+      endpointId: aktif.endpointId,
+      secret: "pendek",
+    });
+  } catch (error) {
+    tolakPendek = error?.message ?? String(error);
+  }
+  check(
+    "rahasia terlalu pendek ditolak server, bukan tersimpan",
+    tolakPendek.includes("minimal"),
+    tolakPendek,
+  );
+
+  const dipasang = await client.mutation(api.apiAccess.updateEndpoint, {
+    tenantId,
+    actorId: userId,
+    endpointId: aktif.endpointId,
+    secret: "RahasiaBersamaDariPenerima123",
+  });
+  const setelahRahasia = await client.query(api.apiAccess.overview, {
+    tenantId,
+    actorId: userId,
+  });
+  const endpointAktif = setelahRahasia.endpoints.find(
+    (row) => row.id === aktif.endpointId,
+  );
+  check(
+    "rahasia dari penerima tersimpan & tidak ditampilkan kembali sebagai rahasia baru",
+    (dipasang.secret ?? null) === null && endpointAktif?.secretLastFour === "a123",
+    JSON.stringify({
+      dikembalikan: dipasang.secret ?? null,
+      terakhir: endpointAktif?.secretLastFour ?? null,
+    }),
+  );
 }
 
 try {

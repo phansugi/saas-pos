@@ -3,7 +3,7 @@
  *
  * Implementasinya ada di `src/convex/lib/productSku.ts` supaya halaman Produk &
  * Stok, store demo, store Convex, backend, dan harness memakai format yang sama
- * persis — `PBB-<KATEGORI>-<nomor urut>` (Convex hanya membundel modul di bawah
- * `src/convex`).
+ * persis — `PBB-<nomor urut>` (Convex hanya membundel modul di bawah
+ * `src/convex`). Kategori tidak ikut di dalam SKU.
  */
 export * from "@/convex/lib/productSku";

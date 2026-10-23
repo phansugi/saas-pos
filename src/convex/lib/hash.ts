@@ -80,7 +80,15 @@ export function sha256(bytes: Uint8Array): Uint8Array {
   const h = SHA256_H.slice();
   const bitLength = bytes.length * 8;
   // Padding: 0x80, lalu nol sampai panjang ≡ 56 (mod 64), lalu panjang 64-bit BE.
-  const paddedLength = (((bytes.length + 9) >> 6) + 1) << 6;
+  //
+  // Panjang blok dibulatkan **ke atas** (`ceil`), bukan `floor + 1`: untuk
+  // `bytes.length + 9` yang tepat kelipatan 64, `floor + 1` menambah satu blok
+  // nol penuh sehingga digest-nya salah. Kasus itu bukan teori — HMAC atas
+  // `timestamp.body` untuk badan kiriman 41 mod 64 pernah menghasilkan tanda
+  // tangan yang ditolak penerima (HTTP 401 “Tanda tangan tidak cocok”) padahal
+  // rahasianya benar, dan `sha256Hex` untuk rahasia sepanjang 55 mod 64 juga
+  // menyimpang dari SHA-256 standar.
+  const paddedLength = ((bytes.length + 9 + 63) >> 6) << 6;
   const block = new Uint8Array(paddedLength);
   block.set(bytes);
   block[bytes.length] = 0x80;

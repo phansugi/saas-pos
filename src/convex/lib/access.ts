@@ -18,6 +18,7 @@ import { decidePlatformAccess } from "./platform";
 import { sanitizePermissions } from "./rbac";
 import { rolePermissions } from "./roleSettings";
 import { type Permission } from "./authz";
+import { queueMarketplaceStockPush } from "./marketplaceStockQueue";
 import { enqueueWebhookEvent } from "./webhookOutbox";
 import { stockChangedEventData } from "./webhookEvents";
 
@@ -574,6 +575,17 @@ export async function applyStockChange(
         refId: args.refId,
       }),
     });
+
+    // Kalau workspace-nya dipasangkan ke vendor marketplace, produk ini juga
+    // dititipkan ke antrean **stok otomatis**: marketplace memakai angka lokasi
+    // jual toko, jadi hanya pergerakan di lokasi itu yang perlu dikabarkan.
+    // Pergerakan gudang tambahan cukup sampai `stock.changed` di atas.
+    if (args.warehouseId === undefined) {
+      await queueMarketplaceStockPush(ctx, {
+        tenantId: args.tenantId,
+        productId: args.productId,
+      });
+    }
   }
 
   return next;

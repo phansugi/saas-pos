@@ -58,6 +58,7 @@ import type {
   ThreewaySummary,
 } from "@/lib/threeway";
 import type { ProductDeletionCheck, ProductUsage } from "@/lib/productEdit";
+import type { ProductBarcodeType } from "@/lib/productBarcode";
 import type {
   ShiftLocalClock,
   ShiftOwnerAlertKind,
@@ -71,6 +72,19 @@ import type {
   BusinessCategoryOption,
   LockedBusinessCategory,
 } from "@/lib/businessCategory";
+import type {
+  MarketplaceCatalogPullResult,
+  MarketplaceContactKind,
+  MarketplaceProductPushResult,
+  MarketplaceReconcileResult,
+  MarketplaceStockDiffPullResult,
+  MarketplaceStockDiffPushResult,
+  MarketplaceLookupResult,
+  MarketplacePairingView,
+  MarketplaceRetryResult,
+  MarketplaceStatusView,
+  MarketplaceSyncResult,
+} from "@/lib/marketplace";
 import type { StoreModules } from "./modules";
 
 export type PaymentLabel = "Tunai" | "QRIS" | "Kartu" | "Transfer";
@@ -260,14 +274,13 @@ export interface RenameCategoryInput {
 }
 
 /**
- * Balikan ganti nama kategori. `skuCodeChanged` benar kalau kode di tengah SKU
- * ikut berubah untuk produk **berikutnya** — SKU yang sudah ada tidak ditulis
- * ulang, jadi halaman mengatakannya apa adanya.
+ * Balikan ganti nama kategori. SKU produk tidak ikut berubah (formatnya
+ * `PBB-<nomor urut>`, tanpa nama kategori), jadi yang dikembalikan hanya nama
+ * lama & baru.
  */
 export interface RenamedCategory {
   name: string;
   previousName: string;
-  skuCodeChanged: boolean;
 }
 
 /**
@@ -283,8 +296,8 @@ export interface RemovedCategory {
 /**
  * Subkategori katalog — dibuat **di bawah** sebuah kategori, bukan berdiri sendiri.
  *
- * Kategori menentukan kode SKU & tab POS; subkategori tidak menyentuh keduanya,
- * ia bagian katalog yang ikut dikirim ke platform (API & webhook). Produk menunjuk
+ * Kategori menentukan tab POS; subkategori tidak menyentuh tab maupun SKU, ia
+ * bagian katalog yang ikut dikirim ke platform (API & webhook). Produk menunjuk
  * **id** subkategorinya, jadi ganti nama subkategori tidak menulis ulang produk
  * mana pun.
  */
@@ -325,6 +338,13 @@ export interface RemovedSubcategory {
 export interface StoreProduct {
   id: string;
   sku: string;
+  /**
+   * Kode tambahan yang dipindai kasir (barcode pabrik atau QR pemasok).
+   * Kosong = kasir hanya mencocokkan SKU. Satu kode per produk.
+   */
+  barcode?: string;
+  /** Jenis kode untuk label & pratinjau; kosong diperlakukan sebagai `barcode`. */
+  barcodeType?: ProductBarcodeType;
   name: string;
   /**
    * Nonaktif = tidak dijual lagi. `products` (katalog penjualan) hanya memuat yang
@@ -777,6 +797,16 @@ export interface UpdatedProduct {
 }
 
 /** Masukan setelan PPN dari halaman Pengaturan. */
+/** Bentuk yang dipakai halaman Pengaturan untuk memasangkan vendor marketplace. */
+export interface PairMarketplaceInput {
+  vendorId: string;
+  vendorName: string;
+  contactKind: MarketplaceContactKind;
+  contact: string;
+  /** Marketplace sudah mencocokkan kontak ini (hasil endpoint pencocokan). */
+  contactVerified: boolean;
+}
+
 export interface UpdateTaxInput {
   active: boolean;
   ratePct: number;
@@ -982,10 +1012,9 @@ export interface SetModifiersInput {
  * Mengatur penempatan katalog produk: kategori dan subkategorinya.
  *
  * Kosongkan `category` untuk melepas kategorinya (subkategori otomatis ikut
- * dilepas — label tanpa induk tidak boleh ada). SKU yang **dibuat sistem**
- * (`PBB-<KATEGORI>-<nomor urut>`) ikut berganti kodenya saat kategorinya berganti,
- * sedangkan SKU yang diketik pemilik toko tidak disentuh. Subkategori sendiri
- * tidak pernah mengubah SKU.
+ * dilepas — label tanpa induk tidak boleh ada). SKU **tidak** ikut berubah:
+ * formatnya `PBB-<nomor urut>` tanpa nama kategori, jadi kode yang mungkin sudah
+ * tercetak di label tetap sah.
  */
 export interface SetProductCategoryInput {
   productId: string;
@@ -1005,8 +1034,8 @@ export interface CreateProductInput {
   name: string;
   /**
    * Kosongkan (atau jangan isi) untuk meminta SKU otomatis: server membuat
-   * `PBB-<KATEGORI>-<nomor urut>` yang unik, dan nomor yang benar-benar dipakai
-   * dikembalikan di `sku` hasil `createProduct`.
+   * `PBB-<nomor urut>` yang unik, dan nomor yang benar-benar dipakai dikembalikan
+   * di `sku` hasil `createProduct`.
    */
   sku?: string;
   price: number;
@@ -1019,6 +1048,19 @@ export interface CreateProductInput {
   /** Satuan dasar (default PCS). */
   unit?: string;
   openingStock?: number;
+  /** Barcode/QR tambahan; kosong = produk hanya bisa dipindai lewat SKU. */
+  barcode?: string;
+  barcodeType?: ProductBarcodeType;
+}
+
+/**
+ * Mengisi atau melepas barcode/QR produk tersimpan. `barcode` kosong berarti
+ * melepas kode; `barcodeType` hanya berarti saat kodenya diisi.
+ */
+export interface SetProductBarcodeInput {
+  productId: string;
+  barcode: string;
+  barcodeType?: ProductBarcodeType;
 }
 
 export interface CreateSaleResult {
@@ -1832,6 +1874,12 @@ export interface UpdateWebhookEndpointInput {
   description?: string;
   events?: string[];
   rotateSecret?: boolean;
+  /**
+   * Rahasia penanda tangan yang diketik pemilik — nilai yang sama dengan yang
+   * disimpan penerimanya. Dipakai saat penerima menjawab “tanda tangan tidak
+   * cocok”: kedua sisi disamakan tanpa memutar rahasia baru.
+   */
+  secret?: string;
 }
 
 /** Hasil satu kiriman uji; `error` berisi pesan penerima kalau gagal. */
@@ -1841,6 +1889,9 @@ export interface WebhookTestResult {
   event: string;
   error: string | null;
 }
+
+/** Hasil tombol **Kirim ulang** pada satu baris riwayat kiriman. */
+export type WebhookRetryResult = WebhookTestResult;
 
 export interface CreateCustomRoleInput {
   name: string;
@@ -2312,6 +2363,95 @@ export interface StoreApi {
   /** Menyimpan setelan pengingat; aturannya sama dengan `tenants.updateShift`. */
   setShift(input: UpdateShiftInput): Promise<UpdatedShift>;
   /**
+   * Pairing vendor marketplace `pusatbahanbangunan.com`: vendor yang sedang
+   * terpasang, apakah pemanggil boleh memasangkan (hanya pemilik), dan alasan
+   * tombolnya mati untuk peran lain.
+   *
+   * Dibaca dari baris `marketplacePairings` lewat `marketplace.status`; token
+   * snapshot hanya ikut untuk pemilik. Selalu berbentuk status kosong yang sah
+   * untuk peran tanpa izin, jadi halaman tidak perlu tahu backend mana yang aktif.
+   */
+  marketplace: MarketplaceStatusView;
+  /**
+   * Mencari vendor marketplace. Bawaannya **pencarian kontak**: hanya vendor
+   * yang cocok dengan email/WA itu yang dikembalikan. `includeDirectory: true`
+   * membuka direktori lengkap, dan hanya dipakai kalau pemilik memintanya.
+   */
+  lookupMarketplaceVendors(input: {
+    contactKind: MarketplaceContactKind;
+    value: string;
+    includeDirectory?: boolean;
+  }): Promise<MarketplaceLookupResult>;
+  /** Memasangkan workspace ke satu vendor; server menolak peran selain pemilik. */
+  pairMarketplace(input: PairMarketplaceInput): Promise<{
+    pairing: MarketplacePairingView;
+    sentence: string;
+  }>;
+  /** Melepas pairing; tautan snapshot lama langsung tidak berlaku. */
+  unpairMarketplace(): Promise<{ sentence: string }>;
+  /**
+   * Mencatat ulang satu pesanan marketplace yang pernah **ditolak** (mis. SKU
+   * belum ada saat pesanan lunas masuk), memakai isi pesanan yang sudah
+   * tersimpan. Tidak mengirim apa pun ke marketplace: pesanan itu sudah ada di
+   * sana, dan kunci idempotensinya sama sehingga percobaan berikutnya dari
+   * marketplace hanya dijawab `duplicate` — bukan penjualan kedua.
+   */
+  retryMarketplaceOrder(orderId: string): Promise<MarketplaceRetryResult>;
+  /**
+   * Menyimpan **rahasia penanda tangan** kiriman ke marketplace (harus sama
+   * dengan “rahasia endpoint” di Pengaturan marketplace). `null`/kosong menghapusnya.
+   */
+  setMarketplacePushSecret(secret: string | null): Promise<{
+    saved: boolean;
+    lastFour: string | null;
+    sentence: string;
+  }>;
+  /**
+   * Menyusun snapshot terbaru dan — bila marketplace menyediakan endpoint tulis
+   * — mendorongnya. Tanpa endpoint, hasilnya `ready`: marketplace tetap bisa
+   * menarik data lewat tautan pairing bertoken.
+   */
+  syncMarketplaceNow(): Promise<MarketplaceSyncResult>;
+  /**
+   * Mendorong **katalog produk** ke platform marketplace: seluruh field produk
+   * (harga, modal, satuan, stok, harga bertingkat, konversi satuan, modifier) +
+   * gambar + pohon kategori, upsert per SKU. Produk/kategori/field yang belum ada
+   * di platform dibuat mengikuti sumbernya; hasilnya melaporkan berapa yang
+   * dibuat/diperbarui bila marketplace mengirim angkanya.
+   */
+  pushMarketplaceProducts(): Promise<MarketplaceProductPushResult>;
+  /**
+   * Menarik **katalog vendor dari marketplace** ke MesinPOS: kategori,
+   * subkategori, dan produk di-upsert berdasarkan SKU. Nama, harga, satuan, dan
+   * status aktif mengikuti marketplace; stok & harga modal tetap milik POS.
+   * Hanya pemilik yang boleh; server menolak peran lain.
+   */
+  pullMarketplaceCatalog(): Promise<MarketplaceCatalogPullResult>;
+  /**
+   * **Rekonsiliasi stok**: membandingkan saldo lokasi jual MesinPOS dengan
+   * katalog vendor di marketplace, lalu menyimpan laporan selisih **per SKU**
+   * (`sku`, saldo POS, saldo marketplace, selisihnya). Pemeriksaan yang sama
+   * berjalan otomatis sekali sehari lewat cron; tombol ini hanya memicunya lebih
+   * awal. Tidak menimpa stok siapa pun — arah penimpaan tetap keputusan pemilik.
+   */
+  reconcileMarketplaceStock(): Promise<MarketplaceReconcileResult>;
+  /**
+   * Mengirim **hanya SKU yang saldonya berbeda** dari laporan rekonsiliasi
+   * terakhir ke marketplace, memakai bentuk kiriman stok yang sama dengan
+   * dorongan otomatis. Baris `pos_only`/`marketplace_only` tidak ikut: yang
+   * pertama akan membuat produk baru di marketplace, yang kedua tidak punya
+   * produk POS untuk dikirim. Kalau kirimannya diterima, laporan diperiksa ulang.
+   */
+  pushMarketplaceStockDiffs(): Promise<MarketplaceStockDiffPushResult>;
+  /**
+   * Arah sebaliknya: **menarik angka marketplace** ke saldo lokasi jual POS,
+   * hanya untuk SKU yang saldonya berbeda di laporan terakhir. Angkanya dibaca
+   * ulang dari katalog vendor saat tombol ditekan (bukan angka tabel yang bisa
+   * basi), setiap selisih dicatat sebagai pergerakan `adjustment`, dan laporan
+   * diperiksa ulang sesudahnya.
+   */
+  pullMarketplaceStockDiffs(): Promise<MarketplaceStockDiffPullResult>;
+  /**
    * Kabar shift yang sudah pernah dikirim ke pemilik toko (kas belum dibuka di
    * jam operasional / shift belum ditutup), terbaru dulu.
    *
@@ -2561,6 +2701,13 @@ export interface StoreApi {
    * inputnya.
    */
   createProduct(input: CreateProductInput): Promise<{ id: string; sku: string }>;
+  /**
+   * Mengisi/melepas barcode atau QR produk (`products.setBarcode`). Kode kosong
+   * melepasnya; kode yang dipakai produk lain ditolak server.
+   */
+  setProductBarcode(
+    input: SetProductBarcodeInput,
+  ): Promise<{ barcode: string; barcodeType: ProductBarcodeType; changed: boolean }>;
   /**
    * Menambahkan satu gambar ke sebuah produk. Berkasnya sudah diperkecil klien
    * (`prepareProductImage`); batas 8 gambar dan 2 MB per berkas ditegakkan lagi
@@ -2834,8 +2981,18 @@ export interface StoreApi {
   createApiKey(
     input: CreateApiKeyInput,
   ): Promise<{ id: string; name: string; plaintext: string; mask: string; scopes: Permission[] }>;
-  /** Mencabut kunci: selalu boleh, tanpa gerbang fitur. */
+  /**
+   * Mencabut **dan menghapus** kunci: selalu boleh, tanpa gerbang fitur. Barisnya
+   * hilang dari daftar (nama & rahasianya tidak bisa dipulihkan); jejak
+   * pencabutannya tetap ada di log audit.
+   */
   revokeApiKey(keyId: string): Promise<void>;
+  /**
+   * Menghapus baris kunci **peninggalan** yang dulu dicabut dengan menandai
+   * `active: false` (sebelum pencabutan menghapus baris). Kunci aktif & yang
+   * hanya kedaluwarsa tidak disentuh.
+   */
+  purgeRevokedApiKeys(): Promise<{ removed: number; sentence: string }>;
   /** Mendaftarkan endpoint webhook; rahasia penanda tangan hanya tampil sekali. */
   createWebhookEndpoint(
     input: CreateWebhookEndpointInput,
@@ -2849,6 +3006,14 @@ export interface StoreApi {
    * selalu tercatat, jadi kegagalan tidak hilang begitu saja.
    */
   testWebhookEndpoint(endpointId: string): Promise<WebhookTestResult>;
+  /**
+   * Mengirim ulang **satu kiriman yang benar-benar terjadi** (mis. `stock.changed`
+   * dari penjualan yang gagal terkirim karena rahasia penanda tangan belum cocok
+   * dengan penerima). Badan kirimannya tidak diubah, jadi penerima mengenali `id`
+   * yang sama — bukan kejadian kedua. Menunggu atau menyerah boleh dikirim ulang;
+   * yang sudah terkirim ditolak.
+   */
+  retryWebhookDelivery(deliveryId: string): Promise<WebhookRetryResult>;
   /**
    * Dukungan khusus (`support.dedicated`, Phase 5): tiket tenant beserta janji
    * SLA paket ini. Selalu berbentuk daftar kosong untuk peran tanpa izin
